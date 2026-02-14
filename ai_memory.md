@@ -9,3 +9,4 @@
 - [2026-02-14] DECISION :: Canonical time handling is fixed project-wide: persist timestamps in UTC and apply Asia/Jerusalem for UI and business date boundaries.
 - [2026-02-14] DECISION :: MVP keeps reverse-proxy authentication boundary but defers proxy-header trust hardening checks to post-MVP.
 - [2026-02-14] PATTERN :: MVP.md includes a specification-freeze checklist requiring concrete values for natural keys, fallback hierarchies, corporate-action allowlist, tolerance matrix, SLO targets, CSV contracts, and derived-data retention windows.
+- [2026-02-14] DECISION :: MVP_spec_freeze.md now contains a frozen v1 baseline from references: execution-id keyed trade dedup (`ib_exec_id`), deterministic EOD/FX fallback order, explicit corporate-action auto/manual allowlist, tolerance formulas and thresholds, SLO targets, CSV column contracts, and derived-diagnostics retention windows.

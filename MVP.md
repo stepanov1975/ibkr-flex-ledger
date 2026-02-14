@@ -27,6 +27,9 @@ Rules:
 6. **Reconciliation mode**: side-by-side comparison of computed values vs broker-oriented view, with diff visibility by day and instrument.
 7. **Operational reliability**: strict validation for schema drift, replay/reprocess capability from raw data, deterministic jobs, and diagnostics for failed runs.
 
+Specification reference:
+- `MVP_spec_freeze.md` is the authoritative source for frozen MVP implementation values (natural keys, fallback rules, tolerances, SLOs, CSV contracts, retention windows).
+
 ---
 
 ## 1. Objective and Scope
@@ -107,6 +110,8 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Reliability SLOs must define concrete targets for ingestion success, run duration, and recovery time.
 - CSV export contracts must define per-endpoint column names, order, and data types with schema version labels.
 - Derived diagnostics retention must define concrete retention windows and archival trigger criteria.
+
+Working artifact: `MVP_spec_freeze.md` is the authoritative template for these decisions.
 
 ---
 

@@ -34,20 +34,23 @@ The MVP is well-scoped and modular, with clear layer boundaries, a reproducibili
 
 ### Still Open (needs concrete values/specs)
 
+None. All previously open specification items were finalized in `MVP_spec_freeze.md` (v1 baseline, 2026-02-14).
+
+Finalized references:
 1. **Canonical event natural keys by type**
-	- Exact key field sets for `trade_fill`, `cashflow`, `fx`, and `corp_action` still need explicit specification.
+	- Finalized in `MVP_spec_freeze.md` section 1.
 2. **Fallback hierarchies as concrete ordered lists**
-	- EOD mark and FX fallback sources require exact priority definitions and deterministic tie-break rules.
+	- Finalized in `MVP_spec_freeze.md` section 2.
 3. **Corporate action allowlist detail**
-	- Exact action types included in auto-resolution vs mandatory manual are not yet enumerated.
+	- Finalized in `MVP_spec_freeze.md` section 3.
 4. **Tolerance matrix values**
-	- Absolute/relative thresholds and currency precision need explicit numeric values.
+	- Finalized in `MVP_spec_freeze.md` section 4.
 5. **SLO target values**
-	- Ingestion success threshold, max run duration, and recovery-time targets remain to be quantified.
+	- Finalized in `MVP_spec_freeze.md` section 5.
 6. **CSV contracts per endpoint**
-	- Concrete per-endpoint column schemas and version labels still need to be finalized.
+	- Finalized in `MVP_spec_freeze.md` section 6.
 7. **Derived-data retention windows**
-	- Exact retention durations and archival trigger criteria are not yet specified.
+	- Finalized in `MVP_spec_freeze.md` section 7.
 
 ## Assumptions to Clarify and Freeze
 
