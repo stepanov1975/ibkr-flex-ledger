@@ -58,6 +58,27 @@ class AppSettings(BaseSettings):
         return value
 
 
+class DatabaseUrlSettings(BaseSettings):
+    """Minimal settings model used by migration tooling.
+
+    This model intentionally validates only database connectivity inputs so
+    schema migration commands can run without requiring full runtime
+    application settings.
+
+    Attributes:
+        database_url: PostgreSQL DSN for schema migrations.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    database_url: str = Field(default="postgresql+psycopg://postgres:postgres@localhost:5432/postgres")
+
+
 def config_load_settings() -> AppSettings:
     """Load and validate runtime settings from environment and dotenv.
 
@@ -74,3 +95,26 @@ def config_load_settings() -> AppSettings:
         raise SettingsLoadError(
             f"Startup configuration validation failed. Update .env or environment variables. Details: {error}"
         ) from error
+
+
+def config_load_database_url() -> str:
+    """Load and validate only the database URL setting.
+
+    Returns:
+        str: Non-empty database URL for migration and db tooling.
+
+    Raises:
+        SettingsLoadError: Raised when database URL cannot be loaded.
+    """
+
+    try:
+        database_settings = DatabaseUrlSettings()
+    except ValidationError as error:
+        raise SettingsLoadError(
+            f"Database URL configuration validation failed. Update .env or environment variables. Details: {error}"
+        ) from error
+
+    database_url = str(database_settings.database_url).strip()
+    if not database_url:
+        raise SettingsLoadError("Database URL configuration validation failed. DATABASE_URL must not be blank.")
+    return database_url

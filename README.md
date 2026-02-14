@@ -153,12 +153,51 @@ Runtime settings are defined in `app/config/settings.py` and loaded in this orde
 1. Environment variables
 2. `.env` file values
 
+Credential storage guidance:
+
+- Keep real credentials in local `.env` only (gitignored).
+- Use `.env.example` as the committed template for required variables.
+- `docker-compose.yml` reads credentials from environment-variable interpolation and should not contain hardcoded secrets.
+
 Required settings for startup validation:
 
 - `IBKR_FLEX_TOKEN`
 - `IBKR_FLEX_QUERY_ID`
 
 If required settings are missing or invalid, startup fails with actionable validation output.
+
+## Schema and migrations baseline (Task 2)
+
+Task 2 introduces a full MVP schema baseline and migration workflow.
+
+Included baseline tables:
+
+- `instrument`, `label`, `instrument_label`, `note`
+- `ingestion_run`, `raw_record`
+- `event_trade_fill`, `event_cashflow`, `event_fx`, `event_corp_action`
+- `position_lot`, `pnl_snapshot_daily`
+
+Key implementation decisions:
+
+- Full column-level MVP schema is implemented in Task 2 (no partial placeholder schema).
+- UUID primary keys are database-generated with PostgreSQL `gen_random_uuid()`.
+- Canonical event natural-key constraints follow `MVP_spec_freeze.md` names and contracts.
+
+Migration files and configuration:
+
+- `alembic.ini`
+- `alembic/env.py`
+- `alembic/versions/20260214_01_task2_mvp_schema_baseline.py`
+
+Run migrations:
+
+```bash
+alembic upgrade head
+```
+
+Migration usage details:
+
+- `docs/migrations.md`
 
 ## VS Code virtual environment setup
 
