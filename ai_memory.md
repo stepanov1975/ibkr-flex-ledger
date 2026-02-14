@@ -51,3 +51,4 @@
 - [2026-02-14] DECISION :: Task 4 raw persistence uses dedicated immutable `raw_artifact` table with DB-enforced unique key (`account_id`, `period_key`, `flex_query_id`, `payload_sha256`) rather than `raw_record`-only dedupe.
 - [2026-02-14] PATTERN :: Ingestion persist stage now computes payload SHA-256 once, upserts `raw_artifact`, extracts section rows from all detected Flex sections, and writes conflict-aware `raw_record` rows linked by `raw_artifact_id`.
 - [2026-02-14] DECISION :: Duplicate raw artifact ingests remain normal successful runs; diagnostics explicitly expose dedupe/no-op outcomes (`raw_artifact_deduplicated`, inserted/deduplicated row counts).
+- [2026-02-14] PATTERN :: Live ingestion troubleshooting rule: when preflight emits `MISSING_REQUIRED_SECTION`, request the operator to add the missing sections in IBKR Flex query configuration before re-running.

@@ -224,6 +224,11 @@ Included behavior:
 - Structured stage timeline persisted in `ingestion_run.diagnostics` as a JSON array
 - Trigger surfaces for both API and CLI
 
+Operational note for live IBKR runs:
+
+- If ingestion fails with `MISSING_REQUIRED_SECTION`, update the IBKR Flex query configuration to include the missing sections, then re-run ingestion.
+- During assisted troubleshooting, the operator should be asked to add missing sections in IBKR query settings before retrying.
+
 API endpoints:
 
 - `POST /ingestion/run`

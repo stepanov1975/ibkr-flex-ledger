@@ -16,11 +16,15 @@ Set `DATABASE_URL` according to where the migration command runs:
 
 - Command executed in host shell:
 
+Recommended default in local `.env` for host-shell commands (`alembic`, `pytest`, `python -m app.main`):
+
 ```bash
 export DATABASE_URL=postgresql+psycopg://stock_user:stock_password@127.0.0.1:5433/stock_app
 ```
 
 - Command executed inside Docker network:
+
+Use this only when the migration command itself runs inside Docker network context:
 
 ```bash
 export DATABASE_URL=postgresql+psycopg://stock_user:stock_password@postgres:5432/stock_app
