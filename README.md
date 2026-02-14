@@ -125,6 +125,41 @@ For full milestone-level acceptance criteria and implementation details, see:
 	pip install -r requirements-dev.txt
 	```
 
+## Runtime foundation (Task 1)
+
+The Task 1 runtime foundation now includes:
+
+- FastAPI application skeleton with modular layer boundaries under `app/`
+- Centralized database connectivity in `app/db/` only
+- Startup settings via `.env` plus environment variable overrides
+- Health endpoint at `GET /health` with database connectivity verification
+
+### One-command local stack (Docker Compose)
+
+```bash
+docker compose up -d
+```
+
+Service endpoints:
+
+- App: `http://127.0.0.1:8000`
+- Health: `http://127.0.0.1:8000/health`
+- PostgreSQL host port: `5433` (container port `5432`)
+
+### Configuration loading
+
+Runtime settings are defined in `app/config/settings.py` and loaded in this order:
+
+1. Environment variables
+2. `.env` file values
+
+Required settings for startup validation:
+
+- `IBKR_FLEX_TOKEN`
+- `IBKR_FLEX_QUERY_ID`
+
+If required settings are missing or invalid, startup fails with actionable validation output.
+
 ## VS Code virtual environment setup
 
 This workspace is configured to automatically use the project virtual environment.
