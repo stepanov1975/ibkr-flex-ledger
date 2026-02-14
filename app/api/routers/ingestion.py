@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import AppSettings
 from app.db import IngestionRunAlreadyActiveError, IngestionRunRecord, IngestionRunRepositoryPort
-from app.jobs import JobOrchestratorPort
+from app.jobs import JobOrchestratorPort, job_extract_missing_sections_from_diagnostics
 
 
 def api_create_ingestion_router(
@@ -120,6 +120,41 @@ def api_create_ingestion_router(
             content=api_serialize_ingestion_run_record(run_record),
             status_code=status.HTTP_200_OK,
         )
+
+    @router.get("/runs/{ingestion_run_id}/missing-sections")
+    def api_ingestion_run_missing_sections(ingestion_run_id: UUID) -> JSONResponse:
+        """Return extracted missing-section diagnostics for one ingestion run.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            JSONResponse: Missing-section diagnostics payload or 404 when absent.
+
+        Raises:
+            RuntimeError: Raised when repository read fails.
+        """
+
+        run_record = ingestion_repository.db_ingestion_run_get_by_id(ingestion_run_id=ingestion_run_id)
+        if run_record is None:
+            payload = {
+                "status": "error",
+                "message": "ingestion run not found",
+            }
+            return JSONResponse(content=payload, status_code=status.HTTP_404_NOT_FOUND)
+
+        missing_sections_payload = job_extract_missing_sections_from_diagnostics(
+            diagnostics=run_record.state.diagnostics,
+        )
+        payload = {
+            "ingestion_run_id": str(run_record.ingestion_run_id),
+            "status": run_record.state.status,
+            "error_code": run_record.state.error_code,
+            "missing_sections": missing_sections_payload["missing_sections"],
+            "missing_hard_required": missing_sections_payload["missing_hard_required"],
+            "missing_reconciliation_required": missing_sections_payload["missing_reconciliation_required"],
+        }
+        return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
 
     return router
 

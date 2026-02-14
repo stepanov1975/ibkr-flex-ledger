@@ -220,7 +220,16 @@ def _build_run_record() -> IngestionRunRecord:
             duration_ms=123,
             error_code="MISSING_REQUIRED_SECTION",
             error_message="missing required sections",
-            diagnostics=[{"stage": "preflight", "status": "failed"}],
+            diagnostics=[
+                {
+                    "stage": "preflight",
+                    "status": "failed",
+                    "error_code": "MISSING_REQUIRED_SECTION",
+                    "missing_sections": ["OpenPositions", "CashTransactions"],
+                    "missing_hard_required": ["OpenPositions", "CashTransactions"],
+                    "missing_reconciliation_required": [],
+                }
+            ],
         ),
         created_at_utc=started_at,
     )
@@ -277,3 +286,30 @@ def test_api_ingestion_run_detail_includes_status_and_timeline() -> None:
     assert payload["status"] == "failed"
     assert isinstance(payload["diagnostics"], list)
     assert payload["diagnostics"][0]["stage"] == "preflight"
+
+
+def test_api_ingestion_missing_sections_endpoint_returns_exact_sections() -> None:
+    """Return extracted missing section details for failed preflight runs.
+
+    Returns:
+        None: Assertions validate payload values.
+
+    Raises:
+        AssertionError: Raised when payload does not include expected section names.
+    """
+
+    run_record = _build_run_record()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get(f"/ingestion/runs/{run_record.ingestion_run_id}/missing-sections")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["error_code"] == "MISSING_REQUIRED_SECTION"
+    assert "OpenPositions" in payload["missing_sections"]

@@ -8,6 +8,24 @@ Scope: Task 2 migration workflow
 - PostgreSQL reachable via `DATABASE_URL`.
 - Python environment with dependencies from `requirements.txt` installed.
 
+## Docker-only database guidance
+
+This project standardizes on Docker PostgreSQL for local runtime and migration workflows.
+
+Set `DATABASE_URL` according to where the migration command runs:
+
+- Command executed in host shell:
+
+```bash
+export DATABASE_URL=postgresql+psycopg://stock_user:stock_password@127.0.0.1:5433/stock_app
+```
+
+- Command executed inside Docker network:
+
+```bash
+export DATABASE_URL=postgresql+psycopg://stock_user:stock_password@postgres:5432/stock_app
+```
+
 ## Commands
 
 Run migrations to head:

@@ -9,6 +9,8 @@ import uvicorn
 
 from app.bootstrap import bootstrap_create_application, bootstrap_create_ingestion_orchestrator
 from app.config import config_load_settings
+from app.db import SQLAlchemyIngestionRunService, db_create_engine
+from app.jobs import job_extract_missing_sections_from_diagnostics
 
 
 def main() -> None:
@@ -36,6 +38,7 @@ def main() -> None:
         ingestion_orchestrator = bootstrap_create_ingestion_orchestrator()
         execution_result = ingestion_orchestrator.job_execute(job_name="ingestion_run")
         if execution_result.status != "success":
+            main_print_latest_missing_sections_diagnostics()
             raise SystemExit(1)
         return
 
@@ -46,6 +49,29 @@ def main() -> None:
         host=settings.application_host,
         port=settings.application_port,
     )
+
+def main_print_latest_missing_sections_diagnostics() -> None:
+    """Print missing-section diagnostics from the latest ingestion run.
+
+    Returns:
+        None: Prints diagnostics to stdout as side effect.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    settings = config_load_settings()
+    engine = db_create_engine(database_url=settings.database_url)
+    repository = SQLAlchemyIngestionRunService(engine=engine)
+    latest_runs = repository.db_ingestion_run_list(limit=1, offset=0)
+    if not latest_runs:
+        return
+
+    diagnostics = latest_runs[0].state.diagnostics
+    missing_sections_payload = job_extract_missing_sections_from_diagnostics(diagnostics=diagnostics)
+    missing_sections = missing_sections_payload["missing_sections"]
+    if missing_sections:
+        print("MISSING_REQUIRED_SECTION:", ", ".join(missing_sections))
 
 
 if __name__ == "__main__":

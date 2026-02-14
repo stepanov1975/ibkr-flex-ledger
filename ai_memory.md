@@ -1,7 +1,7 @@
 - [2026-02-14] DECISION :: MVP scope documented in MVP.md with seven core feature groups: ingestion, canonical events, stocks-first ledger, labels/notes, reporting drilldown, reconciliation modes, and operational reliability gates.
 - [2026-02-14] DECISION :: Modular-first policy is mandatory: structure MVP modules for future phase expansion, but do not implement max_plan.md phase 2+ features in initial delivery.
 - [2026-02-14] DECISION :: Database access boundary is strict: only db-layer modules execute SQL/ORM queries; all other layers must use db interfaces/repositories.
-- [2026-02-14] DECISION :: Environment baseline includes PostgreSQL 17 installed with cluster 17/main online on port 5432.
+- [2026-02-14] DECISION :: Local runtime is standardized to Docker PostgreSQL; host PostgreSQL server package was removed to prevent host/container DATABASE_URL drift.
 - [2026-02-14] PATTERN :: Keep external IBKR/Flex repositories under references/ as read-only study material; reuse architecture patterns (parser boundary, poll-download flow, report section checklist) without direct code copy.
 - [2026-02-14] DECISION :: Pre-implementation protocol requires scanning references/REFERENCE_NOTES.md before any feature work or significant bug fix to maximize reuse and prevent duplicate design effort.
 - [2026-02-14] DECISION :: MVP.md now encodes resolved evaluation policies as explicit requirements: idempotency (period_key + flex_query_id + sha256 plus canonical UPSERT), conid-first identity, EOD mark and FX fallback rules, reconciliation tolerance policy, manual corporate-action workflow, reverse-proxy auth boundary, retention defaults, missing-section failure handling, and CSV export baseline.
@@ -47,3 +47,4 @@
 - [2026-02-14] PATTERN :: Ingestion run overlap prevention uses account-scoped PostgreSQL advisory transaction locks plus active `status='started'` check, raising deterministic `run already active` conflict semantics.
 - [2026-02-14] PATTERN :: Required Flex section preflight is centralized in `app/jobs/section_preflight.py` with frozen hard/reconciliation matrices and deterministic `MISSING_REQUIRED_SECTION` diagnostics payload.
 - [2026-02-14] PATTERN :: Stage timeline diagnostics are standardized as JSON array events (`stage`, `status`, `at_utc`, optional `details`) via `app/domain/timeline.py` and persisted in `ingestion_run.diagnostics`.
+- [2026-02-14] PATTERN :: DATABASE_URL selection must follow execution mode: host-shell commands use `127.0.0.1:5433`, container-network commands use `postgres:5432`.

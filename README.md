@@ -146,6 +146,18 @@ Service endpoints:
 - Health: `http://127.0.0.1:8000/health`
 - PostgreSQL host port: `5433` (container port `5432`)
 
+### Database runtime mode (Docker-only recommended)
+
+Project runtime is standardized on Docker PostgreSQL.
+
+- Recommended: do not run a host PostgreSQL server for this project.
+- Keep database service in Docker Compose only to avoid hostname/port drift.
+
+`DATABASE_URL` must match where the app process runs:
+
+- App running inside Docker network: `postgresql+psycopg://stock_user:stock_password@postgres:5432/stock_app`
+- App running from host shell: `postgresql+psycopg://stock_user:stock_password@127.0.0.1:5433/stock_app`
+
 ### Configuration loading
 
 Runtime settings are defined in `app/config/settings.py` and loaded in this order:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -149,6 +150,10 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         if status not in {"success", "failed"}:
             raise ValueError("status must be one of: success, failed")
 
+        diagnostics_payload = None
+        if diagnostics is not None:
+            diagnostics_payload = json.dumps(diagnostics)
+
         try:
             with self._engine.begin() as connection:
                 updated_row = connection.execute(
@@ -167,7 +172,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "status": status,
                         "error_code": error_code,
                         "error_message": error_message,
-                        "diagnostics": diagnostics,
+                        "diagnostics": diagnostics_payload,
                         "ingestion_run_id": ingestion_run_id,
                     },
                 ).mappings().first()
