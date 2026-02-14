@@ -60,6 +60,7 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 - Docker Compose services: app + PostgreSQL
 - Reverse proxy provides authentication boundary
 - Cron executes ingestion CLI
+- Current environment baseline: PostgreSQL `17/main` is already installed and online on `5432`
 
 ### Logical Layers
 1. **Adapter layer**: fetches Flex reports and persists immutable payloads.

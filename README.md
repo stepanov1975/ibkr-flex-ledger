@@ -59,6 +59,12 @@ Modularity rule: architecture must be prepared for future domains without forcin
 
 Data-access rule: API routes, services, adapters, CLI, and jobs must use database-layer interfaces/repositories rather than issuing direct SQL/ORM queries.
 
+## Environment status
+
+- PostgreSQL server is already installed in this environment.
+- Active cluster: `17/main`
+- Status: online and accepting connections on port `5432`
+
 ## Data model highlights
 
 Core entities:
