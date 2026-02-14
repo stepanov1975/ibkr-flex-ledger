@@ -139,12 +139,18 @@ def _job_raw_try_parse_local_date(value: str) -> date | None:
     if not normalized_value:
         return None
 
-    supported_formats = ("%Y-%m-%d", "%Y%m%d")
-    for date_format in supported_formats:
-        try:
-            return datetime.strptime(normalized_value, date_format).date()
-        except ValueError:
-            continue
+    candidate_values = [normalized_value]
+    for separator in (";", "T", " "):
+        if separator in normalized_value:
+            candidate_values.append(normalized_value.split(separator, maxsplit=1)[0])
+
+    for candidate_value in candidate_values:
+        supported_formats = ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d")
+        for date_format in supported_formats:
+            try:
+                return datetime.strptime(candidate_value, date_format).date()
+            except ValueError:
+                continue
     return None
 
 

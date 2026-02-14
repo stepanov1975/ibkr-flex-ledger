@@ -395,3 +395,42 @@ def test_db_canonical_cashflow_upsert_marks_correction_on_changed_amount() -> No
         else:
             os.environ["DATABASE_URL"] = previous_database_url
         _upsert_drop_database(admin_url=admin_url, database_name=database_name)
+
+
+def test_db_canonical_trade_fill_upsert_rejects_non_uuid_text_values() -> None:
+    """Reject malformed UUID text even when string length is 36 characters.
+
+    Returns:
+        None: Assertions validate strict UUID validation.
+
+    Raises:
+        AssertionError: Raised when malformed UUID text is accepted.
+    """
+
+    service = SQLAlchemyCanonicalPersistenceService(engine=create_engine("sqlite:///:memory:"))
+
+    with pytest.raises(ValueError, match="must be a valid UUID string"):
+        service.db_canonical_trade_fill_upsert(
+            CanonicalTradeFillUpsertRequest(
+                account_id="U_TEST",
+                instrument_id="zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+                ingestion_run_id=str(uuid.uuid4()),
+                source_raw_record_id=str(uuid.uuid4()),
+                ib_exec_id="EXEC-INVALID",
+                transaction_id="TX-INVALID",
+                trade_timestamp_utc="2026-02-14T10:00:00+00:00",
+                report_date_local="2026-02-14",
+                side="BUY",
+                quantity="1",
+                price="1",
+                cost="1",
+                commission="0",
+                fees="0",
+                realized_pnl="0",
+                net_cash="-1",
+                net_cash_in_base="-1",
+                fx_rate_to_base="1",
+                currency="USD",
+                functional_currency="USD",
+            )
+        )

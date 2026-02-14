@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -38,6 +38,19 @@ class MappingServiceConfig:
 
         return self.default_asset_category
 
+    def mapping_validate(self) -> None:
+        """Validate mapping configuration values.
+
+        Returns:
+            None: This method does not return a value.
+
+        Raises:
+            ValueError: Raised when configured defaults are invalid.
+        """
+
+        if not self.default_asset_category.strip():
+            raise ValueError("config.default_asset_category must not be blank")
+
 
 class CanonicalMappingService:
     """Concrete mapping service for canonical event transformations."""
@@ -56,10 +69,21 @@ class CanonicalMappingService:
         """
 
         resolved_config = config or MappingServiceConfig()
-        if not resolved_config.default_asset_category.strip():
-            raise ValueError("config.default_asset_category must not be blank")
+        resolved_config.mapping_validate()
 
         self._config = resolved_config
+
+    def mapping_contract_version(self) -> str:
+        """Return mapping contract version identifier.
+
+        Returns:
+            str: Mapping contract version string.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        return "v1"
 
     def mapping_build_canonical_batch(
         self,
@@ -410,7 +434,12 @@ class CanonicalMappingService:
 
         payload_report_date = self._mapping_optional_value(payload, "reportDate")
         if payload_report_date is not None:
-            parsed_date = datetime.fromisoformat(payload_report_date).date()
+            parsed_date = self._mapping_try_parse_report_date(payload_report_date)
+            if parsed_date is None:
+                raise MappingContractViolationError(
+                    "mapping contract violation: invalid reportDate format "
+                    f"for {raw_record.section_name} at {raw_record.source_row_ref}: {payload_report_date}"
+                )
             return parsed_date.isoformat()
 
         if raw_record.report_date_local is not None:
@@ -419,6 +448,55 @@ class CanonicalMappingService:
         raise MappingContractViolationError(
             f"mapping contract violation: missing report date for {raw_record.section_name} at {raw_record.source_row_ref}"
         )
+
+    def _mapping_try_parse_report_date(self, value: str) -> date | None:
+        """Try parse report date across common IBKR date representations.
+
+        Args:
+            value: Report date string from source payload.
+
+        Returns:
+            date | None: Parsed date or None when format is not supported.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            return None
+
+        candidate_values: list[str] = [normalized_value]
+        for separator in (";", "T", " "):
+            if separator in normalized_value:
+                candidate_values.append(normalized_value.split(separator, maxsplit=1)[0])
+
+        seen_values: set[str] = set()
+        unique_candidates: list[str] = []
+        for candidate in candidate_values:
+            if candidate in seen_values:
+                continue
+            seen_values.add(candidate)
+            unique_candidates.append(candidate)
+
+        for candidate in unique_candidates:
+            try:
+                return date.fromisoformat(candidate)
+            except ValueError:
+                pass
+
+            try:
+                return datetime.fromisoformat(candidate).date()
+            except ValueError:
+                pass
+
+            for supported_format in ("%Y/%m/%d", "%Y-%m-%d", "%Y%m%d"):
+                try:
+                    return datetime.strptime(candidate, supported_format).date()
+                except ValueError:
+                    continue
+
+        return None
 
     def _mapping_required_value(self, payload: dict[str, object], key: str, raw_record: RawRecordForMapping) -> str:
         """Extract required string value from source payload.

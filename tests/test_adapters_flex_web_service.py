@@ -81,3 +81,51 @@ def test_adapters_flex_poll_retries_on_throttled_error_code_1018(monkeypatch: py
 
     assert result.payload_bytes == success_payload
     assert any(seconds >= 10 for seconds in sleep_calls)
+
+
+def test_adapters_flex_poll_retries_on_server_busy_error_code_1009(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry polling when upstream returns server-busy code 1009.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions validate retry behavior and successful payload return.
+
+    Raises:
+        AssertionError: Raised when retry behavior is not respected.
+    """
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=0,
+        retry_attempts=2,
+        retry_increment_seconds=0,
+    )
+
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    server_busy_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1009</ErrorCode>"
+        b"<ErrorMessage>Server busy</ErrorMessage></FlexStatementResponse>"
+    )
+    success_payload = b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement /></FlexStatements></FlexQueryResponse>"
+    payload_sequence = [request_success_payload, server_busy_payload, success_payload]
+    sleep_calls: list[float] = []
+
+    def _fake_http_get(url: str, query_parameters: dict[str, str]) -> bytes:
+        _ = (url, query_parameters)
+        return payload_sequence.pop(0)
+
+    def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
+    monkeypatch.setattr(flex_module.time, "sleep", _fake_sleep)
+
+    result = adapter.adapter_fetch_report(query_id="query-id")
+
+    assert result.payload_bytes == success_payload
+    assert any(seconds >= 5 for seconds in sleep_calls)

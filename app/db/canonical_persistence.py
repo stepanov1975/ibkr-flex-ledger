@@ -708,9 +708,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         """
 
         normalized_value = self._db_canonical_validate_non_empty_text(value, field_name)
-        if len(normalized_value) != 36:
-            raise ValueError(f"{field_name} must be a UUID string")
-        return normalized_value
+        try:
+            parsed_uuid = UUID(normalized_value)
+        except ValueError as error:
+            raise ValueError(f"{field_name} must be a valid UUID string") from error
+        return str(parsed_uuid)
 
     def _db_canonical_validate_optional_uuid_text(self, value: str | None) -> str | None:
         """Validate optional UUID text values.
@@ -728,9 +730,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         normalized_value = self._db_canonical_validate_optional_text(value)
         if normalized_value is None:
             return None
-        if len(normalized_value) != 36:
-            raise ValueError("optional UUID value must be a UUID string")
-        return normalized_value
+        try:
+            parsed_uuid = UUID(normalized_value)
+        except ValueError as error:
+            raise ValueError("optional UUID value must be a valid UUID string") from error
+        return str(parsed_uuid)
 
 
 __all__ = [

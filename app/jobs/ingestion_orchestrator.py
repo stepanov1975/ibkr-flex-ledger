@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import traceback
 
 from app.adapters import FlexAdapterPort
 from app.db import (
@@ -149,28 +150,12 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
 
             if not preflight_result.section_preflight_is_valid():
-                missing_diagnostics = job_section_preflight_build_missing_required_diagnostics(preflight_result)
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="preflight",
-                        status="failed",
-                        details={
-                            "error_code": MISSING_REQUIRED_SECTION_CODE,
-                            "missing_hard_required": list(preflight_result.missing_hard_required),
-                            "missing_reconciliation_required": list(preflight_result.missing_reconciliation_required),
-                        },
-                    )
+                return self._job_handle_preflight_failure(
+                    run_record=run_record,
+                    preflight_result=preflight_result,
+                    timeline=timeline,
+                    normalized_job_name=normalized_job_name,
                 )
-                timeline.extend(missing_diagnostics)
-                timeline.append(domain_build_stage_event(stage="run", status="failed"))
-                self._ingestion_repository.db_ingestion_run_finalize(
-                    ingestion_run_id=run_record.ingestion_run_id,
-                    status="failed",
-                    error_code=MISSING_REQUIRED_SECTION_CODE,
-                    error_message="missing required sections",
-                    diagnostics=timeline,
-                )
-                return JobExecutionResult(job_name=normalized_job_name, status="failed")
 
             timeline.append(
                 domain_build_stage_event(
@@ -277,19 +262,91 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 diagnostics=timeline,
             )
             return JobExecutionResult(job_name=normalized_job_name, status="success")
-        except Exception as error:
+        except (TimeoutError, ConnectionError, ValueError, RuntimeError) as error:
+            error_code = self._job_error_code_for_exception(error)
+
             timeline.append(
                 domain_build_stage_event(
                     stage="run",
                     status="failed",
-                    details={"error_type": type(error).__name__, "error_message": str(error)},
+                    details={
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                        "traceback": traceback.format_exc(),
+                    },
                 )
             )
             self._ingestion_repository.db_ingestion_run_finalize(
                 ingestion_run_id=run_record.ingestion_run_id,
                 status="failed",
-                error_code="INGESTION_UNEXPECTED_ERROR",
+                error_code=error_code,
                 error_message=str(error),
                 diagnostics=timeline,
             )
-            raise RuntimeError("ingestion job execution failed") from error
+            return JobExecutionResult(job_name=normalized_job_name, status="failed")
+
+    def _job_handle_preflight_failure(
+        self,
+        run_record,
+        preflight_result,
+        timeline: list[dict[str, object]],
+        normalized_job_name: str,
+    ) -> JobExecutionResult:
+        """Finalize run with deterministic preflight-missing-section failure payload.
+
+        Args:
+            run_record: Started ingestion run record.
+            preflight_result: Required-section preflight result.
+            timeline: Mutable stage timeline events.
+            normalized_job_name: Validated job name.
+
+        Returns:
+            JobExecutionResult: Failed execution result.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        missing_diagnostics = job_section_preflight_build_missing_required_diagnostics(preflight_result)
+        timeline.append(
+            domain_build_stage_event(
+                stage="preflight",
+                status="failed",
+                details={
+                    "error_code": MISSING_REQUIRED_SECTION_CODE,
+                    "missing_hard_required": list(preflight_result.missing_hard_required),
+                    "missing_reconciliation_required": list(preflight_result.missing_reconciliation_required),
+                },
+            )
+        )
+        timeline.extend(missing_diagnostics)
+        timeline.append(domain_build_stage_event(stage="run", status="failed"))
+        self._ingestion_repository.db_ingestion_run_finalize(
+            ingestion_run_id=run_record.ingestion_run_id,
+            status="failed",
+            error_code=MISSING_REQUIRED_SECTION_CODE,
+            error_message="missing required sections",
+            diagnostics=timeline,
+        )
+        return JobExecutionResult(job_name=normalized_job_name, status="failed")
+
+    def _job_error_code_for_exception(self, error: Exception) -> str:
+        """Map runtime exception type to deterministic ingestion failure code.
+
+        Args:
+            error: Caught workflow exception.
+
+        Returns:
+            str: Deterministic error code.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        if isinstance(error, TimeoutError):
+            return "INGESTION_TIMEOUT_ERROR"
+        if isinstance(error, ConnectionError):
+            return "INGESTION_CONNECTION_ERROR"
+        if isinstance(error, ValueError):
+            return "INGESTION_CONTRACT_ERROR"
+        return "INGESTION_UNEXPECTED_ERROR"

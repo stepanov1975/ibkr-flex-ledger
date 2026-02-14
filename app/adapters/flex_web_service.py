@@ -19,9 +19,12 @@ class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
     _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/urllib.request)"
+    _SERVER_BUSY_ERROR_CODE: Final[str] = "1009"
     _NOT_READY_ERROR_CODE: Final[str] = "1019"
     _THROTTLED_ERROR_CODE: Final[str] = "1018"
-    _RETRYABLE_POLL_ERROR_CODES: Final[frozenset[str]] = frozenset({_NOT_READY_ERROR_CODE, _THROTTLED_ERROR_CODE})
+    _RETRYABLE_POLL_ERROR_CODES: Final[frozenset[str]] = frozenset(
+        {_SERVER_BUSY_ERROR_CODE, _NOT_READY_ERROR_CODE, _THROTTLED_ERROR_CODE}
+    )
 
     def __init__(
         self,
@@ -309,6 +312,8 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         if error_code == self._THROTTLED_ERROR_CODE:
             return max(10, self._retry_increment_seconds)
+        if error_code == self._SERVER_BUSY_ERROR_CODE:
+            return max(5, self._retry_increment_seconds)
         return max(5, self._retry_increment_seconds)
 
     def _adapter_parse_xml(self, payload: bytes, context_label: str) -> element_tree.Element:

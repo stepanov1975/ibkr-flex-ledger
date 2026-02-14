@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import traceback
 
 from app.db import CanonicalPersistenceRepositoryPort, IngestionRunRepositoryPort, RawRecordReadRepositoryPort
 from app.domain import domain_build_stage_event
@@ -207,7 +208,15 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     diagnostics=timeline,
                 )
             return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
-        except Exception as error:
+        except (TimeoutError, ConnectionError, ValueError, RuntimeError) as error:
+            error_code = "REPROCESS_UNEXPECTED_ERROR"
+            if isinstance(error, TimeoutError):
+                error_code = "REPROCESS_TIMEOUT_ERROR"
+            elif isinstance(error, ConnectionError):
+                error_code = "REPROCESS_CONNECTION_ERROR"
+            elif isinstance(error, ValueError):
+                error_code = "REPROCESS_CONTRACT_ERROR"
+
             timeline.append(
                 domain_build_stage_event(
                     stage="run",
@@ -215,6 +224,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     details={
                         "error_type": type(error).__name__,
                         "error_message": str(error),
+                        "traceback": traceback.format_exc(),
                         "failed_at_utc": datetime.now(timezone.utc).isoformat(),
                     },
                 )
@@ -223,11 +233,11 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 self._ingestion_repository.db_ingestion_run_finalize(
                     ingestion_run_id=run_record.ingestion_run_id,
                     status="failed",
-                    error_code="REPROCESS_UNEXPECTED_ERROR",
+                    error_code=error_code,
                     error_message=str(error),
                     diagnostics=timeline,
                 )
-            raise RuntimeError("canonical reprocess execution failed") from error
+            return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="failed")
 
     def _job_reprocess_validate_period_key(self, period_key: str) -> str:
         """Validate explicit replay period key format.

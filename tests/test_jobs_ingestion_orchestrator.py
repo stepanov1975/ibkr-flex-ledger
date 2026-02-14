@@ -317,9 +317,49 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
 
     assert result.status == "success"
     assert repository_stub.finalize_calls[0]["status"] == "success"
+
+
+def test_jobs_ingestion_orchestrator_returns_failed_result_on_adapter_timeout() -> None:
+    """Return failed result and finalize diagnostics when adapter times out.
+
+    Returns:
+        None: Assertions validate graceful failure behavior.
+
+    Raises:
+        AssertionError: Raised when timeout is propagated as unhandled exception.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+
+    class _TimeoutAdapterStub(_AdapterStub):
+        def adapter_fetch_report(self, query_id: str) -> AdapterFetchResult:
+            _ = query_id
+            raise TimeoutError("upstream timeout")
+
+    repository_stub = _RepositoryStub()
+    adapter_stub = _TimeoutAdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "failed"
+    assert repository_stub.finalize_calls[0]["status"] == "failed"
+    assert repository_stub.finalize_calls[0]["error_code"] == "INGESTION_TIMEOUT_ERROR"
     diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
     assert isinstance(diagnostics, list)
-    assert any(event["stage"] == "persist" for event in diagnostics)
+    failed_run_events = [event for event in diagnostics if event.get("stage") == "run" and event.get("status") == "failed"]
+    assert len(failed_run_events) == 1
 
 
 def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_details() -> None:

@@ -243,3 +243,80 @@ def test_mapping_build_canonical_batch_skips_non_execution_trades_rows() -> None
     )
 
     assert len(mapped_batch.trade_fill_requests) == 0
+
+
+def test_mapping_build_canonical_batch_accepts_compact_report_date_format() -> None:
+    """Accept compact reportDate format used by some IBKR payloads.
+
+    Returns:
+        None: Assertions validate deterministic date normalization.
+
+    Raises:
+        AssertionError: Raised when compact date cannot be parsed.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1003",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1003",
+                "transactionID": "1003",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "20260214",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.trade_fill_requests) == 1
+    assert mapped_batch.trade_fill_requests[0].report_date_local == "2026-02-14"
+
+
+def test_mapping_build_canonical_batch_accepts_slash_report_date_format() -> None:
+    """Accept slash-separated reportDate values emitted by some legacy exports.
+
+    Returns:
+        None: Assertions validate deterministic date normalization.
+
+    Raises:
+        AssertionError: Raised when timestamped reportDate cannot be parsed.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2003",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2003",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "reportDate": "2026/02/14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.cashflow_requests) == 1
+    assert mapped_batch.cashflow_requests[0].report_date_local == "2026-02-14"
