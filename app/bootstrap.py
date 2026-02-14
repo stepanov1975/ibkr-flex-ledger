@@ -1,17 +1,25 @@
 """Application bootstrap wiring for startup validation and dependency assembly."""
 
+from datetime import datetime, timezone
+
 from fastapi import FastAPI
 
 from app.api import create_api_application
 from app.config import config_load_settings
 from app.adapters import FlexWebServiceAdapter
 from app.db import (
+    SQLAlchemyCanonicalPersistenceService,
     SQLAlchemyDatabaseHealthService,
     SQLAlchemyIngestionRunService,
     SQLAlchemyRawPersistenceService,
     db_create_engine,
 )
-from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
+from app.jobs import (
+    CanonicalReprocessOrchestrator,
+    CanonicalReprocessOrchestratorConfig,
+    IngestionJobOrchestrator,
+    IngestionOrchestratorConfig,
+)
 
 
 def bootstrap_create_application() -> FastAPI:
@@ -29,6 +37,7 @@ def bootstrap_create_application() -> FastAPI:
     db_health_service = SQLAlchemyDatabaseHealthService(engine=engine)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
+    canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
     flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
     ingestion_orchestrator = IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
@@ -39,6 +48,19 @@ def bootstrap_create_application() -> FastAPI:
             flex_query_id=settings.ibkr_flex_query_id,
             run_type="manual",
             reconciliation_enabled=False,
+            functional_currency="USD",
+        ),
+        canonical_repository=canonical_repository,
+    )
+    reprocess_orchestrator = CanonicalReprocessOrchestrator(
+        raw_read_repository=canonical_repository,
+        canonical_persistence_repository=canonical_repository,
+        ingestion_repository=ingestion_repository,
+        config=CanonicalReprocessOrchestratorConfig(
+            account_id=settings.account_id,
+            period_key=datetime.now(timezone.utc).date().isoformat(),
+            flex_query_id=settings.ibkr_flex_query_id,
+            functional_currency="USD",
         ),
     )
     return create_api_application(
@@ -46,6 +68,7 @@ def bootstrap_create_application() -> FastAPI:
         db_health_service=db_health_service,
         ingestion_repository=ingestion_repository,
         ingestion_orchestrator=ingestion_orchestrator,
+        reprocess_orchestrator=reprocess_orchestrator,
     )
 
 
@@ -63,6 +86,7 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
     engine = db_create_engine(database_url=settings.database_url)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
+    canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
     flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
     return IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
@@ -73,5 +97,34 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
             flex_query_id=settings.ibkr_flex_query_id,
             run_type="manual",
             reconciliation_enabled=False,
+            functional_currency="USD",
+        ),
+        canonical_repository=canonical_repository,
+    )
+
+
+def bootstrap_create_reprocess_orchestrator() -> CanonicalReprocessOrchestrator:
+    """Build canonical reprocess orchestrator for non-HTTP trigger surfaces.
+
+    Returns:
+        CanonicalReprocessOrchestrator: Fully wired canonical reprocess orchestrator instance.
+
+    Raises:
+        SettingsLoadError: Raised when startup configuration validation fails.
+    """
+
+    settings = config_load_settings()
+    engine = db_create_engine(database_url=settings.database_url)
+    ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
+    canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
+    return CanonicalReprocessOrchestrator(
+        raw_read_repository=canonical_repository,
+        canonical_persistence_repository=canonical_repository,
+        ingestion_repository=ingestion_repository,
+        config=CanonicalReprocessOrchestratorConfig(
+            account_id=settings.account_id,
+            period_key=datetime.now(timezone.utc).date().isoformat(),
+            flex_query_id=settings.ibkr_flex_query_id,
+            functional_currency="USD",
         ),
     )

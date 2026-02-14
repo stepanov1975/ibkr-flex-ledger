@@ -52,3 +52,9 @@
 - [2026-02-14] PATTERN :: Ingestion persist stage now computes payload SHA-256 once, upserts `raw_artifact`, extracts section rows from all detected Flex sections, and writes conflict-aware `raw_record` rows linked by `raw_artifact_id`.
 - [2026-02-14] DECISION :: Duplicate raw artifact ingests remain normal successful runs; diagnostics explicitly expose dedupe/no-op outcomes (`raw_artifact_deduplicated`, inserted/deduplicated row counts).
 - [2026-02-14] PATTERN :: Live ingestion troubleshooting rule: when preflight emits `MISSING_REQUIRED_SECTION`, request the operator to add the missing sections in IBKR Flex query configuration before re-running.
+- [2026-02-14] DECISION :: Task 5 canonical mapping is fail-fast by policy: any canonical contract violation aborts the active run and finalizes with failure diagnostics rather than partial-success continuation.
+- [2026-02-14] PATTERN :: Canonical persistence is centralized in `app/db/canonical_persistence.py`: conid-first instrument upsert plus frozen natural-key UPSERT behavior for trade/cashflow/fx/corporate-action events.
+- [2026-02-14] DECISION :: Cashflow correction policy is frozen: duplicate natural key with changed amount/report date is treated as correction (`is_correction=true`) and latest values are upserted, not hard-failed.
+- [2026-02-14] DECISION :: Task 5 reprocess surfaces are available via both API (`POST /ingestion/reprocess`) and CLI (`python -m app.main reprocess-run`) using deterministic replay from immutable `raw_record` data only.
+- [2026-02-14] PATTERN :: Shared canonical pipeline helper (`app/jobs/canonical_pipeline.py`) is the single path used by ingestion and reprocess orchestrators to enforce identical mapping+persistence behavior and diagnostics counters.
+- [2026-02-14] DECISION :: Root `pytest.ini` is configured with `testpaths=tests` and `norecursedirs` excluding `references/` so default `pytest` runs only first-party project tests.

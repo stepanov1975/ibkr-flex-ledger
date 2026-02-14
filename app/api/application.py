@@ -17,6 +17,7 @@ def create_api_application(
     db_health_service: DatabaseHealthPort,
     ingestion_repository: IngestionRunRepositoryPort,
     ingestion_orchestrator: JobOrchestratorPort,
+    reprocess_orchestrator: JobOrchestratorPort | None = None,
 ) -> FastAPI:
     """Create the FastAPI application instance for the service.
 
@@ -25,6 +26,7 @@ def create_api_application(
         db_health_service: Database health service used by health endpoints.
         ingestion_repository: Ingestion run repository for list/detail APIs.
         ingestion_orchestrator: Job orchestrator for ingestion trigger execution.
+        reprocess_orchestrator: Optional job orchestrator for reprocess trigger execution.
 
     Returns:
         FastAPI: Framework application instance with foundation metadata.
@@ -57,6 +59,7 @@ def create_api_application(
             settings=settings,
             ingestion_repository=ingestion_repository,
             ingestion_orchestrator=ingestion_orchestrator,
+            reprocess_orchestrator=reprocess_orchestrator,
         )
     )
 

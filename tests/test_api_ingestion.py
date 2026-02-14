@@ -1,4 +1,5 @@
 """Regression tests for ingestion API trigger and run detail/list behavior."""
+# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -126,6 +127,37 @@ class _ConflictIngestionOrchestrator:
 
         _ = job_name
         raise IngestionRunAlreadyActiveError("run already active")
+
+
+class _SuccessReprocessOrchestrator:
+    """Orchestrator stub that simulates successful reprocess execution."""
+
+    def job_supported_names(self) -> tuple[str, ...]:
+        """Return supported stub job names.
+
+        Returns:
+            tuple[str, ...]: Supported job names tuple.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return ("reprocess_run",)
+
+    def job_execute(self, job_name: str):
+        """Return successful reprocess execution response.
+
+        Args:
+            job_name: Requested job name.
+
+        Returns:
+            object: Lightweight result object.
+
+        Raises:
+            RuntimeError: This method does not raise runtime errors.
+        """
+
+        return type("Result", (), {"job_name": job_name, "status": "success"})()
 
 
 def _build_success_ingestion_orchestrator() -> object:
@@ -313,3 +345,30 @@ def test_api_ingestion_missing_sections_endpoint_returns_exact_sections() -> Non
     payload = response.json()
     assert payload["error_code"] == "MISSING_REQUIRED_SECTION"
     assert "OpenPositions" in payload["missing_sections"]
+
+
+def test_api_reprocess_trigger_returns_success() -> None:
+    """Return HTTP 200 for successful reprocess trigger execution.
+
+    Returns:
+        None: Assertions validate reprocess trigger behavior.
+
+    Raises:
+        AssertionError: Raised when response does not match expected values.
+    """
+
+    run_record = _build_run_record()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+        reprocess_orchestrator=_SuccessReprocessOrchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.post("/ingestion/reprocess")
+
+    assert response.status_code == 200
+    assert response.json()["job_name"] == "reprocess_run"
+    assert response.json()["status"] == "success"

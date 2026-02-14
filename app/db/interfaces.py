@@ -200,6 +200,229 @@ class RawRecordPersistResult:
     deduplicated_count: int
 
 
+@dataclass(frozen=True)
+class RawRecordForCanonicalMapping:
+    """Typed raw row payload required by canonical mapping workflows.
+
+    Attributes:
+        raw_record_id: Persistent raw row identifier.
+        ingestion_run_id: Ingestion run that produced the row.
+        account_id: Internal account context identifier.
+        period_key: Ingestion period identity key.
+        flex_query_id: Upstream Flex query identifier.
+        report_date_local: Optional local report date.
+        section_name: Flex section name.
+        source_row_ref: Deterministic source row reference.
+        source_payload: JSON-compatible source payload object.
+    """
+
+    raw_record_id: UUID
+    ingestion_run_id: UUID
+    account_id: str
+    period_key: str
+    flex_query_id: str
+    report_date_local: date | None
+    section_name: str
+    source_row_ref: str
+    source_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CanonicalTradeFillUpsertRequest:
+    """Canonical trade-fill upsert input contract.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        instrument_id: Canonical instrument identifier.
+        ingestion_run_id: Ingestion run identifier.
+        source_raw_record_id: Source raw row identifier.
+        ib_exec_id: IB execution identity.
+        transaction_id: Optional broker transaction identifier.
+        trade_timestamp_utc: Trade timestamp in UTC ISO-8601 format.
+        report_date_local: Local business date in YYYY-MM-DD format.
+        side: Trade side (`BUY` or `SELL`).
+        quantity: Trade quantity decimal string.
+        price: Trade price decimal string.
+        cost: Optional cost decimal string.
+        commission: Optional commission decimal string.
+        fees: Optional fees decimal string.
+        realized_pnl: Optional realized PnL decimal string.
+        net_cash: Optional net cash decimal string.
+        net_cash_in_base: Optional net cash in base currency decimal string.
+        fx_rate_to_base: Optional FX rate decimal string.
+        currency: Trade currency code.
+        functional_currency: Functional/base currency code.
+    """
+
+    account_id: str
+    instrument_id: str
+    ingestion_run_id: str
+    source_raw_record_id: str
+    ib_exec_id: str
+    transaction_id: str | None
+    trade_timestamp_utc: str
+    report_date_local: str
+    side: str
+    quantity: str
+    price: str
+    cost: str | None
+    commission: str | None
+    fees: str | None
+    realized_pnl: str | None
+    net_cash: str | None
+    net_cash_in_base: str | None
+    fx_rate_to_base: str | None
+    currency: str
+    functional_currency: str
+
+
+@dataclass(frozen=True)
+class CanonicalCashflowUpsertRequest:
+    """Canonical cashflow upsert input contract.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        instrument_id: Optional canonical instrument identifier.
+        ingestion_run_id: Ingestion run identifier.
+        source_raw_record_id: Source raw row identifier.
+        transaction_id: Broker transaction identifier.
+        cash_action: Canonical cash action label.
+        report_date_local: Local business date in YYYY-MM-DD format.
+        effective_at_utc: Optional effective timestamp in UTC ISO-8601 format.
+        amount: Cash amount decimal string.
+        amount_in_base: Optional base-currency cash amount decimal string.
+        currency: Cash currency code.
+        functional_currency: Functional/base currency code.
+        withholding_tax: Optional withholding tax decimal string.
+        fees: Optional fees decimal string.
+    """
+
+    account_id: str
+    instrument_id: str | None
+    ingestion_run_id: str
+    source_raw_record_id: str
+    transaction_id: str
+    cash_action: str
+    report_date_local: str
+    effective_at_utc: str | None
+    amount: str
+    amount_in_base: str | None
+    currency: str
+    functional_currency: str
+    withholding_tax: str | None
+    fees: str | None
+
+
+@dataclass(frozen=True)
+class CanonicalFxUpsertRequest:
+    """Canonical FX event upsert input contract.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        ingestion_run_id: Ingestion run identifier.
+        source_raw_record_id: Source raw row identifier.
+        transaction_id: Broker transaction identifier.
+        report_date_local: Local business date in YYYY-MM-DD format.
+        currency: Source currency code.
+        functional_currency: Functional/base currency code.
+        fx_rate: Optional FX rate decimal string.
+        fx_source: Deterministic FX source label.
+        provisional: Whether FX value is provisional.
+        diagnostic_code: Optional deterministic diagnostic code.
+    """
+
+    account_id: str
+    ingestion_run_id: str
+    source_raw_record_id: str
+    transaction_id: str
+    report_date_local: str
+    currency: str
+    functional_currency: str
+    fx_rate: str | None
+    fx_source: str
+    provisional: bool
+    diagnostic_code: str | None
+
+
+@dataclass(frozen=True)
+class CanonicalCorpActionUpsertRequest:
+    """Canonical corporate-action upsert input contract.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        instrument_id: Optional canonical instrument identifier.
+        conid: Canonical IB instrument identifier.
+        ingestion_run_id: Ingestion run identifier.
+        source_raw_record_id: Source raw row identifier.
+        action_id: Optional broker action identifier.
+        transaction_id: Optional broker transaction identifier.
+        reorg_code: Canonical corporate-action code.
+        report_date_local: Local business date in YYYY-MM-DD format.
+        description: Optional free-text description.
+        requires_manual: Whether manual workflow is required.
+        provisional: Whether downstream values are provisional.
+        manual_case_id: Optional manual case identifier string.
+    """
+
+    account_id: str
+    instrument_id: str | None
+    conid: str
+    ingestion_run_id: str
+    source_raw_record_id: str
+    action_id: str | None
+    transaction_id: str | None
+    reorg_code: str
+    report_date_local: str
+    description: str | None
+    requires_manual: bool
+    provisional: bool
+    manual_case_id: str | None
+
+
+@dataclass(frozen=True)
+class CanonicalInstrumentUpsertRequest:
+    """Canonical instrument upsert input contract with conid-first identity.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        conid: Canonical IB instrument identifier.
+        symbol: Broker symbol.
+        local_symbol: Optional broker local symbol.
+        isin: Optional ISIN alias.
+        cusip: Optional CUSIP alias.
+        figi: Optional FIGI alias.
+        asset_category: IB asset category.
+        currency: Instrument currency code.
+        description: Optional instrument description.
+    """
+
+    account_id: str
+    conid: str
+    symbol: str
+    local_symbol: str | None
+    isin: str | None
+    cusip: str | None
+    figi: str | None
+    asset_category: str
+    currency: str
+    description: str | None
+
+
+@dataclass(frozen=True)
+class CanonicalInstrumentRecord:
+    """Canonical instrument persistence record.
+
+    Attributes:
+        instrument_id: Canonical instrument identifier.
+        account_id: Internal account context identifier.
+        conid: Canonical IB instrument identifier.
+    """
+
+    instrument_id: UUID
+    account_id: str
+    conid: str
+
+
 class IngestionRunRepositoryPort(Protocol):
     """Port definition for ingestion run lifecycle persistence and reads."""
 
@@ -310,4 +533,103 @@ class RawPersistenceRepositoryPort(Protocol):
         Raises:
             ValueError: Raised when requests are invalid.
             RuntimeError: Raised when persistence fails.
+        """
+
+
+class RawRecordReadRepositoryPort(Protocol):
+    """Port definition for raw-row reads used by canonical mapping workflows."""
+
+    def db_raw_record_list_for_period(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """List raw rows for one account/period/query identity.
+
+        Args:
+            account_id: Internal account identifier.
+            period_key: Ingestion period identity key.
+            flex_query_id: Upstream Flex query id.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered raw rows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when read operation fails.
+        """
+
+
+class CanonicalPersistenceRepositoryPort(Protocol):
+    """Port definition for canonical event and instrument UPSERT operations."""
+
+    def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
+        """Persist or reuse canonical instrument by conid-first identity.
+
+        Args:
+            request: Instrument upsert request.
+
+        Returns:
+            CanonicalInstrumentRecord: Persisted canonical instrument record.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
+    def db_canonical_trade_fill_upsert(self, request: CanonicalTradeFillUpsertRequest) -> None:
+        """UPSERT one canonical trade-fill event by frozen natural key.
+
+        Args:
+            request: Canonical trade-fill upsert request.
+
+        Returns:
+            None: Event upsert is persisted as a side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
+    def db_canonical_cashflow_upsert(self, request: CanonicalCashflowUpsertRequest) -> None:
+        """UPSERT one canonical cashflow event by frozen natural key.
+
+        Args:
+            request: Canonical cashflow upsert request.
+
+        Returns:
+            None: Event upsert is persisted as a side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
+    def db_canonical_fx_upsert(self, request: CanonicalFxUpsertRequest) -> None:
+        """UPSERT one canonical FX event by frozen natural key.
+
+        Args:
+            request: Canonical FX upsert request.
+
+        Returns:
+            None: Event upsert is persisted as a side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
+    def db_canonical_corp_action_upsert(self, request: CanonicalCorpActionUpsertRequest) -> None:
+        """UPSERT one canonical corporate-action event by frozen natural key.
+
+        Args:
+            request: Canonical corporate-action upsert request.
+
+        Returns:
+            None: Event upsert is persisted as a side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
         """

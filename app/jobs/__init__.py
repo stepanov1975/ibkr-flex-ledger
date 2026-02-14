@@ -2,6 +2,7 @@
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .ingestion_orchestrator import IngestionJobOrchestrator, IngestionOrchestratorConfig
+from .reprocess_orchestrator import CanonicalReprocessOrchestrator, CanonicalReprocessOrchestratorConfig
 from .diagnostics import job_extract_missing_sections_from_diagnostics
 from .section_preflight import (
 	FUTURE_PROOF_FLEX_SECTIONS,
@@ -22,6 +23,8 @@ __all__ = [
 	"job_extract_missing_sections_from_diagnostics",
 	"IngestionOrchestratorConfig",
 	"IngestionJobOrchestrator",
+	"CanonicalReprocessOrchestratorConfig",
+	"CanonicalReprocessOrchestrator",
 	"MISSING_REQUIRED_SECTION_CODE",
 	"HARD_REQUIRED_FLEX_SECTIONS",
 	"RECONCILIATION_REQUIRED_FLEX_SECTIONS",

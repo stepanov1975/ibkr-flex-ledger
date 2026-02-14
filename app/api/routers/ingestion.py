@@ -16,6 +16,7 @@ def api_create_ingestion_router(
     settings: AppSettings,
     ingestion_repository: IngestionRunRepositoryPort,
     ingestion_orchestrator: JobOrchestratorPort,
+    reprocess_orchestrator: JobOrchestratorPort | None = None,
 ) -> APIRouter:
     """Create ingestion router with trigger and run list/detail endpoints.
 
@@ -23,6 +24,7 @@ def api_create_ingestion_router(
         settings: Runtime settings used for pagination defaults.
         ingestion_repository: DB-layer ingestion run repository.
         ingestion_orchestrator: Job orchestrator for ingestion trigger execution.
+        reprocess_orchestrator: Optional job orchestrator for reprocess trigger execution.
 
     Returns:
         APIRouter: Router exposing ingestion APIs.
@@ -53,6 +55,32 @@ def api_create_ingestion_router(
 
         try:
             execution_result = ingestion_orchestrator.job_execute(job_name="ingestion_run")
+            payload = {
+                "job_name": execution_result.job_name,
+                "status": execution_result.status,
+            }
+            return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
+        except IngestionRunAlreadyActiveError:
+            payload = {
+                "status": "error",
+                "message": "run already active",
+            }
+            return JSONResponse(content=payload, status_code=status.HTTP_409_CONFLICT)
+
+    @router.post("/reprocess")
+    def api_ingestion_reprocess_trigger() -> JSONResponse:
+        """Trigger one canonical reprocess run via orchestrator.
+
+        Returns:
+            JSONResponse: Trigger result payload.
+
+        Raises:
+            RuntimeError: Raised when execution fails unexpectedly.
+        """
+
+        target_orchestrator = reprocess_orchestrator or ingestion_orchestrator
+        try:
+            execution_result = target_orchestrator.job_execute(job_name="reprocess_run")
             payload = {
                 "job_name": execution_result.job_name,
                 "status": execution_result.status,

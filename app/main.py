@@ -7,7 +7,11 @@ import argparse
 
 import uvicorn
 
-from app.bootstrap import bootstrap_create_application, bootstrap_create_ingestion_orchestrator
+from app.bootstrap import (
+    bootstrap_create_application,
+    bootstrap_create_ingestion_orchestrator,
+    bootstrap_create_reprocess_orchestrator,
+)
 from app.config import config_load_settings
 from app.db import SQLAlchemyIngestionRunService, db_create_engine
 from app.jobs import job_extract_missing_sections_from_diagnostics
@@ -28,8 +32,9 @@ def main() -> None:
         "command",
         nargs="?",
         default="api",
-        choices=("api", "ingestion-run"),
-        help="Runtime command: `api` starts server, `ingestion-run` triggers one ingestion workflow",
+        choices=("api", "ingestion-run", "reprocess-run"),
+        help="Runtime command: `api` starts server, `ingestion-run` triggers one ingestion workflow, "
+        "`reprocess-run` triggers one canonical reprocess workflow",
         type=str,
     )
     parsed_arguments = argument_parser.parse_args()
@@ -39,6 +44,13 @@ def main() -> None:
         execution_result = ingestion_orchestrator.job_execute(job_name="ingestion_run")
         if execution_result.status != "success":
             main_print_latest_missing_sections_diagnostics()
+            raise SystemExit(1)
+        return
+
+    if parsed_arguments.command == "reprocess-run":
+        reprocess_orchestrator = bootstrap_create_reprocess_orchestrator()
+        execution_result = reprocess_orchestrator.job_execute(job_name="reprocess_run")
+        if execution_result.status != "success":
             raise SystemExit(1)
         return
 

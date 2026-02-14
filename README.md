@@ -263,6 +263,36 @@ Task 4 implementation modules:
 - `app/jobs/raw_extraction.py`
 - `app/jobs/ingestion_orchestrator.py`
 
+## Canonical mapping and reprocess baseline (Task 5)
+
+Task 5 implements deterministic canonical mapping from immutable raw rows and adds replay/reprocess trigger surfaces.
+
+Included behavior:
+
+- Canonical mapping service for `Trades`, `CashTransactions`, `ConversionRates`, and `CorporateActions` with fail-fast contract validation
+- Conid-first instrument upsert before event upserts so canonical event rows resolve deterministic `instrument_id`
+- Canonical UPSERT persistence for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action` using frozen natural keys and collision policies
+- Ingestion workflow now runs `canonical_mapping` stage after raw persistence and stores stage counters in diagnostics timeline
+- Deterministic reprocess workflow replays canonical mapping from `raw_record` only, without adapter request/poll/download
+- Reprocess trigger surfaces exposed through both API and CLI
+
+API endpoint additions:
+
+- `POST /ingestion/reprocess`
+
+CLI trigger command additions:
+
+```bash
+/stock_app/.venv/bin/python -m app.main reprocess-run
+```
+
+Task 5 implementation modules:
+
+- `app/mapping/service.py`
+- `app/db/canonical_persistence.py`
+- `app/jobs/canonical_pipeline.py`
+- `app/jobs/reprocess_orchestrator.py`
+
 ## VS Code virtual environment setup
 
 This workspace is configured to automatically use the project virtual environment.

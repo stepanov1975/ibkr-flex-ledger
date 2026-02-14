@@ -8,9 +8,11 @@ import hashlib
 
 from app.adapters import FlexAdapterPort
 from app.db import (
+    CanonicalPersistenceRepositoryPort,
     IngestionRunRepositoryPort,
     RawArtifactPersistRequest,
     RawArtifactReference,
+    RawRecordReadRepositoryPort,
     RawPersistenceRepositoryPort,
     RawRecordPersistRequest,
 )
@@ -18,6 +20,7 @@ from app.domain import domain_build_stage_event
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import job_raw_extract_payload_rows
+from .canonical_pipeline import job_canonical_map_and_persist
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
     job_section_preflight_build_missing_required_diagnostics,
@@ -34,12 +37,14 @@ class IngestionOrchestratorConfig:
         flex_query_id: Upstream Flex query identifier.
         run_type: Run source type (`scheduled`, `manual`, `reprocess`).
         reconciliation_enabled: Whether reconciliation-required section checks are enforced.
+        functional_currency: Functional/base reporting currency code.
     """
 
     account_id: str
     flex_query_id: str
     run_type: str = "manual"
     reconciliation_enabled: bool = False
+    functional_currency: str = "USD"
 
 
 class IngestionJobOrchestrator(JobOrchestratorPort):
@@ -53,6 +58,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         raw_persistence_repository: RawPersistenceRepositoryPort,
         flex_adapter: FlexAdapterPort,
         config: IngestionOrchestratorConfig,
+        canonical_repository: CanonicalPersistenceRepositoryPort | RawRecordReadRepositoryPort | None = None,
     ):
         """Initialize ingestion orchestrator dependencies.
 
@@ -81,11 +87,14 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             raise ValueError("config.flex_query_id must not be blank")
         if not config.run_type.strip():
             raise ValueError("config.run_type must not be blank")
+        if not config.functional_currency.strip():
+            raise ValueError("config.functional_currency must not be blank")
 
         self._ingestion_repository = ingestion_repository
         self._raw_persistence_repository = raw_persistence_repository
         self._flex_adapter = flex_adapter
         self._config = config
+        self._canonical_repository = canonical_repository
 
     def job_supported_names(self) -> tuple[str, ...]:
         """Return supported job names.
@@ -216,6 +225,27 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     },
                 )
             )
+
+            if self._canonical_repository is not None:
+                timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
+                canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_period(
+                    account_id=self._config.account_id,
+                    period_key=period_key,
+                    flex_query_id=self._config.flex_query_id,
+                )
+                canonical_counts = job_canonical_map_and_persist(
+                    account_id=self._config.account_id,
+                    functional_currency=self._config.functional_currency,
+                    raw_records=canonical_raw_rows,
+                    canonical_persistence_repository=self._canonical_repository,
+                )
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="canonical_mapping",
+                        status="completed",
+                        details=canonical_counts,
+                    )
+                )
 
             timeline.append(domain_build_stage_event(stage="run", status="success"))
             self._ingestion_repository.db_ingestion_run_finalize(
