@@ -69,8 +69,8 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
             if not section_name:
                 continue
 
-            section_rows = list(section_element)
-            if not section_rows:
+            leaf_rows = _job_raw_collect_section_leaf_rows(section_element)
+            if not leaf_rows:
                 extracted_rows.append(
                     RawExtractedRow(
                         section_name=section_name,
@@ -80,7 +80,7 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
                 )
                 continue
 
-            for row_index, row_element in enumerate(section_rows, start=1):
+            for row_index, row_element in enumerate(leaf_rows, start=1):
                 row_payload = dict(sorted(row_element.attrib.items()))
                 source_row_ref = _job_raw_build_source_row_ref(
                     section_name=section_name,
@@ -97,6 +97,29 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
                 )
 
     return RawPayloadExtractionResult(report_date_local=report_date_local, rows=extracted_rows)
+
+
+def _job_raw_collect_section_leaf_rows(section_element: element_tree.Element) -> list[element_tree.Element]:
+    """Collect leaf row elements recursively under one Flex section.
+
+    Args:
+        section_element: Section container element under `FlexStatement`.
+
+    Returns:
+        list[element_tree.Element]: Deterministically ordered leaf row elements.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    extracted_leaf_rows: list[element_tree.Element] = []
+    for child_element in list(section_element):
+        child_rows = list(child_element)
+        if child_rows:
+            extracted_leaf_rows.extend(_job_raw_collect_section_leaf_rows(child_element))
+            continue
+        extracted_leaf_rows.append(child_element)
+    return extracted_leaf_rows
 
 
 def _job_raw_extract_report_date_local(statement: element_tree.Element) -> date | None:
