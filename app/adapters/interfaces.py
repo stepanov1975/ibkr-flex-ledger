@@ -1,6 +1,7 @@
 """Typed interfaces for adapter-layer responsibilities."""
 
 from dataclasses import dataclass
+from typing import Any
 from typing import Protocol
 
 
@@ -11,10 +12,12 @@ class AdapterFetchResult:
     Attributes:
         run_reference: Unique source run reference from upstream provider.
         payload_bytes: Immutable raw payload bytes.
+        stage_timeline: Structured stage timeline entries captured by adapter.
     """
 
     run_reference: str
     payload_bytes: bytes
+    stage_timeline: list[dict[str, Any]]
 
 
 class FlexAdapterPort(Protocol):

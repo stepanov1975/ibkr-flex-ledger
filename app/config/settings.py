@@ -19,6 +19,7 @@ class AppSettings(BaseSettings):
         application_host: Host interface for web server binding.
         application_port: Web server port.
         database_url: PostgreSQL DSN for application database access.
+        account_id: Internal single-account identifier used for MVP processing context.
         ibkr_flex_token: Flex Web Service token.
         ibkr_flex_query_id: Flex query identifier.
         api_default_limit: Default list endpoint limit.
@@ -36,12 +37,13 @@ class AppSettings(BaseSettings):
     application_host: str = Field(default="0.0.0.0")
     application_port: int = Field(default=8000, ge=1, le=65535)
     database_url: str = Field(default="postgresql+psycopg://postgres:postgres@localhost:5432/postgres")
+    account_id: str = Field(default="DEFAULT_ACCOUNT", min_length=1)
     ibkr_flex_token: str = Field(min_length=1)
     ibkr_flex_query_id: str = Field(min_length=1)
     api_default_limit: int = Field(default=50, ge=1)
     api_max_limit: int = Field(default=200, ge=1)
 
-    @field_validator("ibkr_flex_token", "ibkr_flex_query_id")
+    @field_validator("account_id", "ibkr_flex_token", "ibkr_flex_query_id")
     @classmethod
     def _validate_non_empty_string(cls, value: str) -> str:
         stripped_value = value.strip()

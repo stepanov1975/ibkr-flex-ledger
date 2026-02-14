@@ -1,63 +1,76 @@
 # Task Plan
-Implement Task 2 from `implementation_task_list.md`: deliver the MVP schema and migration baseline on top of the existing Task 1 foundation. The implementation will use project-native database-layer modules only, create reproducible migrations for all MVP tables, and enforce frozen natural-key/provenance constraints from `MVP_spec_freeze.md`. Work will proceed strictly one milestone at a time (`planned` -> `in progress` -> `done`) with each milestone ending in a verifiable done state before moving to the next. Existing code to reuse: `app/config/settings.py` for runtime DB configuration, `app/db/session.py` for SQLAlchemy engine/session patterns, and project testing/linting gates in `testing.md` and `linting.md`. Reference projects have been reviewed via `references/REFERENCE_NOTES.md` and direct inspection (`references/IB_Flex/importdata.py`) for persistence-table bootstrap patterns; implementation remains PostgreSQL + Alembic native in this repository.
-
-Implementation decisions fixed from clarifications:
-- Task 2 will implement a full column-level schema for all MVP tables now.
-- UUID primary keys will be database-generated with PostgreSQL `gen_random_uuid()`.
+Task 3 implements MVP ingestion orchestration on top of the current foundation-only codebase. The application currently has health-only API routing and interface stubs for adapters/jobs/db, with Task 2 schema already providing `ingestion_run` and `raw_record`. Implementation should extend existing layer boundaries (no cross-layer SQL), reuse the current protocol-driven style, and follow frozen contracts from `MVP.md` and `MVP_spec_freeze.md`: deterministic `request -> poll -> download -> persist` stages, single active run lock (`409 run already active`), required Flex section preflight with `MISSING_REQUIRED_SECTION`, and visible run stage timeline/status transitions (`started/success/failed`). Reference patterns were reviewed from `references/flexquery/flexquery/flexquery.py` and `references/IB_Flex/xml_downloader.py` for request/poll/retry flow, then adapted to project-native modules only.
 
 ## Subtasks
-1. **Define Task 2 schema contract and migration scope** — `status: done`
-	- **Description:** Consolidate the exact Task 2 table/constraint/index requirements from `implementation_task_list.md`, `MVP.md`, and `MVP_spec_freeze.md` into a single implementation contract to prevent drift before writing migrations.
-	- [ ] Enumerate MVP tables required in Task 2 (`instrument`, `label`, `instrument_label`, `note`, `ingestion_run`, `raw_record`, `event_trade_fill`, `event_cashflow`, `event_fx`, `event_corp_action`, `position_lot`, `pnl_snapshot_daily`).
-	- [ ] Enumerate frozen natural-key uniqueness constraints for canonical event tables.
-	- [ ] Enumerate required provenance links (`ingestion_run_id`, source raw row linkage fields).
-	- **Summary:** Completed. Created [docs/task2_schema_contract.md](docs/task2_schema_contract.md) with a full column-level schema contract for all 12 MVP tables, explicit frozen natural-key constraint names, and required provenance links (`ingestion_run_id`, `source_raw_record_id`). Contract also fixes global decisions for Task 2: DB-generated UUID PKs via `gen_random_uuid()` and UTC timestamp storage.
+1. **Implement ingestion run persistence and lock boundary** — `status: done`
+	- **Description:** Add db-layer contracts and implementation for creating/updating ingestion runs, enforcing single-active-run lock, and querying run timeline data using existing `ingestion_run` schema fields.
+	- [ ] Add explicit runtime `ACCOUNT_ID` setting and thread it into ingestion run creation paths.
+	- [ ] Add/extend typed interfaces for ingestion run repository operations in db-layer modules.
+	- [ ] Implement transactional lock check + run creation path that guarantees only one `started` run at a time.
+	- [ ] Implement run completion update path (`success`/`failed`, `ended_at_utc`, `duration_ms`, `error_code`, `error_message`, `diagnostics`).
+	- [ ] Add run list/detail read methods needed by API acceptance criteria.
+	- **Acceptance criteria:** concurrent trigger attempts cannot both create `started` runs; persisted rows contain deterministic lifecycle fields and are queryable by run id.
+	- **Summary:** Added explicit `account_id` runtime setting in `app/config/settings.py`; introduced db-layer ingestion run lifecycle contracts and typed models in `app/db/interfaces.py`; implemented PostgreSQL advisory-lock-backed create/finalize/list/detail service in `app/db/ingestion_run.py`; exported new db services/contracts in `app/db/__init__.py`. Validated with `ruff`, `pylint`, and `pytest tests/test_api_health.py`.
 
-2. **Add Alembic migration scaffold integrated with app settings** — `status: done`
-	- **Description:** Create migration infrastructure that reuses existing project configuration patterns, so schema changes are reproducible and environment-driven without duplicating DB configuration logic.
-	- [ ] Create Alembic configuration and script directory in repository runtime code.
-	- [ ] Wire Alembic environment to read DB URL through project settings/environment contract.
-	- [ ] Add migration entry guidance/commands to project workflow docs where needed.
-	- **Summary:** Completed. Added Alembic scaffold files [alembic.ini](alembic.ini), [alembic/env.py](alembic/env.py), [alembic/script.py.mako](alembic/script.py.mako), and [alembic/versions/.gitkeep](alembic/versions/.gitkeep). Added migration DB URL loader in [app/config/settings.py](app/config/settings.py) via `config_load_database_url()` and exported it from [app/config/__init__.py](app/config/__init__.py). Added workflow guidance in [docs/migrations.md](docs/migrations.md).
+2. **Implement Flex adapter request-poll-download workflow** — `status: done`
+	- **Description:** Implement project-native adapter service behind `FlexAdapterPort` for upstream Flex retrieval, using deterministic retry/poll behavior and structured error reporting.
+	- [ ] Implement adapter class in `app/adapters` that calls IB Flex endpoints in request then poll/download stages.
+	- [ ] Add bounded retry/backoff and deterministic timeout handling for polling.
+	- [ ] Normalize adapter output to immutable payload bytes plus upstream run reference.
+	- [ ] Convert upstream failures into specific, actionable error types/messages for ingestion diagnostics.
+	- **Acceptance criteria:** adapter returns payload bytes when report is ready; timeout and rejected requests produce deterministic, structured failures.
+	- **Summary:** Added project-native Flex adapter implementation in `app/adapters/flex_web_service.py` with deterministic request->poll->download flow, bounded retry/backoff, upstream response parsing, and actionable error mapping (`ConnectionError`, `TimeoutError`, `ValueError`, `RuntimeError`); exported adapter in `app/adapters/__init__.py`. Validated with `ruff`, `pylint`, and regression `pytest tests/test_api_health.py`.
 
-3. **Implement initial MVP schema migration with core tables** — `status: done`
-	- **Description:** Create the baseline migration that introduces all Task 2 tables with primary keys, foreign keys, nullability, and data types aligned to MVP contracts.
-	- [ ] Add one baseline migration that creates all Task 2 MVP tables.
-	- [ ] Include relationship constraints (for labels, notes, events, lots, snapshots) consistent with single-account MVP policy.
-	- [ ] Ensure canonical event tables include provenance columns and deterministic key columns required by frozen spec.
-	- **Summary:** Completed. Added baseline migration [alembic/versions/20260214_01_task2_mvp_schema_baseline.py](alembic/versions/20260214_01_task2_mvp_schema_baseline.py) that creates all 12 MVP tables with full column-level definitions, PK/FK/nullability/data types, UTC timestamps, DB-generated UUID defaults (`gen_random_uuid()`), and provenance fields linking canonical events to both `ingestion_run` and `raw_record`.
+3. **Implement required-section preflight validator** — `status: done`
+	- **Description:** Add section-matrix validation against frozen policy before downstream publish, with explicit missing-section diagnostics.
+	- [ ] Add reusable constants/config for hard-required and reconciliation-required section names from frozen spec.
+	- [ ] Parse downloaded payload metadata to detect available section names.
+	- [ ] Implement preflight validator returning explicit missing-section sets by policy group.
+	- [ ] Wire validation failures to deterministic `MISSING_REQUIRED_SECTION` diagnostics payload.
+	- **Acceptance criteria:** missing hard-required section fails run with `MISSING_REQUIRED_SECTION` and exact section names.
+	- **Summary:** Added frozen section-matrix constants and reusable preflight validator in `app/jobs/section_preflight.py`, including XML section extraction, required/reconciliation missing-section detection, deterministic `MISSING_REQUIRED_SECTION` error handling, and JSON-array diagnostics builder; exported utilities in `app/jobs/__init__.py`.
 
-4. **Add natural-key constraints and performance indexes** — `status: done`
-	- **Description:** Finalize deterministic UPSERT identity and query performance essentials required for downstream ingestion/mapping/reports without adding post-MVP schema scope.
-	- [ ] Add unique constraints matching frozen natural keys for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action`.
-	- [ ] Add essential supporting indexes for ingestion lookup and provenance traversal.
-	- [ ] Confirm constraint/index names match frozen naming expectations where specified.
-	- **Summary:** Completed. Implemented frozen natural-key constraints in baseline migration with exact names: `uq_event_trade_fill_account_exec`, `uq_event_cashflow_account_txn_action_ccy`, `uq_event_fx_account_txn_ccy_pair`, `uq_event_corp_action_account_action` plus fallback `uq_event_corp_action_fallback`. Added essential indexes for ingestion lookup, report-date access, and provenance traversal across raw/canonical/snapshot tables.
+4. **Implement ingestion orchestration service and stage timeline** — `status: done`
+	- **Description:** Implement job-layer orchestration that composes lock, adapter fetch, section preflight, and run lifecycle transitions with stage-level diagnostics.
+	- [ ] Implement a concrete orchestrator in `app/jobs` using existing `JobOrchestratorPort` and db/adapters interfaces.
+	- [ ] Execute deterministic stage sequence (`request`, `poll`, `download`, `persist`) with stage timestamps.
+	- [ ] Persist stage timeline and failure context in `ingestion_run.diagnostics` as a structured JSON array.
+	- [ ] Ensure all failures end run in `failed` state and all success paths end run in `success` state.
+	- **Acceptance criteria:** each run has a deterministic stage timeline as a structured JSON array plus terminal status; no partial lifecycle states remain after completion/failure.
+	- **Summary:** Added concrete ingestion orchestrator in `app/jobs/ingestion_orchestrator.py` using db/adapters ports, deterministic stage execution with persisted diagnostics JSON-array timeline, and terminal-state finalization (`success`/`failed`) on every execution path; extended adapter result timeline support and extracted shared stage-event helper in `app/domain/timeline.py` for DRY consistency.
 
-5. **Validate migration idempotency and schema reproducibility** — `status: done`
-	- **Description:** Prove Task 2 acceptance criteria by running migrations on a fresh database and re-running them safely, with regression tests for critical schema guarantees.
-	- [ ] Add/extend tests that reproduce migration baseline expectations (fresh apply, no manual edits).
-	- [ ] Verify migration re-run behavior is idempotent for the current head.
-	- [ ] Record results and any non-task blockers discovered during validation.
-	- **Summary:** Completed with targeted regression coverage in [tests/test_db_migrations.py](tests/test_db_migrations.py). Test provisions a temporary PostgreSQL database, runs `alembic upgrade head` twice to validate re-run idempotency semantics, and verifies baseline tables plus frozen natural-key constraints exist. In this environment, the migration test safely skips when no reachable PostgreSQL credentials are available; targeted test run result: `2 passed, 1 skipped` (including existing health tests).
+5. **Expose ingestion run APIs and CLI trigger surfaces** — `status: done`
+	- **Description:** Add ingestion API and CLI trigger entrypoints plus dependency wiring so users can start runs and inspect run list/detail timeline with frozen error behavior.
+	- [ ] Add ingestion router endpoints for trigger, run list, and run detail aligned with MVP minimum API surface.
+	- [ ] Add CLI entrypoint to trigger ingestion runs through the same job/orchestrator path as API.
+	- [ ] Return `409` with message `run already active` when lock rejects overlapping trigger.
+	- [ ] Return run detail payload including final status and stage timeline diagnostics.
+	- [ ] Wire API and CLI dependency composition through bootstrap/application entrypoint wiring.
+	- **Acceptance criteria:** API and CLI triggers both enforce overlap policy; run detail endpoint shows stage timeline and final status for completed/failed runs.
+	- **Summary:** Added ingestion API router (`POST /ingestion/run`, `GET /ingestion/runs`, `GET /ingestion/runs/{id}`) in `app/api/routers/ingestion.py`, wired it through `app/api/application.py` and `app/api/routers/__init__.py`, integrated db/adapters/jobs in `app/bootstrap.py`, and added CLI trigger command `ingestion-run` in `app/main.py`; overlap lock now maps to HTTP `409` with `run already active` message.
 
-6. **Run linting and quality gates for Task 2 changes** — `status: done`
-	- **Description:** Execute required project quality checks for all newly added/modified Task 2 files before handoff.
-	- [ ] Run project Python linting commands required by `linting.md` (`ruff`, `pylint`).
-	- [ ] Resolve all new lint errors introduced by Task 2 changes.
-	- [ ] Re-run targeted tests after lint-driven edits.
-	- **Summary:** Completed. Ran `ruff` and `pylint` on all Task 2 changed Python files and resolved new issues (including migration tooling lint compatibility and config typing fix). Final lint status for changed files: Ruff clean and Pylint `10.00/10`.
+6. **Add regression tests and execute quality gates** — `status: done`
+	- **Description:** Add tests that reproduce Task 3 required behaviors first, then implement/fix to pass, and run mandated lint/test commands.
+	- [ ] Add failing tests for overlap lock (`409 run already active`) and missing required sections (`MISSING_REQUIRED_SECTION`).
+	- [ ] Add tests verifying lifecycle transitions and run detail timeline shape.
+	- [ ] Run targeted tests, then broader relevant test set.
+	- [ ] Run `ruff check . --ignore=E501,W293,W291` and `pylint` per project linting protocol; resolve new issues.
+	- **Acceptance criteria:** new regression tests pass; Task 3 acceptance criteria are covered by tests; lint gates pass with zero new errors.
+	- **Summary:** Added regression tests `tests/test_api_ingestion.py`, `tests/test_jobs_section_preflight.py`, and `tests/test_jobs_ingestion_orchestrator.py` covering overlap lock (`409 run already active`), required-section diagnostics (`MISSING_REQUIRED_SECTION`), lifecycle success/failure transitions, and run detail diagnostics timeline shape; updated `tests/test_api_health.py` for new app dependencies. Quality gates passed: targeted+broader tests (`7 passed, 1 skipped` including migration regression), `ruff check app tests`, and `pylint` on all Task 3 touched runtime/test modules (10.00/10).
 
 7. **Update README and memory** — `status: done`
 	- **Description:** revise `README.md` and `ai_memory.md` to reflect changes
-	- [ ] Update `README.md` with migration baseline usage and schema status.
-	- [ ] Update `ai_memory.md` with durable Task 2 decisions/patterns/fixes in required format.
-	- [ ] Ensure documentation reflects current behavior only.
-	- **Summary:** Completed. Updated [README.md](README.md) with Task 2 schema/migration baseline details, fixed decisions, and migration command usage. Updated [ai_memory.md](ai_memory.md) with durable Task 2 decisions and migration-testing pattern entries using required date/tag format.
+	- [ ] Document new ingestion endpoints, run lock behavior, and required-section diagnostics in README.
+	- [ ] Add durable implementation decisions/patterns from Task 3 to `ai_memory.md`.
+	- [ ] Remove or adjust any stale documentation that conflicts with implemented behavior.
+	- **Summary:** Updated `README.md` with Task 3 ingestion orchestration baseline, API/CLI trigger surfaces, lock behavior (`409 run already active`), `MISSING_REQUIRED_SECTION` preflight semantics, diagnostics timeline persistence, and added `ACCOUNT_ID` to required settings. Updated `.env.example` to include `ACCOUNT_ID`. Added durable Task 3 decisions/patterns to `ai_memory.md`.
 
 ## Clarifying Questions
-Q1: For Task 2, should we implement a full column-level schema for all MVP tables now, or a minimal baseline focused on identity/provenance fields with later tasks extending columns?
-A1: Implement a full column-level schema for all MVP tables now.
+Q1: For Task 3 trigger surface, should implementation include both API trigger (`POST /ingestion/run`) and a CLI entrypoint now, or API trigger only in this task?
+A1: include both API trigger (`POST /ingestion/run`) and a CLI entrypoint now
 
-Q2: Preferred UUID strategy for primary keys in PostgreSQL: database-generated UUIDs (`gen_random_uuid`) or application-generated UUIDs?
-A2: Database-generated UUIDs with `gen_random_uuid()`.
+Q2: For single-account context in Task 3, should we introduce an explicit `ACCOUNT_ID` runtime setting now, or keep using an internal fixed value until Task 4/5 mapping is added?
+A2: introduce an explicit `ACCOUNT_ID` runtime setting now
+
+Q3: For run stage timeline payload, should diagnostics be persisted as a structured JSON array under `ingestion_run.diagnostics` in Task 3?
+A3: yes

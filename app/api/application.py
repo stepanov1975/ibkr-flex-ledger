@@ -6,17 +6,25 @@ This module defines API application composition used by the MVP runtime.
 from fastapi import FastAPI
 
 from app.config import AppSettings
-from app.db import DatabaseHealthPort
+from app.db import DatabaseHealthPort, IngestionRunRepositoryPort
+from app.jobs import JobOrchestratorPort
 
-from .routers import api_create_health_router
+from .routers import api_create_health_router, api_create_ingestion_router
 
 
-def create_api_application(settings: AppSettings, db_health_service: DatabaseHealthPort) -> FastAPI:
+def create_api_application(
+    settings: AppSettings,
+    db_health_service: DatabaseHealthPort,
+    ingestion_repository: IngestionRunRepositoryPort,
+    ingestion_orchestrator: JobOrchestratorPort,
+) -> FastAPI:
     """Create the FastAPI application instance for the service.
 
     Args:
         settings: Validated application settings used for runtime metadata.
         db_health_service: Database health service used by health endpoints.
+        ingestion_repository: Ingestion run repository for list/detail APIs.
+        ingestion_orchestrator: Job orchestrator for ingestion trigger execution.
 
     Returns:
         FastAPI: Framework application instance with foundation metadata.
@@ -44,6 +52,13 @@ def create_api_application(settings: AppSettings, db_health_service: DatabaseHea
         }
 
     application.include_router(api_create_health_router(db_health_service=db_health_service))
+    application.include_router(
+        api_create_ingestion_router(
+            settings=settings,
+            ingestion_repository=ingestion_repository,
+            ingestion_orchestrator=ingestion_orchestrator,
+        )
+    )
 
     return application
 

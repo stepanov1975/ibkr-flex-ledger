@@ -67,6 +67,72 @@ class _FailingDatabaseService:
         raise ConnectionError("database connectivity check failed")
 
 
+class _IngestionRepositoryStub:
+    """Minimal repository stub for API factory dependency injection."""
+
+    def db_ingestion_run_list(self, _limit: int, _offset: int) -> list[object]:
+        """Return deterministic empty run list.
+
+        Args:
+            limit: Max rows.
+            offset: Rows to skip.
+
+        Returns:
+            list[object]: Empty list for health tests.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return []
+
+    def db_ingestion_run_get_by_id(self, _ingestion_run_id) -> None:
+        """Return no run for health tests.
+
+        Args:
+            ingestion_run_id: Run id.
+
+        Returns:
+            None: Always returns no run.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return None
+
+
+class _IngestionOrchestratorStub:
+    """Minimal orchestrator stub for API factory dependency injection."""
+
+    def job_supported_names(self) -> tuple[str, ...]:
+        """Return supported stub job names.
+
+        Returns:
+            tuple[str, ...]: Stub job names tuple.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return ("ingestion_run",)
+
+    def job_execute(self, job_name: str):
+        """Return deterministic success-like object.
+
+        Args:
+            job_name: Job name.
+
+        Returns:
+            object: Result object with status fields.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return type("Result", (), {"job_name": job_name, "status": "success"})()
+
+
 def _build_settings() -> AppSettings:
     """Create test settings object.
 
@@ -95,7 +161,12 @@ def test_api_health_returns_success_when_database_is_available() -> None:
         AssertionError: Raised when response does not match expected payload.
     """
 
-    application = create_api_application(_build_settings(), _HealthyDatabaseService())
+    application = create_api_application(
+        _build_settings(),
+        _HealthyDatabaseService(),
+        _IngestionRepositoryStub(),
+        _IngestionOrchestratorStub(),
+    )
     client = TestClient(application)
 
     response = client.get("/health")
@@ -116,7 +187,12 @@ def test_api_health_returns_service_unavailable_when_database_is_down() -> None:
         AssertionError: Raised when response does not match expected payload.
     """
 
-    application = create_api_application(_build_settings(), _FailingDatabaseService())
+    application = create_api_application(
+        _build_settings(),
+        _FailingDatabaseService(),
+        _IngestionRepositoryStub(),
+        _IngestionOrchestratorStub(),
+    )
     client = TestClient(application)
 
     response = client.get("/health")

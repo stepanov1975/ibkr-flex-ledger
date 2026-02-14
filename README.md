@@ -161,6 +161,7 @@ Credential storage guidance:
 
 Required settings for startup validation:
 
+- `ACCOUNT_ID`
 - `IBKR_FLEX_TOKEN`
 - `IBKR_FLEX_QUERY_ID`
 
@@ -198,6 +199,30 @@ alembic upgrade head
 Migration usage details:
 
 - `docs/migrations.md`
+
+## Ingestion orchestration baseline (Task 3)
+
+Task 3 introduces ingestion orchestration with deterministic run lifecycle and preflight validation.
+
+Included behavior:
+
+- Single active ingestion run lock with rejection response `409` and message `run already active`
+- Deterministic ingestion stages (`request` -> `poll` -> `download` -> `persist`)
+- Required Flex section preflight with deterministic diagnostic code `MISSING_REQUIRED_SECTION`
+- Structured stage timeline persisted in `ingestion_run.diagnostics` as a JSON array
+- Trigger surfaces for both API and CLI
+
+API endpoints:
+
+- `POST /ingestion/run`
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{ingestion_run_id}`
+
+CLI trigger command:
+
+```bash
+/stock_app/.venv/bin/python -m app.main ingestion-run
+```
 
 ## VS Code virtual environment setup
 
