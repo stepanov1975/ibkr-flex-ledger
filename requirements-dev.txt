@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==8.4.2
+pytest-cov==7.0.0
+ruff==0.13.0
+pylint==3.3.8
+mypy==1.18.2
