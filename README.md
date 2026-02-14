@@ -9,10 +9,12 @@ Self-hosted portfolio accounting and analytics app for Interactive Brokers (IBKR
 The codebase must be structured in a strongly modular way from the start because additional functionality will be added later.
 
 - `max_plan.md` is the reference for end-state architecture and future modules.
+- `references/REFERENCE_NOTES.md` is the reference index of external projects and reusable patterns.
 - Features described in `max_plan.md` are not initial implementation scope.
 - MVP implementation should keep stable boundaries so future capabilities can be added with minimal changes to already working modules.
 - New domains (options, strategies, advanced performance, expanded corporate actions) should be added as new modules that integrate through existing interfaces.
 - All database operations must be centralized in the database layer only. No direct database queries are allowed outside `db` modules.
+- Before implementing any feature or significant bug fix, scan `references/REFERENCE_NOTES.md` first to reuse proven patterns and avoid reinventing existing solutions.
 
 ## What this project does
 
@@ -90,6 +92,7 @@ For full milestone-level acceptance criteria and implementation details, see:
 - `MVP.md`
 - `initial_plan.md`
 - `max_plan.md` (reference architecture; not initial scope)
+- `references/REFERENCE_NOTES.md` (external reference projects and reuse guidance)
 
 ## Quickstart
 

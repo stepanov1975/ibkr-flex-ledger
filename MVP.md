@@ -12,8 +12,10 @@ Rules:
 4. Avoid cross-module coupling that forces edits across working MVP modules when adding options, strategy, performance, or advanced corporate actions.
 5. Preserve the raw-first and deterministic recompute model so future features can layer on top safely.
 6. All database operations must exist only in the database layer. No direct SQL or ORM queries are allowed from adapters, services, API routers, CLI commands, jobs, or domain modules.
+7. Before implementing any feature or significant bug fix, scan `references/REFERENCE_NOTES.md` and explicitly reuse applicable patterns instead of duplicating established solutions.
 
 `max_plan.md` is a reference for target architecture and boundary design, not a scope expansion for initial delivery.
+`references/REFERENCE_NOTES.md` is the working catalog for external reference projects and approved reuse patterns.
 
 ## Feature Summary (Implemented in MVP)
 

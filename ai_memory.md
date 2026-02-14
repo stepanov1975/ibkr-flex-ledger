@@ -2,3 +2,5 @@
 - [2026-02-14] DECISION :: Modular-first policy is mandatory: structure MVP modules for future phase expansion, but do not implement max_plan.md phase 2+ features in initial delivery.
 - [2026-02-14] DECISION :: Database access boundary is strict: only db-layer modules execute SQL/ORM queries; all other layers must use db interfaces/repositories.
 - [2026-02-14] DECISION :: Environment baseline includes PostgreSQL 17 installed with cluster 17/main online on port 5432.
+- [2026-02-14] PATTERN :: Keep external IBKR/Flex repositories under references/ as read-only study material; reuse architecture patterns (parser boundary, poll-download flow, report section checklist) without direct code copy.
+- [2026-02-14] DECISION :: Pre-implementation protocol requires scanning references/REFERENCE_NOTES.md before any feature work or significant bug fix to maximize reuse and prevent duplicate design effort.
