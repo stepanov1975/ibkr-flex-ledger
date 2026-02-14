@@ -1,5 +1,20 @@
 # MVP Implementation Plan — IBKR Trade Ledger & Portfolio Insights
 
+## Mandatory implementation rule: modular now, features later
+
+This MVP must be implemented with a modular structure that supports future expansion with minimal changes to already working parts.
+
+Rules:
+
+1. Build stable module boundaries now (adapters, mapping, ledger, analytics, API/UI, jobs).
+2. Implement only MVP behavior now. Do not implement phase 2+ functionality described in `max_plan.md`.
+3. Keep extension points explicit so later domains can be added as new modules, not rewrites.
+4. Avoid cross-module coupling that forces edits across working MVP modules when adding options, strategy, performance, or advanced corporate actions.
+5. Preserve the raw-first and deterministic recompute model so future features can layer on top safely.
+6. All database operations must exist only in the database layer. No direct SQL or ORM queries are allowed from adapters, services, API routers, CLI commands, jobs, or domain modules.
+
+`max_plan.md` is a reference for target architecture and boundary design, not a scope expansion for initial delivery.
+
 ## Feature Summary (Implemented in MVP)
 
 1. **Automated IBKR Flex ingestion**: scheduled daily pull, immutable raw payload storage, normalized record persistence, and ingestion run audit trail.
@@ -25,9 +40,16 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 
 ### Out of Scope (MVP)
 - Options lifecycle accounting
+- Strategy grouping and strategy lifecycle linking
+- Advanced performance analytics (MWR/TWR, deep FX attribution)
 - Real-time market data and risk dashboards
 - Trade execution automation
 - Full automatic coverage of all corporate-action edge cases
+
+### Scope boundary from max plan
+- The structure must be ready for phase 2+ modules.
+- Phase 2+ logic must not be implemented in MVP code paths.
+- New domains should be add-on modules that integrate through existing public interfaces.
 
 ---
 
@@ -45,6 +67,14 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 3. **Ledger layer**: computes positions, lots, and P&L.
 4. **Analytics layer**: aggregates by instrument and label.
 5. **API/UI layer**: CRUD and reporting endpoints.
+6. **Job layer**: ingestion, reprocess, and snapshot workflows.
+
+### Modularity constraints
+- Each layer exposes a narrow interface and avoids direct dependency on non-adjacent layers.
+- Future domains from `max_plan.md` (options, strategies, corporate action workflows, performance) must be attachable as separate modules.
+- Existing MVP modules should require minimal or no internal rewrites when phase 2+ modules are added.
+- Schema and service naming should be domain-oriented to preserve discoverability as modules grow.
+- Database access is centralized in the database layer (`db/*` modules). Other layers must call repository/data-access interfaces, not query the database directly.
 
 ### Core Principle
 Raw input remains immutable. All derived data can be regenerated from raw records.
@@ -248,3 +278,5 @@ MVP is complete when all conditions are true:
 - Advanced performance analytics (MWR/TWR, deeper FX attribution)
 - CSV fallback imports and richer exports
 - Multi-account support
+
+Reference: `max_plan.md` defines the target end-state architecture and future domains.

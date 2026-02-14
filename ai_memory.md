@@ -1,1 +1,3 @@
 - [2026-02-14] DECISION :: MVP scope documented in MVP.md with seven core feature groups: ingestion, canonical events, stocks-first ledger, labels/notes, reporting drilldown, reconciliation modes, and operational reliability gates.
+- [2026-02-14] DECISION :: Modular-first policy is mandatory: structure MVP modules for future phase expansion, but do not implement max_plan.md phase 2+ features in initial delivery.
+- [2026-02-14] DECISION :: Database access boundary is strict: only db-layer modules execute SQL/ORM queries; all other layers must use db interfaces/repositories.
