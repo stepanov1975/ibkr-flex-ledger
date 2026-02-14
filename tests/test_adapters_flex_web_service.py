@@ -129,3 +129,32 @@ def test_adapters_flex_poll_retries_on_server_busy_error_code_1009(monkeypatch: 
 
     assert result.payload_bytes == success_payload
     assert any(seconds >= 5 for seconds in sleep_calls)
+
+
+def test_adapters_flex_request_known_error_code_uses_fallback_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use deterministic fallback message for known code when upstream message is blank.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions validate deterministic known-code fallback behavior.
+
+    Raises:
+        AssertionError: Raised when request rejection message is not normalized.
+    """
+
+    adapter = FlexWebServiceAdapter(token="token")
+    request_failed_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1012</ErrorCode>"
+        b"<ErrorMessage></ErrorMessage></FlexStatementResponse>"
+    )
+
+    def _fake_http_get(url: str, query_parameters: dict[str, str]) -> bytes:
+        _ = (url, query_parameters)
+        return request_failed_payload
+
+    monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
+
+    with pytest.raises(ValueError, match=r"code=1012, message=Token has expired\."):
+        adapter.adapter_fetch_report(query_id="query-id")

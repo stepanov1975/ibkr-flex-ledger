@@ -19,6 +19,27 @@ class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
     _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/urllib.request)"
+    _KNOWN_FLEX_ERROR_MESSAGES: Final[dict[str, str]] = {
+        "1003": "Statement is not available.",
+        "1004": "Statement is incomplete at this time. Please try again shortly.",
+        "1005": "Settlement data is not ready at this time. Please try again shortly.",
+        "1006": "FIFO P/L data is not ready at this time. Please try again shortly.",
+        "1007": "MTM P/L data is not ready at this time. Please try again shortly.",
+        "1008": "MTM and FIFO P/L data is not ready at this time. Please try again shortly.",
+        "1009": "The server is under heavy load. Statement could not be generated at this time. Please try again shortly.",
+        "1010": "Legacy Flex Queries are no longer supported. Please convert over to Activity Flex.",
+        "1011": "Service account is inactive.",
+        "1012": "Token has expired.",
+        "1013": "IP restriction.",
+        "1014": "Query is invalid.",
+        "1015": "Token is invalid.",
+        "1016": "Account in invalid.",
+        "1017": "Reference code is invalid.",
+        "1018": "Too many requests have been made from this token. Please try again shortly.",
+        "1019": "Statement generation in progress. Please try again shortly.",
+        "1020": "Invalid request or unable to validate request.",
+        "1021": "Statement could not be retrieved at this time. Please try again shortly.",
+    }
     _SERVER_BUSY_ERROR_CODE: Final[str] = "1009"
     _NOT_READY_ERROR_CODE: Final[str] = "1019"
     _THROTTLED_ERROR_CODE: Final[str] = "1018"
@@ -123,8 +144,10 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         status_value = (response_root.findtext("Status") or "").strip()
         if status_value.lower() != "success":
-            error_code = (response_root.findtext("ErrorCode") or "UNKNOWN").strip()
-            error_message = (response_root.findtext("ErrorMessage") or "request rejected by upstream").strip()
+            error_code, error_message = self._adapter_extract_response_error(
+                response_root,
+                fallback_message="request rejected by upstream",
+            )
             raise ValueError(f"Flex request rejected: code={error_code}, message={error_message}")
 
         reference_code = (response_root.findtext("ReferenceCode") or "").strip()
@@ -280,7 +303,11 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             return poll_root.find("FlexStatements") is not None
         return poll_root.tag == "FlexStatements"
 
-    def _adapter_extract_response_error(self, response_root: element_tree.Element) -> tuple[str, str]:
+    def _adapter_extract_response_error(
+        self,
+        response_root: element_tree.Element,
+        fallback_message: str = "unexpected upstream response",
+    ) -> tuple[str, str]:
         """Extract normalized error code and message from Flex response XML.
 
         Args:
@@ -293,8 +320,10 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             RuntimeError: This helper does not raise runtime errors.
         """
 
-        error_code = (response_root.findtext("ErrorCode") or "").strip()
-        error_message = (response_root.findtext("ErrorMessage") or "unexpected upstream response").strip()
+        error_code = (response_root.findtext("ErrorCode") or "UNKNOWN").strip()
+        error_message = (response_root.findtext("ErrorMessage") or "").strip()
+        if not error_message:
+            error_message = self._KNOWN_FLEX_ERROR_MESSAGES.get(error_code, fallback_message)
         return error_code, error_message
 
     def _adapter_retry_delay_seconds_for_error(self, error_code: str) -> int:

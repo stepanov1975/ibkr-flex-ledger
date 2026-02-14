@@ -70,3 +70,4 @@
 - [2026-02-14] FIX :: Canonical UUID validation is now parse-strict (`uuid.UUID(...)`) in `app/db/canonical_persistence.py`; 36-character non-UUID strings are rejected at validation boundary before SQL execution.
 - [2026-02-14] FIX :: Mapping and raw extraction date parsing now accept additional IBKR date variants (`YYYY/MM/DD` plus timestamp-suffixed values split by `T`, `;`, or space) while preserving canonical `YYYY-MM-DD` output.
 - [2026-02-14] PATTERN :: Orchestrators now finalize failed runs with deterministic error codes and return failed `JobExecutionResult` instead of re-raising wrapped runtime errors; diagnostics include traceback payload for post-mortem triage.
+- [2026-02-14] FIX :: `FlexWebServiceAdapter` now uses a project-native IBKR error-code catalog (`1003`-`1021`) for deterministic fallback messages when upstream omits `ErrorMessage`; request and poll flows share the same normalized error extraction path.
