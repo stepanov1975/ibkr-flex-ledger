@@ -1,74 +1,72 @@
 # Task Plan
-Task 5 implements a deterministic canonical mapping pipeline on top of completed Task 4 raw persistence. Current runtime state: ingestion orchestration stores immutable raw artifacts and extracted `raw_record` rows; schema already contains canonical tables (`event_trade_fill`, `event_cashflow`, `event_fx`, `event_corp_action`) and `instrument` with `conid` uniqueness per account. Mapping layer currently has interface-only contracts and no production mapper implementation, no canonical DB repository methods, and no reprocess workflow that rebuilds canonical events from raw-only sources.
+Task 6 implements deterministic valuation and FX fallback hierarchies from the frozen spec on top of completed Task 5 canonical mapping. Current verified state: canonical persistence exists for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action`; Task 5 mapping currently writes FX events only from `ConversionRates` rows and does not yet apply the full frozen FX fallback order (`Trades.fxRateToBase` -> `netCashInBase/netCash` -> `ConversionRates`). There is also no implemented valuation resolver yet for the frozen EOD mark hierarchy (`OpenPositions.markPrice` -> same-day `Trades.closePrice` -> last `Trades.tradePrice` on/before report date). Task 6 must add reusable project-native fallback services, deterministic tie-break behavior, and diagnostics codes (`EOD_MARK_FALLBACK_LAST_TRADE`, `EOD_MARK_MISSING_ALL_SOURCES`, `FX_RATE_MISSING_ALL_SOURCES`) with minimal diff by extending existing mapping/db/job patterns rather than introducing parallel pipelines.
 
-Execution constraints for this plan:
-- Reuse existing extraction and ingestion patterns (`app/jobs/raw_extraction.py`, `app/jobs/ingestion_orchestrator.py`, `app/db/*`) and keep SQL only in `app/db`.
-- Implement frozen natural-key UPSERT semantics from `MVP_spec_freeze.md` for all four canonical event types.
-- Keep idempotent replay behavior deterministic: same raw inputs must converge to same canonical identities without duplicate business events.
-- Prefer smallest safe diffs by extending existing ports/services before adding new modules.
+Resume notes if interrupted:
+- Continue from the first subtask still in `status: planned`.
+- Keep DB access in `app/db/*` only and reuse existing canonical pipeline wiring.
+- Keep reference usage as pattern-only (never import from `references/`).
+- Treat `MVP_spec_freeze.md` section 2 as normative for ordering and tie-break rules.
 
 ## Subtasks
-1. **Add Task 5 regression tests first** — `status: done`
-   - **Description:** Create failing tests that reproduce missing Task 5 behavior before implementing mapping code.
-   - [ ] Add mapper regression tests for `trade_fill`, `cashflow`, `fx`, and `corp_action` transformation from raw rows to canonical contracts.
-   - [ ] Add DB-level UPSERT behavior tests for each natural key and frozen collision rules.
-   - [ ] Add reprocess determinism test showing two reprocess runs over identical raw inputs produce stable canonical identities and no duplicate business events.
-   - **Acceptance criteria:** New Task 5 tests fail on current code for mapping/reprocess gaps and only pass after Task 5 implementation.
-   - **Summary:** Added red regression suites `tests/test_mapping_canonical_pipeline.py`, `tests/test_db_canonical_upsert.py`, and `tests/test_jobs_reprocess.py` covering mapper outputs/fail-fast behavior, canonical UPSERT collision rules, and deterministic reprocess replay. Verified failing baseline with `pytest` showing missing Task 5 runtime modules (`app.mapping.service`, `app.db.canonical_persistence`, `app.jobs.reprocess_orchestrator`).
+1. **Reference and reuse audit for Task 6 extension points** — `status: planned`
+   - **Description:** Confirm exact modules, contracts, and reference patterns to extend so Task 6 is implemented with the smallest safe diff.
+   - [ ] Re-audit project-native extension points in `app/mapping/service.py`, `app/jobs/canonical_pipeline.py`, `app/db/interfaces.py`, and `app/db/canonical_persistence.py`.
+   - [ ] Re-check `references/REFERENCE_NOTES.md` and inspect relevant patterns in `references/finx-reports-ib` and `references/ibflex` for mark/FX source fields and tie-break signals.
+   - [ ] Produce implementation notes in this file summary indicating exactly which existing modules will be extended and which new modules (if any) are justified.
+   - **Acceptance criteria:** The chosen implementation path is explicitly tied to existing project modules and avoids duplicate logic paths.
+   - **Summary:** (fill after completion)
 
-2. **Extend DB and mapping interfaces for canonical pipeline contracts** — `status: done`
-   - **Description:** Add typed contracts and repository ports needed to read raw rows and persist canonical events deterministically.
-   - [ ] Reuse `app/db/interfaces.py` pattern to add canonical event persistence request/response dataclasses.
-   - [ ] Add repository port methods for canonical UPSERT operations and raw-row selection for mapping/reprocess.
-   - [ ] Extend mapping interfaces to represent mapping input/output envelopes and contract versioning for Task 5.
-   - **Acceptance criteria:** Interfaces fully describe Task 5 data flow (raw read -> canonical map -> canonical upsert) without ad-hoc dictionaries.
-   - **Summary:** Extended typed contracts in `app/db/interfaces.py` for canonical raw-read and UPSERT workflows (`RawRecordForCanonicalMapping`, canonical instrument/event upsert requests, `RawRecordReadRepositoryPort`, `CanonicalPersistenceRepositoryPort`). Extended `app/mapping/interfaces.py` with Task 5 mapping contracts (`RawRecordForMapping`, `CanonicalMappingBatch`, `MappingContractViolationError`, batch mapping protocol method) and exported them through package `__init__` modules (`app/mapping/__init__.py`, `app/db/__init__.py`).
+2. **Create failing regression tests for frozen fallback hierarchies** — `status: planned`
+   - **Description:** Add red tests first to capture missing Task 6 behavior before modifying runtime code.
+   - [ ] Add tests for EOD mark fallback source order and tie-break rules, including `EOD_MARK_FALLBACK_LAST_TRADE` and `EOD_MARK_MISSING_ALL_SOURCES` outcomes.
+   - [ ] Add tests for FX fallback source order (`fxRateToBase` -> derived ratio -> `ConversionRates`) and tie-break rules (exact date, nearest previous, latest `ingestion_run_id`, highest raw record primary key).
+   - [ ] Add tests for provisional behavior when non-base-currency FX has no available source and ensure `FX_RATE_MISSING_ALL_SOURCES` is emitted.
+   - **Acceptance criteria:** New Task 6 tests fail on current code and are deterministic across repeated runs.
+   - **Summary:** (fill after completion)
 
-3. **Implement DB-layer canonical repositories with frozen UPSERT keys** — `status: done`
-   - **Description:** Implement SQL-backed persistence/read services for canonical event tables and raw-row fetches.
-   - [ ] Add raw-row query methods that return map-ready source rows scoped by run/reprocess criteria.
-   - [ ] Implement UPSERT for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action` using frozen uniqueness keys and collision handling.
-   - [ ] Implement `conid`-first instrument upsert/reuse logic so canonical rows resolve `instrument_id` deterministically.
-   - **Acceptance criteria:** Repository layer persists canonical events idempotently with correct uniqueness and deterministic instrument identity resolution.
-   - **Summary:** Added `app/db/canonical_persistence.py` with `SQLAlchemyCanonicalPersistenceService` implementing Task 5 DB contracts: raw-row period reads (`db_raw_record_list_for_period`), conid-first instrument upsert (`db_canonical_instrument_upsert`), and canonical UPSERT methods for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action` using frozen natural-key conflict rules (including cashflow correction flagging and corporate-action fallback/manual semantics). Exported service via `app/db/__init__.py`.
+3. **Extend typed contracts and DB read methods for fallback inputs** — `status: planned`
+   - **Description:** Add explicit typed contracts and repository methods needed to resolve mark and FX fallbacks without ad-hoc dictionaries.
+   - [ ] Extend `app/db/interfaces.py` with read models for valuation and FX candidate rows (OpenPositions, Trades, ConversionRates) and deterministic diagnostics outputs.
+   - [ ] Add/extend DB read repository methods in `app/db/canonical_persistence.py` to fetch candidate rows keyed by account, conid, currency pair, and report date.
+   - [ ] Reuse existing repository/service naming conventions and keep SQL isolated to `app/db/*`.
+   - **Acceptance criteria:** Contracts and repository ports fully represent Task 6 fallback inputs/outputs and are consumed by services without raw dict unpacking.
+   - **Summary:** (fill after completion)
 
-4. **Implement mapping services for canonical event transformation** — `status: done`
-   - **Description:** Build project-native mapper implementation that converts raw section rows into canonical event persistence requests.
-   - [ ] Reuse existing raw payload conventions (`section_name`, `source_payload`) to route rows to event-specific mappers.
-   - [ ] Implement strict field parsing/validation for required canonical fields with structured deterministic errors.
-   - [ ] Implement conid-first alias field handling when building instrument persistence inputs.
-   - **Acceptance criteria:** Mapping services produce deterministic canonical event payloads for supported sections with structured diagnostics for invalid rows.
-   - **Summary:** Added `app/mapping/service.py` with `CanonicalMappingService` and `mapping_build_canonical_batch`, implementing deterministic section routing for `Trades`, `CashTransactions`, `ConversionRates`, and `CorporateActions`; strict fail-fast contract validation via `MappingContractViolationError`; and conid-first instrument mapping inputs for alias propagation. Updated mapping contracts to include instrument upsert outputs. Regression suite `tests/test_mapping_canonical_pipeline.py` now passes.
+4. **Implement reusable valuation and FX fallback services** — `status: planned`
+   - **Description:** Implement deterministic fallback logic as reusable services for Task 6 and upcoming Task 7 ledger/snapshot work.
+   - [ ] Implement EOD mark resolver with frozen priority order, tie-breaks, and deterministic diagnostic/provisional outputs.
+   - [ ] Implement FX resolver with frozen priority order, half-even rounding for derived ratio to 10 decimals, and deterministic diagnostic/provisional outputs.
+   - [ ] Add FSN notes and runtime guards only where non-obvious constraints are necessary to prevent regression loops.
+   - **Acceptance criteria:** Services return stable outputs for identical inputs and encode source + diagnostic decisions exactly per frozen spec.
+   - **Summary:** (fill after completion)
 
-5. **Integrate canonical mapping into job workflow and add reprocess entrypoint** — `status: done`
-   - **Description:** Wire the canonical pipeline into jobs so canonical events can be built from raw rows and replayed deterministically.
-   - [ ] Add/extend job orchestrator flow to execute canonical mapping after raw persistence in ingestion runs.
-   - [ ] Implement reprocess job path that reads immutable raw rows and reruns canonical mapping without adapter fetch.
-   - [ ] Persist mapping diagnostics in run timeline payloads for both ingestion and reprocess runs.
-   - **Acceptance criteria:** Ingestion and reprocess workflows both produce canonical events with deterministic status/diagnostics and no duplicate business events.
-   - **Summary:** Added shared canonical pipeline helper `app/jobs/canonical_pipeline.py` and integrated canonical mapping/persistence into ingestion workflow in `app/jobs/ingestion_orchestrator.py` with timeline diagnostics (`canonical_mapping` stage counts). Implemented dedicated reprocess orchestrator `app/jobs/reprocess_orchestrator.py` (deterministic raw replay + optional run timeline persistence), exported via `app/jobs/__init__.py`, and wired both API/CLI trigger surfaces: new `POST /ingestion/reprocess` in `app/api/routers/ingestion.py` and new CLI command `reprocess-run` in `app/main.py` via new bootstrap builder `bootstrap_create_reprocess_orchestrator()` in `app/bootstrap.py`. Added API regression coverage for reprocess trigger in `tests/test_api_ingestion.py`; Task 5 focused tests now pass.
+5. **Integrate Task 6 fallback engine into canonical pipeline flow** — `status: planned`
+   - **Description:** Wire fallback services into existing canonical mapping/persistence flow without creating a parallel orchestration path.
+   - [ ] Replace current FX-only-from-ConversionRates behavior with full Task 6 FX fallback resolution in canonical pipeline mapping outputs.
+   - [ ] Persist resolved FX values/source/provisional/diagnostic fields into `event_fx` via existing canonical persistence APIs.
+   - [ ] Ensure ingestion/reprocess timelines include Task 6-relevant diagnostics summary counters where appropriate.
+   - **Acceptance criteria:** Ingestion and reprocess flows both produce deterministic FX fallback results and diagnostics from the same shared path.
+   - **Summary:** (fill after completion)
 
-6. **Execute Task 5 validation gates (tests + lint)** — `status: done`
-   - **Description:** Run project-required quality checks for all Task 5 touched modules and resolve Task 5-related failures.
-   - [ ] Run targeted Task 5 tests first, then adjacent ingestion/API tests impacted by wiring changes.
-   - [ ] Run `ruff` per project linting protocol and fix new issues.
-   - [ ] Run `pylint` per project linting protocol and fix new issues.
-   - **Acceptance criteria:** Task 5 regressions pass and lint gates pass with zero new errors in changed code.
-   - **Summary:** Ran Task 5 and adjacent regression tests: `pytest tests/test_mapping_canonical_pipeline.py tests/test_db_canonical_upsert.py tests/test_jobs_reprocess.py tests/test_jobs_ingestion_orchestrator.py tests/test_api_ingestion.py -q` -> `10 passed, 2 skipped`. Ran `ruff` on project code only (excluding `references/`) via `/stock_app/.venv/bin/python -m ruff check app tests alembic --ignore=E501,W293,W291` -> pass. Ran `pylint` on all Task 5 touched modules with project disable profile plus `R0801`/`R0903` for practical cross-file duplicate/stub-class noise -> `10.00/10`.
+6. **Run Task 6 validation gates (tests and lint)** — `status: planned`
+   - **Description:** Validate Task 6 changes with project testing and linting protocols.
+   - [ ] Run targeted Task 6 tests first, then adjacent ingestion/mapping/canonical tests impacted by wiring changes.
+   - [ ] Run `ruff` on project code (excluding `references/`) and resolve all new issues.
+   - [ ] Run `pylint` per project protocol on Task 6 touched modules and resolve all new issues.
+   - **Acceptance criteria:** Task 6 regression suite passes and lint gates pass with zero new errors in changed code.
+   - **Summary:** (fill after completion)
 
-7. **Update README and memory** — `status: done`
+7. **Update README and memory** — `status: planned`
    - **Description:** revise `README.md` and `ai_memory.md` to reflect changes
-   - [ ] Document Task 5 canonical mapping and reprocess behavior in README.
-   - [ ] Record durable Task 5 architecture/pattern decisions in `ai_memory.md`.
-   - [ ] Remove/adjust stale docs that still describe mapping as unimplemented.
-   - **Summary:** Updated `README.md` with a new Task 5 section documenting canonical mapping behavior, canonical UPSERT scope, ingestion canonical stage diagnostics, and both reprocess trigger surfaces (`POST /ingestion/reprocess`, `python -m app.main reprocess-run`). Updated `ai_memory.md` with durable Task 5 decisions/patterns: fail-fast mapping policy, centralized canonical persistence contracts, frozen cashflow correction behavior, dual reprocess surfaces, and shared canonical pipeline helper usage.
+   - [ ] Update `README.md` Task 6 section with implemented fallback hierarchies, diagnostics semantics, and affected workflow surfaces.
+   - [ ] Add durable Task 6 decisions/patterns to `ai_memory.md` using required format.
+   - [ ] Remove stale documentation that still describes Task 6 functionality as missing.
+   - **Acceptance criteria:** Documentation and memory reflect actual Task 6 implementation and no longer contradict runtime behavior.
+   - **Summary:** (fill after completion)
 
 ## Clarifying Questions
-Q1: Should Task 5 expose reprocess via CLI only in this task, or both CLI and API trigger surfaces?
-A1: Expose reprocess through both CLI and API trigger surfaces in Task 5.
+Q1: For EOD mark outputs in Task 6, should the resolver persist intermediate mark decisions in DB now, or return deterministic outputs for immediate Task 6 tests and Task 7 consumption without new persistence tables?
+A1: Pending information from user.
 
-Q2: For canonical-row parsing failures inside a run, should behavior be fail-fast for the whole run, or continue processing valid rows and mark run `failed` with aggregated diagnostics?
-A2: Use fail-fast behavior for the whole run.
-
-Q3: For `event_cashflow` correction handling, should differing duplicate-key amount/date updates set `is_correction=true` and upsert latest values exactly as frozen spec, or should mismatches create a hard failure?
-A3: Treat differing duplicate-key amount/date rows as corrections: set `is_correction=true` and UPSERT latest values per frozen spec (not a hard failure).
+Q2: For tie-break rule "highest raw record primary key", should UUID ordering (`raw_record_id` descending) be treated as the canonical implementation of "highest" in this codebase?
+A2: Pending information from user.

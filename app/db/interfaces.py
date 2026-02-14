@@ -489,12 +489,20 @@ class IngestionRunRepositoryPort(Protocol):
             ValueError: Raised when input id is invalid.
         """
 
-    def db_ingestion_run_list(self, limit: int, offset: int) -> list[IngestionRunRecord]:
-        """List ingestion runs ordered by latest started timestamp and id.
+    def db_ingestion_run_list(
+        self,
+        limit: int,
+        offset: int,
+        sort_by: str = "started_at_utc",
+        sort_dir: str = "desc",
+    ) -> list[IngestionRunRecord]:
+        """List ingestion runs with deterministic endpoint sort support.
 
         Args:
             limit: Max rows to return.
             offset: Rows to skip.
+            sort_by: Sort field name.
+            sort_dir: Sort direction (`asc` or `desc`).
 
         Returns:
             list[IngestionRunRecord]: Deterministically ordered run rows.

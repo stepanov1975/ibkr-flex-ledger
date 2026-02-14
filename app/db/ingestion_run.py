@@ -27,6 +27,14 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
     including single-active-run lock enforcement.
     """
 
+    _INGESTION_RUN_ALLOWED_SORT_FIELDS = {
+        "started_at_utc": "started_at_utc",
+        "ended_at_utc": "ended_at_utc",
+        "status": "status",
+        "duration_ms": "duration_ms",
+    }
+    _INGESTION_RUN_ALLOWED_SORT_DIRECTIONS = {"asc", "desc"}
+
     def __init__(self, engine: Engine):
         """Initialize ingestion run persistence service.
 
@@ -215,12 +223,20 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("failed to fetch ingestion run by id") from error
 
-    def db_ingestion_run_list(self, limit: int, offset: int) -> list[IngestionRunRecord]:
-        """List runs with deterministic default ordering.
+    def db_ingestion_run_list(
+        self,
+        limit: int,
+        offset: int,
+        sort_by: str = "started_at_utc",
+        sort_dir: str = "desc",
+    ) -> list[IngestionRunRecord]:
+        """List runs with deterministic endpoint sort contract.
 
         Args:
             limit: Maximum number of rows.
             offset: Number of rows to skip.
+            sort_by: Sort field name.
+            sort_dir: Sort direction (`asc` or `desc`).
 
         Returns:
             list[IngestionRunRecord]: Ordered run rows.
@@ -235,6 +251,16 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
+        normalized_sort_by = self._validate_non_empty_text(sort_by, "sort_by")
+        normalized_sort_dir = self._validate_non_empty_text(sort_dir, "sort_dir").lower()
+        if normalized_sort_by not in self._INGESTION_RUN_ALLOWED_SORT_FIELDS:
+            raise ValueError(f"unsupported sort_by={normalized_sort_by}")
+        if normalized_sort_dir not in self._INGESTION_RUN_ALLOWED_SORT_DIRECTIONS:
+            raise ValueError(f"unsupported sort_dir={normalized_sort_dir}")
+
+        order_by_field = self._INGESTION_RUN_ALLOWED_SORT_FIELDS[normalized_sort_by]
+        order_by_clause = f"{order_by_field} {normalized_sort_dir}, ingestion_run_id {normalized_sort_dir}"
+
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
@@ -244,7 +270,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "report_date_local, started_at_utc, ended_at_utc, duration_ms, "
                         "error_code, error_message, diagnostics, created_at_utc "
                         "FROM ingestion_run "
-                        "ORDER BY started_at_utc DESC, ingestion_run_id DESC "
+                        f"ORDER BY {order_by_clause} "
                         "LIMIT :limit OFFSET :offset"
                     ),
                     {"limit": limit, "offset": offset},

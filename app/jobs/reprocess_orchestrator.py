@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from app.db import CanonicalPersistenceRepositoryPort, IngestionRunRepositoryPort, RawRecordReadRepositoryPort
@@ -104,24 +104,67 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         if normalized_job_name != self._REPROCESS_JOB_NAME:
             raise ValueError(f"unsupported job_name={normalized_job_name}")
 
+        return self._job_reprocess_execute_with_config(config=self._config)
+
+    def job_execute_reprocess_target(self, period_key: str, flex_query_id: str) -> JobExecutionResult:
+        """Execute canonical reprocess for one explicit period/query target.
+
+        Args:
+            period_key: Ingestion period identity key for replay scope.
+            flex_query_id: Upstream Flex query identifier for replay scope.
+
+        Returns:
+            JobExecutionResult: Final execution status payload.
+
+        Raises:
+            ValueError: Raised when explicit scope values are invalid.
+            RuntimeError: Raised for unexpected execution failures after finalization.
+        """
+
+        normalized_period_key = self._job_reprocess_validate_period_key(period_key)
+        if not isinstance(flex_query_id, str):
+            raise ValueError("flex_query_id must be a string")
+        normalized_flex_query_id = flex_query_id.strip()
+        if not normalized_flex_query_id:
+            raise ValueError("flex_query_id must not be blank")
+        scoped_config = replace(
+            self._config,
+            period_key=normalized_period_key,
+            flex_query_id=normalized_flex_query_id,
+        )
+        return self._job_reprocess_execute_with_config(config=scoped_config)
+
+    def _job_reprocess_execute_with_config(self, config: CanonicalReprocessOrchestratorConfig) -> JobExecutionResult:
+        """Execute canonical reprocess using the provided replay scope config.
+
+        Args:
+            config: Effective replay scope values.
+
+        Returns:
+            JobExecutionResult: Final execution status payload.
+
+        Raises:
+            RuntimeError: Raised for unexpected execution failures after finalization.
+        """
+
         timeline: list[dict[str, object]] = [domain_build_stage_event(stage="run", status="started")]
         run_record = None
 
         if self._ingestion_repository is not None:
             run_record = self._ingestion_repository.db_ingestion_run_create_started(
-                account_id=self._config.account_id,
+                account_id=config.account_id,
                 run_type="reprocess",
-                period_key=self._config.period_key,
-                flex_query_id=self._config.flex_query_id,
+                period_key=config.period_key,
+                flex_query_id=config.flex_query_id,
                 report_date_local=None,
             )
 
         try:
             timeline.append(domain_build_stage_event(stage="raw_read", status="started"))
             raw_rows = self._raw_read_repository.db_raw_record_list_for_period(
-                account_id=self._config.account_id,
-                period_key=self._config.period_key,
-                flex_query_id=self._config.flex_query_id,
+                account_id=config.account_id,
+                period_key=config.period_key,
+                flex_query_id=config.flex_query_id,
             )
             timeline.append(
                 domain_build_stage_event(
@@ -134,8 +177,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
             canonical_started_at = datetime.now(timezone.utc)
             canonical_counts = job_canonical_map_and_persist(
-                account_id=self._config.account_id,
-                functional_currency=self._config.functional_currency,
+                account_id=config.account_id,
+                functional_currency=config.functional_currency,
                 raw_records=raw_rows,
                 canonical_persistence_repository=self._canonical_persistence_repository,
             )
@@ -163,7 +206,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     error_message=None,
                     diagnostics=timeline,
                 )
-            return JobExecutionResult(job_name=normalized_job_name, status="success")
+            return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
         except Exception as error:
             timeline.append(
                 domain_build_stage_event(
@@ -185,3 +228,27 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     diagnostics=timeline,
                 )
             raise RuntimeError("canonical reprocess execution failed") from error
+
+    def _job_reprocess_validate_period_key(self, period_key: str) -> str:
+        """Validate explicit replay period key format.
+
+        Args:
+            period_key: Candidate replay period key.
+
+        Returns:
+            str: Validated `YYYY-MM-DD` period key.
+
+        Raises:
+            ValueError: Raised when period key is blank or has invalid format.
+        """
+
+        if not isinstance(period_key, str):
+            raise ValueError("period_key must be a string")
+        normalized_period_key = period_key.strip()
+        if not normalized_period_key:
+            raise ValueError("period_key must not be blank")
+        try:
+            datetime.strptime(normalized_period_key, "%Y-%m-%d")
+        except ValueError as error:
+            raise ValueError("period_key must use YYYY-MM-DD format") from error
+        return normalized_period_key

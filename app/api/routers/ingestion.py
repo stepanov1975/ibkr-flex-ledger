@@ -68,7 +68,10 @@ def api_create_ingestion_router(
             return JSONResponse(content=payload, status_code=status.HTTP_409_CONFLICT)
 
     @router.post("/reprocess")
-    def api_ingestion_reprocess_trigger() -> JSONResponse:
+    def api_ingestion_reprocess_trigger(
+        period_key: str | None = Query(default=None),
+        flex_query_id: str | None = Query(default=None),
+    ) -> JSONResponse:
         """Trigger one canonical reprocess run via orchestrator.
 
         Returns:
@@ -80,7 +83,35 @@ def api_create_ingestion_router(
 
         target_orchestrator = reprocess_orchestrator or ingestion_orchestrator
         try:
-            execution_result = target_orchestrator.job_execute(job_name="reprocess_run")
+            if period_key is not None or flex_query_id is not None:
+                normalized_period_key = (period_key or "").strip()
+                normalized_flex_query_id = (flex_query_id or "").strip()
+                if not normalized_period_key:
+                    payload = {
+                        "status": "error",
+                        "message": "period_key must not be blank when explicit scope is provided",
+                    }
+                    return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
+                if not normalized_flex_query_id:
+                    payload = {
+                        "status": "error",
+                        "message": "flex_query_id must not be blank when explicit scope is provided",
+                    }
+                    return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
+
+                scoped_execute = getattr(target_orchestrator, "job_execute_reprocess_target", None)
+                if scoped_execute is None:
+                    payload = {
+                        "status": "error",
+                        "message": "configured reprocess orchestrator does not support explicit scope overrides",
+                    }
+                    return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
+                execution_result = scoped_execute(
+                    period_key=normalized_period_key,
+                    flex_query_id=normalized_flex_query_id,
+                )
+            else:
+                execution_result = target_orchestrator.job_execute(job_name="reprocess_run")
             payload = {
                 "job_name": execution_result.job_name,
                 "status": execution_result.status,
@@ -97,6 +128,8 @@ def api_create_ingestion_router(
     def api_ingestion_run_list(
         limit: int = Query(default=settings.api_default_limit, ge=1),
         offset: int = Query(default=0, ge=0),
+        sort_by: str = Query(default="started_at_utc"),
+        sort_dir: str = Query(default="desc"),
     ) -> JSONResponse:
         """Return ingestion runs list ordered by latest first.
 
@@ -111,14 +144,45 @@ def api_create_ingestion_router(
             RuntimeError: Raised when repository read fails.
         """
 
-        run_rows = ingestion_repository.db_ingestion_run_list(limit=limit, offset=offset)
+        normalized_sort_by = sort_by.strip()
+        normalized_sort_dir = sort_dir.strip().lower()
+        allowed_sort_by = {"started_at_utc", "ended_at_utc", "status", "duration_ms"}
+        allowed_sort_dir = {"asc", "desc"}
+        if normalized_sort_by not in allowed_sort_by:
+            payload = {
+                "status": "error",
+                "code": "INVALID_SORT_FIELD",
+                "message": f"unsupported sort_by={normalized_sort_by}",
+            }
+            return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
+        if normalized_sort_dir not in allowed_sort_dir:
+            payload = {
+                "status": "error",
+                "code": "INVALID_SORT_DIRECTION",
+                "message": f"unsupported sort_dir={normalized_sort_dir}",
+            }
+            return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
+
+        applied_limit = min(limit, settings.api_max_limit)
+        run_rows = ingestion_repository.db_ingestion_run_list(
+            limit=applied_limit,
+            offset=offset,
+            sort_by=normalized_sort_by,
+            sort_dir=normalized_sort_dir,
+        )
         payload = {
             "items": [api_serialize_ingestion_run_record(run_record) for run_record in run_rows],
             "page": {
                 "limit": limit,
+                "applied_limit": applied_limit,
                 "offset": offset,
                 "returned": len(run_rows),
             },
+            "sort": {
+                "sort_by": normalized_sort_by,
+                "sort_dir": normalized_sort_dir,
+            },
+            "filters": {},
         }
         return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
 

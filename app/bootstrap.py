@@ -103,7 +103,10 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
     )
 
 
-def bootstrap_create_reprocess_orchestrator() -> CanonicalReprocessOrchestrator:
+def bootstrap_create_reprocess_orchestrator(
+    period_key: str | None = None,
+    flex_query_id: str | None = None,
+) -> CanonicalReprocessOrchestrator:
     """Build canonical reprocess orchestrator for non-HTTP trigger surfaces.
 
     Returns:
@@ -114,6 +117,8 @@ def bootstrap_create_reprocess_orchestrator() -> CanonicalReprocessOrchestrator:
     """
 
     settings = config_load_settings()
+    resolved_period_key = (period_key or datetime.now(timezone.utc).date().isoformat()).strip()
+    resolved_flex_query_id = (flex_query_id or settings.ibkr_flex_query_id).strip()
     engine = db_create_engine(database_url=settings.database_url)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
@@ -123,8 +128,8 @@ def bootstrap_create_reprocess_orchestrator() -> CanonicalReprocessOrchestrator:
         ingestion_repository=ingestion_repository,
         config=CanonicalReprocessOrchestratorConfig(
             account_id=settings.account_id,
-            period_key=datetime.now(timezone.utc).date().isoformat(),
-            flex_query_id=settings.ibkr_flex_query_id,
+            period_key=resolved_period_key,
+            flex_query_id=resolved_flex_query_id,
             functional_currency="USD",
         ),
     )

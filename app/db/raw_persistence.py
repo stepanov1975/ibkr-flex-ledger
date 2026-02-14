@@ -133,43 +133,41 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
         if len(requests) == 0:
             return RawRecordPersistResult(inserted_count=0, deduplicated_count=0)
 
-        inserted_count = 0
-        deduplicated_count = 0
+        normalized_requests = [self._db_raw_validate_row_request(request) for request in requests]
+        parameter_rows = [
+            {
+                "raw_artifact_id": normalized_request.raw_artifact_id,
+                "ingestion_run_id": normalized_request.ingestion_run_id,
+                "account_id": normalized_request.artifact_reference.account_id,
+                "period_key": normalized_request.artifact_reference.period_key,
+                "flex_query_id": normalized_request.artifact_reference.flex_query_id,
+                "payload_sha256": normalized_request.artifact_reference.payload_sha256,
+                "report_date_local": normalized_request.report_date_local,
+                "section_name": normalized_request.section_name,
+                "source_row_ref": normalized_request.source_row_ref,
+                "source_payload": json.dumps(normalized_request.source_payload),
+            }
+            for normalized_request in normalized_requests
+        ]
 
         try:
             with self._engine.begin() as connection:
-                for request in requests:
-                    normalized_request = self._db_raw_validate_row_request(request)
-                    inserted_row = connection.execute(
-                        text(
-                            "INSERT INTO raw_record ("
-                            "raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, "
-                            "report_date_local, section_name, source_row_ref, source_payload"
-                            ") VALUES ("
-                            ":raw_artifact_id, :ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, "
-                            ":report_date_local, :section_name, :source_row_ref, CAST(:source_payload AS jsonb)"
-                            ") ON CONFLICT ON CONSTRAINT uq_raw_record_artifact_section_source_ref DO NOTHING "
-                            "RETURNING raw_record_id"
-                        ),
-                        {
-                            "raw_artifact_id": normalized_request.raw_artifact_id,
-                            "ingestion_run_id": normalized_request.ingestion_run_id,
-                            "account_id": normalized_request.artifact_reference.account_id,
-                            "period_key": normalized_request.artifact_reference.period_key,
-                            "flex_query_id": normalized_request.artifact_reference.flex_query_id,
-                            "payload_sha256": normalized_request.artifact_reference.payload_sha256,
-                            "report_date_local": normalized_request.report_date_local,
-                            "section_name": normalized_request.section_name,
-                            "source_row_ref": normalized_request.source_row_ref,
-                            "source_payload": json.dumps(normalized_request.source_payload),
-                        },
-                    ).mappings().fetchone()
+                inserted_rows = connection.execute(
+                    text(
+                        "INSERT INTO raw_record ("
+                        "raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, "
+                        "report_date_local, section_name, source_row_ref, source_payload"
+                        ") VALUES ("
+                        ":raw_artifact_id, :ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, "
+                        ":report_date_local, :section_name, :source_row_ref, CAST(:source_payload AS jsonb)"
+                        ") ON CONFLICT ON CONSTRAINT uq_raw_record_artifact_section_source_ref DO NOTHING "
+                        "RETURNING raw_record_id"
+                    ),
+                    parameter_rows,
+                ).mappings().all()
 
-                    if inserted_row is None:
-                        deduplicated_count += 1
-                    else:
-                        inserted_count += 1
-
+                inserted_count = len(inserted_rows)
+                deduplicated_count = len(parameter_rows) - inserted_count
                 return RawRecordPersistResult(inserted_count=inserted_count, deduplicated_count=deduplicated_count)
         except SQLAlchemyError as error:
             raise RuntimeError("raw row persistence failed") from error

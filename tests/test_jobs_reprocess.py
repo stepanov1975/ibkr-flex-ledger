@@ -373,3 +373,70 @@ def test_jobs_reprocess_persists_canonical_duration_diagnostics() -> None:
     assert "canonical_duration_ms" in details
     assert isinstance(details["canonical_duration_ms"], int)
     assert details["canonical_duration_ms"] >= 0
+
+
+def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query() -> None:
+    """Use provided period/query scope instead of default orchestrator config values.
+
+    Returns:
+        None: Assertions validate explicit scope forwarding.
+
+    Raises:
+        AssertionError: Raised when repository read scope does not match override values.
+    """
+
+    class _CapturingRawReadRepository(_RawReadRepositoryStub):
+        """Raw read stub that captures replay scope arguments."""
+
+        def __init__(self, rows: list[RawRecordForMapping]):
+            super().__init__(rows=rows)
+            self.captured_scope: tuple[str, str, str] | None = None
+
+        def db_raw_record_list_for_period(
+            self,
+            account_id: str,
+            period_key: str,
+            flex_query_id: str,
+        ) -> list[RawRecordForMapping]:
+            self.captured_scope = (account_id, period_key, flex_query_id)
+            return super().db_raw_record_list_for_period(account_id, period_key, flex_query_id)
+
+    raw_rows = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1001",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1001",
+                "transactionID": "1001",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "10",
+                "tradePrice": "100.10",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+    raw_read_repository = _CapturingRawReadRepository(rows=raw_rows)
+    canonical_repository = _CanonicalPersistRepositoryStub()
+    orchestrator = CanonicalReprocessOrchestrator(
+        raw_read_repository=raw_read_repository,
+        canonical_persistence_repository=canonical_repository,
+        config=CanonicalReprocessOrchestratorConfig(
+            account_id="U_TEST",
+            period_key="2026-02-01",
+            flex_query_id="query-default",
+            functional_currency="USD",
+        ),
+    )
+
+    execution_result = orchestrator.job_execute_reprocess_target(
+        period_key="2026-02-12",
+        flex_query_id="query-override",
+    )
+
+    assert execution_result.status == "success"
+    assert raw_read_repository.captured_scope == ("U_TEST", "2026-02-12", "query-override")

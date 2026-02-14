@@ -61,7 +61,13 @@ class _IngestionRepositoryStub:
 
         self._run_record = run_record
 
-    def db_ingestion_run_list(self, limit: int, offset: int) -> list[IngestionRunRecord]:
+    def db_ingestion_run_list(
+        self,
+        limit: int,
+        offset: int,
+        sort_by: str = "started_at_utc",
+        sort_dir: str = "desc",
+    ) -> list[IngestionRunRecord]:
         """Return deterministic singleton list for list endpoint.
 
         Args:
@@ -75,6 +81,7 @@ class _IngestionRepositoryStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
+        _ = (sort_by, sort_dir)
         if limit < 1 or offset < 0:
             return []
         return [self._run_record]
@@ -158,6 +165,67 @@ class _SuccessReprocessOrchestrator:
         """
 
         return type("Result", (), {"job_name": job_name, "status": "success"})()
+
+
+class _ScopedReprocessOrchestrator:
+    """Orchestrator stub that captures scoped reprocess execution inputs."""
+
+    def __init__(self):
+        """Initialize capture state for scoped reprocess calls.
+
+        Returns:
+            None: Initializer does not return values.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        self.calls: list[tuple[str, str]] = []
+
+    def job_supported_names(self) -> tuple[str, ...]:
+        """Return supported stub job names.
+
+        Returns:
+            tuple[str, ...]: Supported job names tuple.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return ("reprocess_run",)
+
+    def job_execute(self, job_name: str):
+        """Return successful default reprocess execution response.
+
+        Args:
+            job_name: Requested job name.
+
+        Returns:
+            object: Lightweight result object.
+
+        Raises:
+            RuntimeError: This method does not raise runtime errors.
+        """
+
+        _ = job_name
+        return type("Result", (), {"job_name": "reprocess_run", "status": "success"})()
+
+    def job_execute_reprocess_target(self, period_key: str, flex_query_id: str):
+        """Capture scoped reprocess request and return success.
+
+        Args:
+            period_key: Replay period key.
+            flex_query_id: Replay Flex query identifier.
+
+        Returns:
+            object: Lightweight result object.
+
+        Raises:
+            RuntimeError: This method does not raise runtime errors.
+        """
+
+        self.calls.append((period_key, flex_query_id))
+        return type("Result", (), {"job_name": "reprocess_run", "status": "success"})()
 
 
 def _build_success_ingestion_orchestrator() -> object:
@@ -472,3 +540,58 @@ def test_api_ingestion_run_list_includes_canonical_summary_fields() -> None:
     assert payload["canonical_input_row_count"] == 14946
     assert payload["canonical_duration_ms"] == 1948
     assert payload["canonical_skip_reason"] is None
+
+
+def test_api_ingestion_run_list_clamps_limit_to_max_and_exposes_sort_metadata() -> None:
+    """Clamp oversized `limit` to configured max and include sort metadata.
+
+    Returns:
+        None: Assertions validate pagination and sort contract.
+
+    Raises:
+        AssertionError: Raised when list contract metadata is missing or invalid.
+    """
+
+    run_record = _build_run_record_with_canonical_diagnostics()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get("/ingestion/runs?limit=999&sort_by=status&sort_dir=asc")
+
+    assert response.status_code == 200
+    page = response.json()["page"]
+    assert page["applied_limit"] == 200
+    assert page["limit"] == 999
+    assert response.json()["sort"] == {"sort_by": "status", "sort_dir": "asc"}
+
+
+def test_api_reprocess_trigger_accepts_explicit_scope_overrides() -> None:
+    """Route explicit period/query scope values to scoped reprocess execution.
+
+    Returns:
+        None: Assertions validate scoped routing behavior.
+
+    Raises:
+        AssertionError: Raised when scoped target values are not forwarded.
+    """
+
+    run_record = _build_run_record()
+    scoped_orchestrator = _ScopedReprocessOrchestrator()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+        reprocess_orchestrator=scoped_orchestrator,
+    )
+    client = TestClient(application)
+
+    response = client.post("/ingestion/reprocess?period_key=2026-02-10&flex_query_id=query-override")
+
+    assert response.status_code == 200
+    assert scoped_orchestrator.calls == [("2026-02-10", "query-override")]

@@ -70,7 +70,13 @@ class _FailingDatabaseService:
 class _IngestionRepositoryStub:
     """Minimal repository stub for API factory dependency injection."""
 
-    def db_ingestion_run_list(self, _limit: int, _offset: int) -> list[object]:
+    def db_ingestion_run_list(
+        self,
+        _limit: int,
+        _offset: int,
+        sort_by: str = "started_at_utc",
+        sort_dir: str = "desc",
+    ) -> list[object]:
         """Return deterministic empty run list.
 
         Args:
@@ -84,6 +90,7 @@ class _IngestionRepositoryStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
+        _ = (sort_by, sort_dir)
         return []
 
     def db_ingestion_run_get_by_id(self, _ingestion_run_id) -> None:

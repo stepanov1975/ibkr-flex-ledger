@@ -37,6 +37,18 @@ def main() -> None:
         "`reprocess-run` triggers one canonical reprocess workflow",
         type=str,
     )
+    argument_parser.add_argument(
+        "--period-key",
+        dest="period_key",
+        type=str,
+        help="Optional replay period key in YYYY-MM-DD format for `reprocess-run`",
+    )
+    argument_parser.add_argument(
+        "--flex-query-id",
+        dest="flex_query_id",
+        type=str,
+        help="Optional Flex query id override for `reprocess-run`",
+    )
     parsed_arguments = argument_parser.parse_args()
 
     if parsed_arguments.command == "ingestion-run":
@@ -48,7 +60,10 @@ def main() -> None:
         return
 
     if parsed_arguments.command == "reprocess-run":
-        reprocess_orchestrator = bootstrap_create_reprocess_orchestrator()
+        reprocess_orchestrator = bootstrap_create_reprocess_orchestrator(
+            period_key=parsed_arguments.period_key,
+            flex_query_id=parsed_arguments.flex_query_id,
+        )
         execution_result = reprocess_orchestrator.job_execute(job_name="reprocess_run")
         if execution_result.status != "success":
             raise SystemExit(1)
