@@ -98,6 +98,8 @@ Traceability is first-class: report values are designed to link back to canonica
 For full milestone-level acceptance criteria and implementation details, see:
 
 - `MVP.md`
+- `MVP_spec_freeze.md` (frozen MVP implementation values and contracts)
+- `implementation_task_list.md` (outcome-ordered implementation execution checklist)
 - `initial_plan.md`
 - `max_plan.md` (reference architecture; not initial scope)
 - `references/REFERENCE_NOTES.md` (external reference projects and reuse guidance)

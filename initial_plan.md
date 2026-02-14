@@ -1,5 +1,10 @@
 # IBKR Trade Ledger & Portfolio Insights (Homelab) — MVP Spec
 
+Implementation note:
+- `MVP.md` is the active MVP plan.
+- `MVP_spec_freeze.md` is the normative frozen implementation contract.
+- `implementation_task_list.md` is the execution-ordered task checklist.
+
 ## 1) Project purpose
 
 Build a self-hosted web app that imports **Interactive Brokers (IBKR)** activity data via **Flex Web Service / Flex Queries** and computes **auditable, reconciliable portfolio metrics** (starting with stocks), with **labels + notes** for grouping and analysis.

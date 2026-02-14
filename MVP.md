@@ -29,6 +29,7 @@ Rules:
 
 Specification reference:
 - `MVP_spec_freeze.md` is the authoritative source for frozen MVP implementation values (natural keys, fallback rules, tolerances, SLOs, CSV contracts, retention windows).
+- `implementation_task_list.md` is the authoritative outcome-ordered implementation sequence with explicit dependencies, deliverables, and acceptance criteria.
 
 ---
 
