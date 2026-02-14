@@ -1,102 +1,126 @@
-# MVP Evaluation: IBKR Trade Ledger & Portfolio Insights
+# MVP Evaluation
 
 Date: 2026-02-14
+Source: `MVP.md`
 
-## 1) Summary
-The MVP scope is clear and well-structured across ingestion, canonical mapping, ledger computation, reporting, and reconciliation. The plan strongly enforces modular boundaries and deterministic recomputation from immutable raw data, which is a solid foundation for later expansion.
+## Summary
 
-The largest remaining risk is not feature definition but specification depth in key operational and accounting rules. Several areas need explicit decisions before implementation to avoid rework: idempotency policy, valuation source for unrealized P&L, FX conversion conventions, reconciliation tolerance rules, and authentication/authorization boundaries.
+The MVP is well-scoped and modular, with clear layer boundaries, a reproducibility-first data model, and explicit non-goals. It is strong on architecture intent and auditability requirements (raw immutability, provenance, reprocess determinism, reconciliation visibility). The canonical time policy is now defined: store timestamps in UTC and apply `Asia/Jerusalem` for UI and business date boundaries. The main execution risk is not missing features, but missing operational and data-contract specifics needed to implement consistently (scheduler semantics, strict contract definitions, manual-case workflow details, and acceptance thresholds).
 
-## 2) Missing Information to Fill
-- Idempotency behavior for repeated ingestion is now resolved: raw artifact dedupe by `period_key + flex_query_id + sha256`, then canonical record UPSERT by stable natural keys.
-- Canonical event schema details (required fields per event type, enum values, nullability).
-- Instrument identity strategy is now resolved: conid is canonical; ISIN/CUSIP/FIGI and symbol/localSymbol are aliases with deterministic conid-first conflict handling.
-- Pricing source and timing for unrealized P&L is now resolved: IBKR end-of-day marks tied to report date with documented fallback when missing.
-- FX conversion policy is now resolved: use broker-provided execution FX when present; otherwise apply one documented fallback hierarchy.
-- Reconciliation diff thresholds are now resolved: per-metric tolerance with currency-specific decimal precision.
-- Corporate action handling ownership and workflow are now resolved: conservative automation boundary plus single-user manual case resolution with provisional-output warnings.
-- Data retention policy is now resolved: keep raw payloads indefinitely for audit and use configurable retention for derived diagnostics.
-- Security model is now resolved: authentication is delegated to reverse proxy; no in-app authentication in MVP.
-- Operational SLO baseline is now resolved: define minimum ingestion success, latency, and recovery SLOs before implementation.
+## Missing Information to Fill Before/During Implementation
 
-## 3) Clarified Assumptions (Current Plan Implies)
-- Single deployment track with synchronized app and DB schema changes (no backward-compatibility layer).
-- Stocks are the only supported asset class in MVP ledger logic.
-- FIFO is authoritative for lot matching and realized P&L.
-- Raw Flex data is immutable and acts as the source of truth for replay.
-- Corporate actions beyond covered deterministic mapping can be flagged for manual handling.
-- API/UI consume data via service and db-layer interfaces only; no direct DB access outside db modules.
+### Resolved
 
-## 4) Implementation Challenges and Considerations
-1. Event normalization stability
-   - Challenge: Flex schema drift can break mappers silently if contracts are loose.
-   - Recommendation: Define strict per-section parser contracts and golden fixture tests before coding ledger logic.
+1. **Flex query and account scope**
+	- Resolved: MVP is strictly single IBKR account.
+2. **Time boundary conventions**
+	- Resolved: store timestamps in UTC; apply `Asia/Jerusalem` for business date boundaries and UI display.
+3. **Canonical event identity specification**
+	- Resolved decision: define event-type key contracts in one versioned mapping spec before coding mappers.
+4. **Mark/FX fallback definitions**
+	- Resolved decision: freeze one ordered source list and tie-break behavior for deterministic recompute.
+5. **Corporate action manual workflow schema**
+	- Resolved decision: maintain explicit auto-allowlist; all other cases are mandatory manual with provisional output flags.
+6. **Reconciliation tolerance matrix**
+	- Resolved decision: publish a shared tolerance matrix (absolute + relative thresholds) used by UI and tests.
+7. **Operational SLO and alert thresholds**
+	- Resolved decision: define minimum measurable SLOs before release validation.
+8. **CSV export contract**
+	- Resolved decision: version CSV schemas and lock column names/order/types with fixture-based regression tests.
+9. **Data retention implementation detail**
+	- Resolved decision: keep raw data indefinitely; define bounded retention/archival for high-volume derived diagnostics.
+10. **Security boundary details**
+	- Resolved for MVP scope: authentication header and trust-assumption checks are out of scope and deferred to post-MVP hardening.
 
-2. Deterministic recomputation at scale
-   - Challenge: Reprocessing full history can become expensive and hard to reason about with partial failures.
-   - Recommendation: Add run-scoped checkpoints and deterministic hash/fingerprint of canonical outputs per run.
+### Still Open (needs concrete values/specs)
 
-3. Accounting consistency between modes
-   - Challenge: Broker-aligned and economic modes may diverge for legitimate reasons, creating support noise.
-   - Recommendation: Publish a mode rulebook with formula-level differences and expose formula metadata in diff output.
+1. **Canonical event natural keys by type**
+	- Exact key field sets for `trade_fill`, `cashflow`, `fx`, and `corp_action` still need explicit specification.
+2. **Fallback hierarchies as concrete ordered lists**
+	- EOD mark and FX fallback sources require exact priority definitions and deterministic tie-break rules.
+3. **Corporate action allowlist detail**
+	- Exact action types included in auto-resolution vs mandatory manual are not yet enumerated.
+4. **Tolerance matrix values**
+	- Absolute/relative thresholds and currency precision need explicit numeric values.
+5. **SLO target values**
+	- Ingestion success threshold, max run duration, and recovery-time targets remain to be quantified.
+6. **CSV contracts per endpoint**
+	- Concrete per-endpoint column schemas and version labels still need to be finalized.
+7. **Derived-data retention windows**
+	- Exact retention durations and archival trigger criteria are not yet specified.
 
-4. Traceability performance
-   - Challenge: Row-level provenance joins can slow reporting and drilldowns.
-   - Recommendation: Precompute lineage keys and add indexes for event->raw and report->event traversal paths.
+## Assumptions to Clarify and Freeze
 
-5. Corporate action ambiguity
-   - Challenge: Edge-case actions can invalidate lot states if partially mapped.
-   - Recommendation: Use explicit blocking rules: unresolved mandatory action types halt affected instrument recompute.
+- MVP is **single-user, single deployment**, with coordinated code+DB rollout and no backward-compatibility paths.
+- Database is PostgreSQL 17 and all write/read access is through `db` layer repositories only.
+- Time handling is fixed: persist timestamps in UTC; compute ingestion/report/snapshot boundaries in `Asia/Jerusalem`, then convert to UTC for storage/query.
+- Corporate actions are conservative by design: ambiguous cases must block affected outputs as provisional.
+- Reprocessing from immutable raw data is source-of-truth for correction and reproducibility.
+- Reconciliation mode and economic mode are intentionally different and both valid if policy-defined tolerance is met.
 
-6. Operational reliability
-   - Challenge: Cron-based ingestion may overlap or run with stale credentials/network issues.
-   - Recommendation: Enforce run locks, timeout policy, retry/backoff for transport, and actionable alert summaries.
+## Implementation Challenges (with Impact)
 
-## 5) Open Questions
-Q1: What is the exact idempotency policy for ingesting the same IBKR report period multiple times?
-A1: Use upsert-by-stable-record-IDs as the authoritative idempotency rule; treat Flex ReferenceCode only as a temporary retrieval handle and never as a stable report identity. For each ingestion, dedupe raw artifacts by period_key + flex_query_id + sha256; then parse and UPSERT canonical records on stable natural keys so re-ingestion converges to latest IBKR truth without duplicates.
-Recommendation: This is the strongest v1 policy because it is deterministic, audit-friendly, resilient to late IBKR corrections, and simple to operate. Add period-window reconciliation (delete/deactivate missing rows) only if strict latest-statement snapshot matching is later required.
+1. **Deterministic idempotency across ingestion and mapping**
+	- Challenge: avoiding duplicate business events while allowing safe replay.
+	- Impact: incorrect positions/P&L if keys are unstable.
+2. **Instrument identity conflicts (conid-first with aliases)**
+	- Challenge: symbol/cusip/isin changes and stale aliases over time.
+	- Impact: fragmented instrument history and broken drilldowns.
+3. **FIFO lot correctness under partial closes and fees/taxes**
+	- Challenge: exact cost basis propagation under complex sequences.
+	- Impact: silent realized/unrealized P&L errors.
+4. **Schema drift detection quality**
+	- Challenge: fail-fast without excessive false positives.
+	- Impact: ingestion instability or unnoticed data corruption.
+5. **Provenance query performance**
+	- Challenge: deep traceability (`report -> event -> raw`) at report latency targets.
+	- Impact: slow UX and operational troubleshooting friction.
+6. **Manual-case gating UX and downstream consistency**
+	- Challenge: marking provisional outputs while preserving user trust.
+	- Impact: users may misread incomplete numbers as final.
+7. **Reconciliation explainability**
+	- Challenge: surfacing formula/rule context for each diff in a compact way.
+	- Impact: unresolved mismatches and low confidence in system outputs.
 
-Q2: Which instrument identifier is canonical when source identifiers conflict (conid, ISIN, symbol)?
-A2: Use conid as the canonical instrument identifier for IBKR-sourced data. Treat ISIN/CUSIP/FIGI and symbol/localSymbol as secondary aliases or attributes, not primary identity.
-Recommendation: Conid should be the authoritative key because it is the most stable IBKR contract identifier across sections and edge cases. Store aliases with history (valid_from/valid_to), resolve conflicts by trusting conid first, and use deterministic fallback keys only when conid is missing (with manual-review flag).
+## Open Questions
 
-Q3: What pricing source and timestamp should be used for unrealized P&L snapshots?
-A3: Start with IBKR end-of-day marks tied to report date and document fallback when missing.
-Recommendation: Start with IBKR end-of-day marks tied to report date and document fallback when missing.
+Q1: Is MVP strictly single IBKR account, or must ingestion/reporting support multiple accounts now?
+A1: MVP is strictly single IBKR account.
+Recommendation: If uncertain, enforce single-account in MVP schema/API and add account as a future module boundary.
 
-Q4: Which FX conversion rule is authoritative for economic reporting (trade-date, settlement-date, or broker rate)?
-A4: Use broker-provided execution FX when present; otherwise apply a single documented fallback hierarchy.
-Recommendation: Use broker-provided execution FX when present; otherwise apply a single documented fallback hierarchy.
+Q2: What canonical timezone should be used for ingestion date boundaries, snapshots, and report filters?
+A2: Store all timestamps in UTC in the database. Use Israel local timezone (`Asia/Jerusalem`) for UI display and for business date boundaries (ingestion windows, daily snapshots, and report filters).
+Recommendation: Standardize boundary handling as local-time-first (`Asia/Jerusalem`) and convert boundary timestamps to UTC for database querying; enforce timezone-aware datetimes only.
 
-Q5: What tolerance and rounding policy defines a reconciliation mismatch?
-A5: Define per-metric tolerance (for example, cash vs P&L) and apply currency-specific decimal precision.
-Recommendation: Define per-metric tolerance (for example, cash vs P&L) and apply currency-specific decimal precision.
+Q3: What are the exact natural-key fields for UPSERT per canonical event type (`trade_fill`, `cashflow`, `fx`, `corp_action`)?
+A3: Define event-type key contracts in one versioned mapping spec before coding mappers.
+Recommendation: Define event-type key contracts in one versioned mapping spec before coding mappers.
 
-Q6: Which corporate action types are mandatory to auto-handle in MVP vs always manual?
-A6: Auto-handle only deterministic, low-ambiguity actions in MVP: cash-only events (CD, CP, FA), identity-only changes (IC and security ID changes), and FS/RS only when split-factor inference is unambiguous. Treat all election-based, multi-leg, cost-basis allocation, and option-deliverable adjustment actions as manual cases.
-Recommendation: Use a three-tier policy: Safe Auto, Auto-if-unambiguous, and Always Manual. Always ingest and classify all corporate action rows, then open a manual case whenever inference is not deterministic.
+Q4: What is the exact fallback hierarchy for missing EOD marks and missing execution FX?
+A4: Freeze one ordered source list and document tie-break behavior to preserve deterministic recompute.
+Recommendation: Freeze one ordered source list and document tie-break behavior to preserve deterministic recompute.
 
-Q7: Who owns manual resolution of flagged events, and what is acceptable SLA?
-A7: The single application user owns manual resolution of flagged events. There is no fixed time-based SLA; resolution is performed when the user has availability.
-Recommendation: Mark affected outputs as provisional until unresolved flags are cleared, with persistent warnings and unresolved counters so data quality state is always visible.
+Q5: Which corporate action types are auto-resolved in MVP vs always manual?
+A5: Maintain an explicit allowlist for auto cases and treat all others as mandatory manual with provisional output flags.
+Recommendation: Maintain an explicit allowlist for auto cases and treat all others as mandatory manual with provisional output flags.
 
-Q8: What authentication/authorization model is required for MVP APIs and UI?
-A8: Authentication is handled by the reverse proxy. The application itself will not implement authentication.
-Recommendation: If truly single-user behind reverse proxy, document that boundary; otherwise define RBAC now to avoid schema rework.
+Q6: What reconciliation tolerances should be used per metric and currency precision?
+A6: Publish a tolerance matrix (absolute + relative thresholds) and use the same matrix in UI and test fixtures.
+Recommendation: Publish a tolerance matrix (absolute + relative thresholds) and use the same matrix in UI and test fixtures.
 
-Q9: What retention windows apply to raw payloads, diagnostics, and daily snapshots?
-A9: Keep raw payloads indefinitely for audit, and add configurable retention for derived diagnostics if storage is constrained.
-Recommendation: Keep raw payloads indefinitely for audit, and add configurable retention for derived diagnostics if storage is constrained.
+Q7: What SLO targets define MVP reliability (ingestion success %, max run duration, recovery time)?
+A7: Set minimum measurable SLOs now so operations and alerting can be validated before release.
+Recommendation: Set minimum measurable SLOs now so operations and alerting can be validated before release.
 
-Q10: What are the target operational SLOs for ingestion success, latency, and recovery?
-A10: Define minimum SLOs before implementation so alerts and job behavior can be tuned to objective criteria.
-Recommendation: Define minimum SLOs before implementation so alerts and job behavior can be tuned to objective criteria.
+Q8: What is the stable CSV export contract for each report endpoint?
+A8: Version CSV schemas and lock column names/order/types with fixture-based regression tests.
+Recommendation: Version CSV schemas and lock column names/order/types with fixture-based regression tests.
 
-Q11: What should happen if a required Flex section is temporarily missing for one day?
-A11: Mark run failed, preserve partial diagnostics, and prevent downstream recompute from publishing incomplete snapshots.
-Recommendation: Mark run failed, preserve partial diagnostics, and prevent downstream recompute from publishing incomplete snapshots.
+Q9: What retention/archival policy applies to derived diagnostics and snapshots as data volume grows?
+A9: Keep raw indefinitely as required, but define bounded retention and archival for high-volume derived logs.
+Recommendation: Keep raw indefinitely as required, but define bounded retention and archival for high-volume derived logs.
 
-Q12: What level of export capability is mandatory in MVP (CSV/JSON, report-level, provenance-level)?
-A12: Start with CSV for key report endpoints and include stable column contracts to support external checks.
-Recommendation: Start with CSV for key report endpoints and include stable column contracts to support external checks.
+Q10: What reverse-proxy authentication headers and trust assumptions are mandatory in production and local development?
+A10: No need to check authentication headers and trust assumptions.
+Recommendation: Treat this as out of scope for MVP and revisit in post-MVP hardening.
+

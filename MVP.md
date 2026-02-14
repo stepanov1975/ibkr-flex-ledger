@@ -39,6 +39,7 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 - Stocks-only positions and P&L
 - Labels, notes, and grouped reporting
 - Reconciliation and traceability workflows
+- Single IBKR account operation in MVP
 
 ### Out of Scope (MVP)
 - Options lifecycle accounting
@@ -47,6 +48,7 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 - Real-time market data and risk dashboards
 - Trade execution automation
 - Full automatic coverage of all corporate-action edge cases
+- Multi-account ingestion, storage isolation, and account-level reporting
 
 ### Scope boundary from max plan
 - The structure must be ready for phase 2+ modules.
@@ -85,16 +87,26 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 ### Resolved MVP policy decisions
 - Idempotency policy: dedupe raw artifacts by `period_key + flex_query_id + sha256`, then UPSERT canonical records on stable natural keys.
 - Instrument identity policy: `conid` is canonical for IBKR data; ISIN/CUSIP/FIGI and symbol/localSymbol are aliases with conid-first conflict handling.
+- Time policy: store all timestamps in UTC; apply `Asia/Jerusalem` for UI rendering and business date boundaries (ingestion windows, daily snapshots, report filters).
 - Unrealized valuation policy: use IBKR end-of-day marks tied to report date; apply one documented fallback when marks are missing.
 - Economic FX policy: use broker-provided execution FX when present; otherwise apply one documented fallback hierarchy.
 - Reconciliation mismatch policy: evaluate diffs with per-metric tolerances and currency-specific decimal precision.
 - Corporate action policy: auto-handle only deterministic low-ambiguity actions; require manual cases for election-based, multi-leg, cost-basis allocation, and option-deliverable adjustments.
 - Manual resolution ownership: single-user operation; unresolved mandatory corporate-action cases mark affected outputs as provisional with visible warnings.
-- Security boundary: authentication is delegated to reverse proxy; no in-app authentication in MVP.
+- Security boundary: authentication is delegated to reverse proxy; no in-app authentication and no reverse-proxy header contract hardening in MVP.
 - Retention policy: keep immutable raw payloads indefinitely for audit; use configurable retention for derived diagnostics if needed.
 - Reliability baseline: define operational SLOs for ingestion success, latency, and recovery before implementation.
 - Missing required sections policy: mark ingestion run failed, preserve diagnostics, and block publishing incomplete downstream snapshots.
 - Export baseline: provide CSV exports for key report endpoints with stable column contracts.
+
+### Specification freeze required before implementation completion
+- Canonical natural-key definitions per event type (`trade_fill`, `cashflow`, `fx`, `corp_action`) must be documented in one versioned mapping spec.
+- EOD mark fallback and FX fallback must be documented as exact ordered source lists with deterministic tie-break rules.
+- Corporate-action auto-handled allowlist must be explicitly enumerated.
+- Reconciliation tolerance matrix must define concrete absolute and relative thresholds plus currency precision.
+- Reliability SLOs must define concrete targets for ingestion success, run duration, and recovery time.
+- CSV export contracts must define per-endpoint column names, order, and data types with schema version labels.
+- Derived diagnostics retention must define concrete retention windows and archival trigger criteria.
 
 ---
 
@@ -123,6 +135,7 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Define required fields per event type with strict enum values and nullability rules.
 - Version parser/mapping contracts by Flex section so schema drift fails fast with clear diagnostics.
 - Ensure deterministic canonical output identity so replay/reprocess yields stable record keys.
+- Document and version natural-key UPSERT fields per canonical event type before enabling production reprocess runs.
 
 ### Validation Rules
 - Reject ingestion when mandatory Flex sections are missing
@@ -193,6 +206,7 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Open lots produce expected unrealized P&L using IBKR end-of-day marks tied to report date, with documented fallback behavior
 - Daily snapshots persist and are queryable by date range
 - Economic reporting uses broker-provided execution FX when present and otherwise uses one documented fallback hierarchy
+- Snapshot and report date boundaries are interpreted in `Asia/Jerusalem` and executed as UTC-boundary queries
 
 ---
 
@@ -227,6 +241,7 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Reconciliation mismatches are visible, not hidden, and evaluated using per-metric tolerance with currency-specific precision
 - Diff output includes enough context for troubleshooting
 - Outputs impacted by unresolved mandatory manual cases are clearly marked provisional with unresolved counters
+- Tolerance values are sourced from one shared matrix used consistently by backend calculations, API payloads, and UI labels
 
 ---
 
@@ -267,6 +282,7 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - FX conversion event handling
 - Schema drift detection and diagnostic quality
 - Reprocess determinism from immutable raw inputs
+- Time-boundary correctness across `Asia/Jerusalem` DST transitions for ingestion windows, snapshots, and report filters
 
 ### Completion Gates
 - All MVP tests pass
@@ -308,5 +324,6 @@ MVP is complete when all conditions are true:
 - Advanced performance analytics (MWR/TWR, deeper FX attribution)
 - CSV fallback imports and richer exports
 - Multi-account support
+- Reverse-proxy authentication header/trust hardening and enforcement
 
 Reference: `max_plan.md` defines the target end-state architecture and future domains.

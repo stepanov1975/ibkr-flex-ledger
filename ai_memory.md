@@ -5,3 +5,7 @@
 - [2026-02-14] PATTERN :: Keep external IBKR/Flex repositories under references/ as read-only study material; reuse architecture patterns (parser boundary, poll-download flow, report section checklist) without direct code copy.
 - [2026-02-14] DECISION :: Pre-implementation protocol requires scanning references/REFERENCE_NOTES.md before any feature work or significant bug fix to maximize reuse and prevent duplicate design effort.
 - [2026-02-14] DECISION :: MVP.md now encodes resolved evaluation policies as explicit requirements: idempotency (period_key + flex_query_id + sha256 plus canonical UPSERT), conid-first identity, EOD mark and FX fallback rules, reconciliation tolerance policy, manual corporate-action workflow, reverse-proxy auth boundary, retention defaults, missing-section failure handling, and CSV export baseline.
+- [2026-02-14] DECISION :: MVP scope is explicitly single IBKR account; multi-account ingestion and reporting are post-MVP only.
+- [2026-02-14] DECISION :: Canonical time handling is fixed project-wide: persist timestamps in UTC and apply Asia/Jerusalem for UI and business date boundaries.
+- [2026-02-14] DECISION :: MVP keeps reverse-proxy authentication boundary but defers proxy-header trust hardening checks to post-MVP.
+- [2026-02-14] PATTERN :: MVP.md includes a specification-freeze checklist requiring concrete values for natural keys, fallback hierarchies, corporate-action allowlist, tolerance matrix, SLO targets, CSV contracts, and derived-data retention windows.
