@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from typing import Final
 from urllib.parse import urlencode
@@ -17,7 +18,10 @@ from .interfaces import AdapterFetchResult, FlexAdapterPort
 class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
+    _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/urllib.request)"
     _NOT_READY_ERROR_CODE: Final[str] = "1019"
+    _THROTTLED_ERROR_CODE: Final[str] = "1018"
+    _RETRYABLE_POLL_ERROR_CODES: Final[frozenset[str]] = frozenset({_NOT_READY_ERROR_CODE, _THROTTLED_ERROR_CODE})
 
     def __init__(
         self,
@@ -27,6 +31,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         initial_wait_seconds: int = 5,
         retry_attempts: int = 7,
         retry_increment_seconds: int = 10,
+        request_timeout_seconds: float = 30.0,
     ):
         """Initialize Flex Web Service adapter.
 
@@ -37,6 +42,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             initial_wait_seconds: Delay before first poll attempt.
             retry_attempts: Number of download polling attempts.
             retry_increment_seconds: Linear backoff increment per retry.
+            request_timeout_seconds: HTTP request timeout in seconds.
 
         Returns:
             None: Initializer does not return a value.
@@ -61,6 +67,8 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             raise ValueError("initial_wait_seconds must be >= 0")
         if retry_increment_seconds < 0:
             raise ValueError("retry_increment_seconds must be >= 0")
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be > 0")
 
         self._token = normalized_token
         self._base_url = normalized_base_url.rstrip("/")
@@ -68,7 +76,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         self._initial_wait_seconds = initial_wait_seconds
         self._retry_attempts = retry_attempts
         self._retry_increment_seconds = retry_increment_seconds
-        self._user_agent = "ibkr-flex-ledger/1.0 (Python/urllib.request)"
+        self._request_timeout_seconds = request_timeout_seconds
 
     def adapter_source_name(self) -> str:
         """Return stable adapter source label.
@@ -164,9 +172,14 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         """
 
         query_parameters = {"q": reference_code, "t": self._token, "v": self._api_version}
+        pending_retry_delay_seconds = 0
 
         for retry_index in range(self._retry_attempts):
-            wait_seconds = self._initial_wait_seconds + (retry_index * self._retry_increment_seconds)
+            wait_seconds = max(
+                self._initial_wait_seconds + (retry_index * self._retry_increment_seconds),
+                pending_retry_delay_seconds,
+            )
+            pending_retry_delay_seconds = 0
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
 
@@ -179,12 +192,11 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                     stage_timeline=stage_timeline,
                     stage="download",
                     status="completed",
-                    details={"poll_attempt": retry_index + 1},
+                        details={"poll_attempt": retry_index + 1, "payload_format": "non_xml"},
                 )
                 return poll_payload
 
-            first_child = poll_root[0] if len(poll_root) > 0 else None
-            if first_child is not None and first_child.tag == "FlexStatements":
+            if self._adapter_poll_payload_is_statement_xml(poll_root):
                 self._adapter_record_stage_event(
                     stage_timeline=stage_timeline,
                     stage="download",
@@ -193,11 +205,22 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 )
                 return poll_payload
 
-            error_code = (poll_root.findtext("ErrorCode") or "").strip()
-            if error_code == self._NOT_READY_ERROR_CODE:
+            error_code, error_message = self._adapter_extract_response_error(poll_root)
+            if error_code in self._RETRYABLE_POLL_ERROR_CODES:
+                pending_retry_delay_seconds = self._adapter_retry_delay_seconds_for_error(error_code)
+                self._adapter_record_stage_event(
+                    stage_timeline=stage_timeline,
+                    stage="download",
+                    status="retrying",
+                    details={
+                        "poll_attempt": retry_index + 1,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                        "retry_after_seconds": pending_retry_delay_seconds,
+                    },
+                )
                 continue
 
-            error_message = (poll_root.findtext("ErrorMessage") or "unexpected upstream response").strip()
             raise RuntimeError(f"Flex statement polling failed: code={error_code or 'UNKNOWN'}, message={error_message}")
 
         raise TimeoutError("Flex statement polling timed out after all retries")
@@ -219,21 +242,74 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         full_url = f"{url}?{urlencode(query_parameters)}"
         try:
-            request = Request(full_url, method="GET", headers={"User-Agent": self._user_agent})
-            with urlopen(request) as response:
+            request = Request(full_url, method="GET", headers={"User-Agent": self._USER_AGENT})
+            with urlopen(request, timeout=self._request_timeout_seconds) as response:
                 status_code = int(response.getcode() or 200)
                 payload = response.read()
+        except TimeoutError as error:
+            raise TimeoutError("Flex transport request timed out") from error
         except HTTPError as error:
             raise ConnectionError(f"Flex upstream returned HTTP {error.code}") from error
         except URLError as error:
+            if isinstance(error.reason, (TimeoutError, socket.timeout)):
+                raise TimeoutError("Flex transport request timed out") from error
             raise ConnectionError("Flex transport request failed") from error
-        except Exception as error:
-            raise RuntimeError("Flex request failed with unexpected client error") from error
 
         if status_code >= 400:
             raise ConnectionError(f"Flex upstream returned HTTP {status_code}")
 
         return bytes(payload)
+
+    def _adapter_poll_payload_is_statement_xml(self, poll_root: element_tree.Element) -> bool:
+        """Return whether poll response root contains a Flex statement payload.
+
+        Args:
+            poll_root: Parsed poll XML root node.
+
+        Returns:
+            bool: True when poll payload is a statement document.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        if poll_root.tag == "FlexQueryResponse":
+            return poll_root.find("FlexStatements") is not None
+        return poll_root.tag == "FlexStatements"
+
+    def _adapter_extract_response_error(self, response_root: element_tree.Element) -> tuple[str, str]:
+        """Extract normalized error code and message from Flex response XML.
+
+        Args:
+            response_root: Parsed response XML root node.
+
+        Returns:
+            tuple[str, str]: Normalized error code and error message.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        error_code = (response_root.findtext("ErrorCode") or "").strip()
+        error_message = (response_root.findtext("ErrorMessage") or "unexpected upstream response").strip()
+        return error_code, error_message
+
+    def _adapter_retry_delay_seconds_for_error(self, error_code: str) -> int:
+        """Return retry delay override for known retryable Flex poll errors.
+
+        Args:
+            error_code: Upstream Flex error code.
+
+        Returns:
+            int: Retry delay in seconds.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        if error_code == self._THROTTLED_ERROR_CODE:
+            return max(10, self._retry_increment_seconds)
+        return max(5, self._retry_increment_seconds)
 
     def _adapter_parse_xml(self, payload: bytes, context_label: str) -> element_tree.Element:
         """Parse payload as XML and raise deterministic parsing errors.

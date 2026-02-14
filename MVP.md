@@ -291,9 +291,10 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 
 ### Ingestion / Operations
 - `POST /ingestion/run`
-- `POST /ingestion/reprocess/{ingestion_run_id}`
+- `POST /ingestion/reprocess`
 - `GET /ingestion/runs`
-- `GET /ingestion/runs/{id}`
+- `GET /ingestion/runs/{ingestion_run_id}`
+- `GET /ingestion/runs/{ingestion_run_id}/missing-sections`
 
 ### Master Data
 - `GET /instruments`

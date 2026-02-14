@@ -232,8 +232,10 @@ Operational note for live IBKR runs:
 API endpoints:
 
 - `POST /ingestion/run`
+- `POST /ingestion/reprocess`
 - `GET /ingestion/runs`
 - `GET /ingestion/runs/{ingestion_run_id}`
+- `GET /ingestion/runs/{ingestion_run_id}/missing-sections`
 
 CLI trigger command:
 
@@ -281,11 +283,27 @@ API endpoint additions:
 
 - `POST /ingestion/reprocess`
 
+Reprocess explicit scope query parameters:
+
+- `period_key` (required when explicit scope is provided; format `YYYY-MM-DD`)
+- `flex_query_id` (required when explicit scope is provided)
+
+Example:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/ingestion/reprocess?period_key=2026-02-14&flex_query_id=query"
+```
+
 Ingestion run list/detail payload additions:
 
 - `canonical_input_row_count`: Number of raw rows considered by canonical mapping for this run.
 - `canonical_duration_ms`: Canonical stage duration in milliseconds.
 - `canonical_skip_reason`: Optional reason when canonical mapping is skipped (for example `no_new_raw_rows_for_run`).
+
+Ingestion diagnostics timeline additions:
+
+- Poll retry events can include `download` stage entries with `status=retrying` and retry metadata (`poll_attempt`, `error_code`, `error_message`, `retry_after_seconds`).
+- Timeout failures are surfaced through run failure diagnostics with `error_type=TimeoutError` and the propagated error message.
 
 CLI trigger command additions:
 

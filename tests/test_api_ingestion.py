@@ -379,6 +379,59 @@ def _build_run_record_with_canonical_diagnostics() -> IngestionRunRecord:
     )
 
 
+def _build_run_record_with_timeout_diagnostics() -> IngestionRunRecord:
+    """Build deterministic failed run record with timeout diagnostics.
+
+    Returns:
+        IngestionRunRecord: Typed failed run record with timeout details.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    run_id = uuid4()
+    started_at = datetime.now(timezone.utc)
+    return IngestionRunRecord(
+        ingestion_run_id=run_id,
+        account_id="U_TEST",
+        run_type="manual",
+        reference=IngestionRunReference(
+            period_key=date.today().isoformat(),
+            flex_query_id="query",
+            report_date_local=None,
+        ),
+        state=IngestionRunState(
+            status="failed",
+            started_at_utc=started_at,
+            ended_at_utc=started_at,
+            duration_ms=456,
+            error_code="INGESTION_UNEXPECTED_ERROR",
+            error_message="Flex transport request timed out",
+            diagnostics=[
+                {
+                    "stage": "download",
+                    "status": "retrying",
+                    "details": {
+                        "poll_attempt": 1,
+                        "error_code": "1018",
+                        "error_message": "Too many requests",
+                        "retry_after_seconds": 10,
+                    },
+                },
+                {
+                    "stage": "run",
+                    "status": "failed",
+                    "details": {
+                        "error_type": "TimeoutError",
+                        "error_message": "Flex transport request timed out",
+                    },
+                },
+            ],
+        ),
+        created_at_utc=started_at,
+    )
+
+
 def test_api_ingestion_trigger_returns_409_when_run_already_active() -> None:
     """Return HTTP 409 when ingestion trigger collides with active run lock.
 
@@ -595,3 +648,67 @@ def test_api_reprocess_trigger_accepts_explicit_scope_overrides() -> None:
 
     assert response.status_code == 200
     assert scoped_orchestrator.calls == [("2026-02-10", "query-override")]
+
+
+def test_api_ingestion_run_detail_exposes_timeout_failure_diagnostics() -> None:
+    """Expose timeout failure metadata from orchestrator diagnostics in run detail.
+
+    Returns:
+        None: Assertions validate timeout diagnostics projection.
+
+    Raises:
+        AssertionError: Raised when timeout diagnostics are missing.
+    """
+
+    run_record = _build_run_record_with_timeout_diagnostics()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get(f"/ingestion/runs/{run_record.ingestion_run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "INGESTION_UNEXPECTED_ERROR"
+    assert payload["error_message"] == "Flex transport request timed out"
+    assert payload["diagnostics"][0]["stage"] == "download"
+    assert payload["diagnostics"][0]["status"] == "retrying"
+    assert payload["diagnostics"][0]["details"]["retry_after_seconds"] == 10
+    assert payload["diagnostics"][1]["details"]["error_type"] == "TimeoutError"
+
+
+def test_api_ingestion_run_list_exposes_timeout_failure_diagnostics() -> None:
+    """Expose timeout failure diagnostics on ingestion run list payload items.
+
+    Returns:
+        None: Assertions validate timeout diagnostics projection in list items.
+
+    Raises:
+        AssertionError: Raised when timeout diagnostics are missing on list response.
+    """
+
+    run_record = _build_run_record_with_timeout_diagnostics()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get("/ingestion/runs")
+
+    assert response.status_code == 200
+    payload = response.json()["items"][0]
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "INGESTION_UNEXPECTED_ERROR"
+    assert payload["error_message"] == "Flex transport request timed out"
+    assert payload["diagnostics"][0]["stage"] == "download"
+    assert payload["diagnostics"][0]["status"] == "retrying"
+    assert payload["diagnostics"][0]["details"]["retry_after_seconds"] == 10
+    assert payload["diagnostics"][1]["details"]["error_type"] == "TimeoutError"

@@ -299,6 +299,21 @@ Endpoint-specific defaults and allowed fields:
 - Allowed `sort_by`: `started_at_utc`, `ended_at_utc`, `status`, `duration_ms`
 - Allowed filters: `status`, `from_utc`, `to_utc`, `run_type`
 
+### 9.4 Ingestion operations endpoints
+- `POST /ingestion/run`
+- `POST /ingestion/reprocess`
+- `GET /ingestion/runs/{ingestion_run_id}`
+- `GET /ingestion/runs/{ingestion_run_id}/missing-sections`
+
+`POST /ingestion/reprocess` explicit-scope query contract:
+- `period_key` and `flex_query_id` are both required when explicit scope is provided.
+- `period_key` format must be `YYYY-MM-DD`.
+
+Ingestion diagnostics timeline contract:
+- Adapter polling retries may emit `download` stage entries with `status=retrying`.
+- Retry details include `poll_attempt`, `error_code`, `error_message`, and `retry_after_seconds`.
+- Timeout failures are surfaced in run diagnostics with `error_type=TimeoutError`.
+
 List response envelope (all list endpoints):
 - `items`: array
 - `page`: `{limit, offset, returned, total, has_more, applied_limit}`
