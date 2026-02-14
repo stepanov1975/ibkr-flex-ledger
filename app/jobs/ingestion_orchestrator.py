@@ -228,22 +228,43 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
             if self._canonical_repository is not None:
                 timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
-                canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_period(
-                    account_id=self._config.account_id,
-                    period_key=period_key,
-                    flex_query_id=self._config.flex_query_id,
+                canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_run(
+                    ingestion_run_id=run_record.ingestion_run_id,
                 )
-                canonical_counts = job_canonical_map_and_persist(
-                    account_id=self._config.account_id,
-                    functional_currency=self._config.functional_currency,
-                    raw_records=canonical_raw_rows,
-                    canonical_persistence_repository=self._canonical_repository,
+                canonical_started_at = datetime.now(timezone.utc)
+                if len(canonical_raw_rows) == 0:
+                    canonical_counts = {
+                        "instrument_upsert_count": 0,
+                        "trade_fill_count": 0,
+                        "cashflow_count": 0,
+                        "fx_count": 0,
+                        "corp_action_count": 0,
+                    }
+                    canonical_skip_reason = "no_new_raw_rows_for_run"
+                else:
+                    canonical_counts = job_canonical_map_and_persist(
+                        account_id=self._config.account_id,
+                        functional_currency=self._config.functional_currency,
+                        raw_records=canonical_raw_rows,
+                        canonical_persistence_repository=self._canonical_repository,
+                    )
+                    canonical_skip_reason = None
+                canonical_duration_ms = max(
+                    0,
+                    int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
                 )
+                canonical_details: dict[str, object] = {
+                    **canonical_counts,
+                    "canonical_input_row_count": len(canonical_raw_rows),
+                    "canonical_duration_ms": canonical_duration_ms,
+                }
+                if canonical_skip_reason is not None:
+                    canonical_details["canonical_skip_reason"] = canonical_skip_reason
                 timeline.append(
                     domain_build_stage_event(
                         stage="canonical_mapping",
                         status="completed",
-                        details=canonical_counts,
+                        details=canonical_details,
                     )
                 )
 

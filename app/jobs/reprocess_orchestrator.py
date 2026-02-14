@@ -132,17 +132,25 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             )
 
             timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
+            canonical_started_at = datetime.now(timezone.utc)
             canonical_counts = job_canonical_map_and_persist(
                 account_id=self._config.account_id,
                 functional_currency=self._config.functional_currency,
                 raw_records=raw_rows,
                 canonical_persistence_repository=self._canonical_persistence_repository,
             )
+            canonical_duration_ms = max(
+                0,
+                int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
+            )
             timeline.append(
                 domain_build_stage_event(
                     stage="canonical_mapping",
                     status="completed",
-                    details=canonical_counts,
+                    details={
+                        **canonical_counts,
+                        "canonical_duration_ms": canonical_duration_ms,
+                    },
                 )
             )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -66,39 +67,38 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         normalized_period_key = self._db_canonical_validate_non_empty_text(period_key, "period_key")
         normalized_flex_query_id = self._db_canonical_validate_non_empty_text(flex_query_id, "flex_query_id")
 
-        try:
-            with self._engine.connect() as connection:
-                rows = connection.execute(
-                    text(
-                        "SELECT raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
-                        "report_date_local, section_name, source_row_ref, source_payload "
-                        "FROM raw_record "
-                        "WHERE account_id = :account_id AND period_key = :period_key AND flex_query_id = :flex_query_id "
-                        "ORDER BY created_at_utc ASC, raw_record_id ASC"
-                    ),
-                    {
-                        "account_id": normalized_account_id,
-                        "period_key": normalized_period_key,
-                        "flex_query_id": normalized_flex_query_id,
-                    },
-                ).mappings().all()
-        except SQLAlchemyError as error:
-            raise RuntimeError("canonical raw row read failed") from error
+        return self._db_canonical_read_raw_rows(
+            where_clause=(
+                "account_id = :account_id AND period_key = :period_key AND flex_query_id = :flex_query_id"
+            ),
+            parameters={
+                "account_id": normalized_account_id,
+                "period_key": normalized_period_key,
+                "flex_query_id": normalized_flex_query_id,
+            },
+        )
 
-        return [
-            RawRecordForCanonicalMapping(
-                raw_record_id=row["raw_record_id"],
-                ingestion_run_id=row["ingestion_run_id"],
-                account_id=row["account_id"],
-                period_key=row["period_key"],
-                flex_query_id=row["flex_query_id"],
-                report_date_local=row["report_date_local"],
-                section_name=row["section_name"],
-                source_row_ref=row["source_row_ref"],
-                source_payload=dict(row["source_payload"]),
-            )
-            for row in rows
-        ]
+    def db_raw_record_list_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
+        """List raw rows for one ingestion run identity.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered raw rows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when read operation fails.
+        """
+
+        if ingestion_run_id is None:
+            raise ValueError("ingestion_run_id must not be None")
+
+        return self._db_canonical_read_raw_rows(
+            where_clause="ingestion_run_id = CAST(:ingestion_run_id AS uuid)",
+            parameters={"ingestion_run_id": str(ingestion_run_id)},
+        )
 
     def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
         """Persist or reuse canonical instrument by conid-first identity.
@@ -172,32 +172,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             RuntimeError: Raised when persistence operation fails.
         """
 
-        normalized_request = self._db_canonical_validate_trade_request(request)
-
-        try:
-            with self._engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "INSERT INTO event_trade_fill ("
-                        "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
-                        "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, realized_pnl, "
-                        "net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency"
-                        ") VALUES ("
-                        ":account_id, :instrument_id::uuid, :ingestion_run_id::uuid, :source_raw_record_id::uuid, :ib_exec_id, "
-                        ":transaction_id, :trade_timestamp_utc::timestamptz, :report_date_local::date, :side, "
-                        ":quantity::numeric, :price::numeric, :cost::numeric, :commission::numeric, :fees::numeric, "
-                        ":realized_pnl::numeric, :net_cash::numeric, :net_cash_in_base::numeric, :fx_rate_to_base::numeric, "
-                        ":currency, :functional_currency"
-                        ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
-                        "commission = EXCLUDED.commission, "
-                        "realized_pnl = EXCLUDED.realized_pnl, "
-                        "net_cash = EXCLUDED.net_cash, "
-                        "cost = EXCLUDED.cost"
-                    ),
-                    normalized_request,
-                )
-        except SQLAlchemyError as error:
-            raise RuntimeError("canonical trade fill upsert failed") from error
+        self.db_canonical_bulk_upsert(
+            trade_requests=[request],
+            cashflow_requests=[],
+            fx_requests=[],
+            corp_action_requests=[],
+        )
 
     def db_canonical_cashflow_upsert(self, request: CanonicalCashflowUpsertRequest) -> None:
         """UPSERT one canonical cashflow event by frozen natural key.
@@ -213,38 +193,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             RuntimeError: Raised when persistence operation fails.
         """
 
-        normalized_request = self._db_canonical_validate_cashflow_request(request)
-
-        try:
-            with self._engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "INSERT INTO event_cashflow ("
-                        "account_id, instrument_id, ingestion_run_id, source_raw_record_id, transaction_id, cash_action, "
-                        "report_date_local, effective_at_utc, amount, amount_in_base, currency, functional_currency, "
-                        "withholding_tax, fees, is_correction"
-                        ") VALUES ("
-                        ":account_id, :instrument_id::uuid, :ingestion_run_id::uuid, :source_raw_record_id::uuid, :transaction_id, "
-                        ":cash_action, :report_date_local::date, :effective_at_utc::timestamptz, :amount::numeric, "
-                        ":amount_in_base::numeric, :currency, :functional_currency, :withholding_tax::numeric, :fees::numeric, false"
-                        ") ON CONFLICT ON CONSTRAINT uq_event_cashflow_account_txn_action_ccy DO UPDATE SET "
-                        "ingestion_run_id = EXCLUDED.ingestion_run_id, "
-                        "source_raw_record_id = EXCLUDED.source_raw_record_id, "
-                        "instrument_id = COALESCE(EXCLUDED.instrument_id, event_cashflow.instrument_id), "
-                        "report_date_local = EXCLUDED.report_date_local, "
-                        "effective_at_utc = EXCLUDED.effective_at_utc, "
-                        "amount = EXCLUDED.amount, "
-                        "amount_in_base = EXCLUDED.amount_in_base, "
-                        "withholding_tax = EXCLUDED.withholding_tax, "
-                        "fees = EXCLUDED.fees, "
-                        "is_correction = event_cashflow.is_correction "
-                        "OR event_cashflow.amount IS DISTINCT FROM EXCLUDED.amount "
-                        "OR event_cashflow.report_date_local IS DISTINCT FROM EXCLUDED.report_date_local"
-                    ),
-                    normalized_request,
-                )
-        except SQLAlchemyError as error:
-            raise RuntimeError("canonical cashflow upsert failed") from error
+        self.db_canonical_bulk_upsert(
+            trade_requests=[],
+            cashflow_requests=[request],
+            fx_requests=[],
+            corp_action_requests=[],
+        )
 
     def db_canonical_fx_upsert(self, request: CanonicalFxUpsertRequest) -> None:
         """UPSERT one canonical FX event by frozen natural key.
@@ -260,30 +214,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             RuntimeError: Raised when persistence operation fails.
         """
 
-        normalized_request = self._db_canonical_validate_fx_request(request)
-
-        try:
-            with self._engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "INSERT INTO event_fx ("
-                        "account_id, ingestion_run_id, source_raw_record_id, transaction_id, report_date_local, currency, "
-                        "functional_currency, fx_rate, fx_source, provisional, diagnostic_code"
-                        ") VALUES ("
-                        ":account_id, :ingestion_run_id::uuid, :source_raw_record_id::uuid, :transaction_id, "
-                        ":report_date_local::date, :currency, :functional_currency, :fx_rate::numeric, :fx_source, "
-                        ":provisional, :diagnostic_code"
-                        ") ON CONFLICT ON CONSTRAINT uq_event_fx_account_txn_ccy_pair DO UPDATE SET "
-                        "report_date_local = EXCLUDED.report_date_local, "
-                        "fx_rate = EXCLUDED.fx_rate, "
-                        "fx_source = EXCLUDED.fx_source, "
-                        "provisional = EXCLUDED.provisional, "
-                        "diagnostic_code = EXCLUDED.diagnostic_code"
-                    ),
-                    normalized_request,
-                )
-        except SQLAlchemyError as error:
-            raise RuntimeError("canonical fx upsert failed") from error
+        self.db_canonical_bulk_upsert(
+            trade_requests=[],
+            cashflow_requests=[],
+            fx_requests=[request],
+            corp_action_requests=[],
+        )
 
     def db_canonical_corp_action_upsert(self, request: CanonicalCorpActionUpsertRequest) -> None:
         """UPSERT one canonical corporate-action event by frozen natural key.
@@ -299,53 +235,173 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             RuntimeError: Raised when persistence operation fails.
         """
 
-        normalized_request = self._db_canonical_validate_corp_action_request(request)
+        self.db_canonical_bulk_upsert(
+            trade_requests=[],
+            cashflow_requests=[],
+            fx_requests=[],
+            corp_action_requests=[request],
+        )
+
+    def db_canonical_bulk_upsert(
+        self,
+        trade_requests: list[CanonicalTradeFillUpsertRequest],
+        cashflow_requests: list[CanonicalCashflowUpsertRequest],
+        fx_requests: list[CanonicalFxUpsertRequest],
+        corp_action_requests: list[CanonicalCorpActionUpsertRequest],
+    ) -> None:
+        """Persist canonical event requests in one shared database transaction.
+
+        Args:
+            trade_requests: Canonical trade-fill requests.
+            cashflow_requests: Canonical cashflow requests.
+            fx_requests: Canonical FX requests.
+            corp_action_requests: Canonical corporate-action requests.
+
+        Returns:
+            None: Event upserts are persisted as side effects.
+
+        Raises:
+            ValueError: Raised when request payloads are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
+        normalized_trade_requests = [self._db_canonical_validate_trade_request(request) for request in trade_requests]
+        normalized_cashflow_requests = [
+            self._db_canonical_validate_cashflow_request(request) for request in cashflow_requests
+        ]
+        normalized_fx_requests = [self._db_canonical_validate_fx_request(request) for request in fx_requests]
+        normalized_corp_action_requests = [
+            self._db_canonical_validate_corp_action_request(request) for request in corp_action_requests
+        ]
+
+        corp_action_requests_with_action_id = [
+            request for request in normalized_corp_action_requests if request["action_id"] is not None
+        ]
+        corp_action_requests_without_action_id = [
+            request for request in normalized_corp_action_requests if request["action_id"] is None
+        ]
 
         try:
             with self._engine.begin() as connection:
-                if normalized_request["action_id"] is None:
+                if normalized_trade_requests:
+                    connection.execute(
+                        text(
+                            "INSERT INTO event_trade_fill ("
+                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
+                            "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
+                            "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency"
+                            ") VALUES ("
+                            ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
+                            "CAST(:source_raw_record_id AS uuid), :ib_exec_id, :transaction_id, "
+                            "CAST(:trade_timestamp_utc AS timestamptz), CAST(:report_date_local AS date), :side, "
+                            "CAST(:quantity AS numeric), CAST(:price AS numeric), CAST(:cost AS numeric), "
+                            "CAST(:commission AS numeric), CAST(:fees AS numeric), CAST(:realized_pnl AS numeric), "
+                            "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
+                            "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency"
+                            ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
+                            "commission = EXCLUDED.commission, "
+                            "realized_pnl = EXCLUDED.realized_pnl, "
+                            "net_cash = EXCLUDED.net_cash, "
+                            "cost = EXCLUDED.cost"
+                        ),
+                        normalized_trade_requests,
+                    )
+
+                if normalized_cashflow_requests:
+                    connection.execute(
+                        text(
+                            "INSERT INTO event_cashflow ("
+                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, transaction_id, cash_action, "
+                            "report_date_local, effective_at_utc, amount, amount_in_base, currency, functional_currency, "
+                            "withholding_tax, fees, is_correction"
+                            ") VALUES ("
+                            ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
+                            "CAST(:source_raw_record_id AS uuid), :transaction_id, :cash_action, "
+                            "CAST(:report_date_local AS date), CAST(:effective_at_utc AS timestamptz), "
+                            "CAST(:amount AS numeric), CAST(:amount_in_base AS numeric), :currency, :functional_currency, "
+                            "CAST(:withholding_tax AS numeric), CAST(:fees AS numeric), false"
+                            ") ON CONFLICT ON CONSTRAINT uq_event_cashflow_account_txn_action_ccy DO UPDATE SET "
+                            "ingestion_run_id = EXCLUDED.ingestion_run_id, "
+                            "source_raw_record_id = EXCLUDED.source_raw_record_id, "
+                            "instrument_id = COALESCE(EXCLUDED.instrument_id, event_cashflow.instrument_id), "
+                            "report_date_local = EXCLUDED.report_date_local, "
+                            "effective_at_utc = EXCLUDED.effective_at_utc, "
+                            "amount = EXCLUDED.amount, "
+                            "amount_in_base = EXCLUDED.amount_in_base, "
+                            "withholding_tax = EXCLUDED.withholding_tax, "
+                            "fees = EXCLUDED.fees, "
+                            "is_correction = event_cashflow.is_correction "
+                            "OR event_cashflow.amount IS DISTINCT FROM EXCLUDED.amount "
+                            "OR event_cashflow.report_date_local IS DISTINCT FROM EXCLUDED.report_date_local"
+                        ),
+                        normalized_cashflow_requests,
+                    )
+
+                if normalized_fx_requests:
+                    connection.execute(
+                        text(
+                            "INSERT INTO event_fx ("
+                            "account_id, ingestion_run_id, source_raw_record_id, transaction_id, report_date_local, currency, "
+                            "functional_currency, fx_rate, fx_source, provisional, diagnostic_code"
+                            ") VALUES ("
+                            ":account_id, CAST(:ingestion_run_id AS uuid), CAST(:source_raw_record_id AS uuid), :transaction_id, "
+                            "CAST(:report_date_local AS date), :currency, :functional_currency, "
+                            "CAST(:fx_rate AS numeric), :fx_source, :provisional, :diagnostic_code"
+                            ") ON CONFLICT ON CONSTRAINT uq_event_fx_account_txn_ccy_pair DO UPDATE SET "
+                            "report_date_local = EXCLUDED.report_date_local, "
+                            "fx_rate = EXCLUDED.fx_rate, "
+                            "fx_source = EXCLUDED.fx_source, "
+                            "provisional = EXCLUDED.provisional, "
+                            "diagnostic_code = EXCLUDED.diagnostic_code"
+                        ),
+                        normalized_fx_requests,
+                    )
+
+                if corp_action_requests_without_action_id:
                     connection.execute(
                         text(
                             "INSERT INTO event_corp_action ("
                             "account_id, instrument_id, conid, ingestion_run_id, source_raw_record_id, action_id, "
                             "transaction_id, reorg_code, report_date_local, description, requires_manual, provisional, manual_case_id"
                             ") VALUES ("
-                            ":account_id, :instrument_id::uuid, :conid, :ingestion_run_id::uuid, :source_raw_record_id::uuid, "
-                            ":action_id, :transaction_id, :reorg_code, :report_date_local::date, :description, "
-                            ":requires_manual, :provisional, :manual_case_id::uuid"
+                            ":account_id, CAST(:instrument_id AS uuid), :conid, CAST(:ingestion_run_id AS uuid), "
+                            "CAST(:source_raw_record_id AS uuid), :action_id, :transaction_id, :reorg_code, "
+                            "CAST(:report_date_local AS date), :description, :requires_manual, :provisional, "
+                            "CAST(:manual_case_id AS uuid)"
                             ") ON CONFLICT ON CONSTRAINT uq_event_corp_action_fallback DO UPDATE SET "
                             "requires_manual = true, "
                             "provisional = true, "
                             "description = COALESCE(EXCLUDED.description, event_corp_action.description), "
                             "manual_case_id = COALESCE(event_corp_action.manual_case_id, EXCLUDED.manual_case_id)"
                         ),
-                        normalized_request,
+                        corp_action_requests_without_action_id,
                     )
-                    return
 
-                connection.execute(
-                    text(
-                        "INSERT INTO event_corp_action ("
-                        "account_id, instrument_id, conid, ingestion_run_id, source_raw_record_id, action_id, "
-                        "transaction_id, reorg_code, report_date_local, description, requires_manual, provisional, manual_case_id"
-                        ") VALUES ("
-                        ":account_id, :instrument_id::uuid, :conid, :ingestion_run_id::uuid, :source_raw_record_id::uuid, "
-                        ":action_id, :transaction_id, :reorg_code, :report_date_local::date, :description, "
-                        ":requires_manual, :provisional, :manual_case_id::uuid"
-                        ") ON CONFLICT ON CONSTRAINT uq_event_corp_action_account_action DO UPDATE SET "
-                        "instrument_id = COALESCE(EXCLUDED.instrument_id, event_corp_action.instrument_id), "
-                        "transaction_id = COALESCE(EXCLUDED.transaction_id, event_corp_action.transaction_id), "
-                        "reorg_code = EXCLUDED.reorg_code, "
-                        "report_date_local = EXCLUDED.report_date_local, "
-                        "description = COALESCE(EXCLUDED.description, event_corp_action.description), "
-                        "requires_manual = EXCLUDED.requires_manual, "
-                        "provisional = EXCLUDED.provisional, "
-                        "manual_case_id = COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id)"
-                    ),
-                    normalized_request,
-                )
+                if corp_action_requests_with_action_id:
+                    connection.execute(
+                        text(
+                            "INSERT INTO event_corp_action ("
+                            "account_id, instrument_id, conid, ingestion_run_id, source_raw_record_id, action_id, "
+                            "transaction_id, reorg_code, report_date_local, description, requires_manual, provisional, manual_case_id"
+                            ") VALUES ("
+                            ":account_id, CAST(:instrument_id AS uuid), :conid, CAST(:ingestion_run_id AS uuid), "
+                            "CAST(:source_raw_record_id AS uuid), :action_id, :transaction_id, :reorg_code, "
+                            "CAST(:report_date_local AS date), :description, :requires_manual, :provisional, "
+                            "CAST(:manual_case_id AS uuid)"
+                            ") ON CONFLICT ON CONSTRAINT uq_event_corp_action_account_action DO UPDATE SET "
+                            "instrument_id = COALESCE(EXCLUDED.instrument_id, event_corp_action.instrument_id), "
+                            "transaction_id = COALESCE(EXCLUDED.transaction_id, event_corp_action.transaction_id), "
+                            "reorg_code = EXCLUDED.reorg_code, "
+                            "report_date_local = EXCLUDED.report_date_local, "
+                            "description = COALESCE(EXCLUDED.description, event_corp_action.description), "
+                            "requires_manual = EXCLUDED.requires_manual, "
+                            "provisional = EXCLUDED.provisional, "
+                            "manual_case_id = COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id)"
+                        ),
+                        corp_action_requests_with_action_id,
+                    )
         except SQLAlchemyError as error:
-            raise RuntimeError("canonical corporate action upsert failed") from error
+            raise RuntimeError("canonical bulk upsert failed") from error
 
     def _db_canonical_validate_instrument_request(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentUpsertRequest:
         """Validate canonical instrument upsert request values.
@@ -375,6 +431,50 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             currency=self._db_canonical_validate_non_empty_text(request.currency, "request.currency"),
             description=self._db_canonical_validate_optional_text(request.description),
         )
+
+    def _db_canonical_read_raw_rows(self, where_clause: str, parameters: dict[str, Any]) -> list[RawRecordForCanonicalMapping]:
+        """Read raw rows using one deterministic query shape.
+
+        Args:
+            where_clause: SQL WHERE predicate fragment.
+            parameters: Bound query parameters.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered raw rows.
+
+        Raises:
+            RuntimeError: Raised when read operation fails.
+        """
+
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                        "report_date_local, section_name, source_row_ref, source_payload "
+                        "FROM raw_record "
+                        f"WHERE {where_clause} "
+                        "ORDER BY created_at_utc ASC, raw_record_id ASC"
+                    ),
+                    parameters,
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("canonical raw row read failed") from error
+
+        return [
+            RawRecordForCanonicalMapping(
+                raw_record_id=row["raw_record_id"],
+                ingestion_run_id=row["ingestion_run_id"],
+                account_id=row["account_id"],
+                period_key=row["period_key"],
+                flex_query_id=row["flex_query_id"],
+                report_date_local=row["report_date_local"],
+                section_name=row["section_name"],
+                source_row_ref=row["source_row_ref"],
+                source_payload=dict(row["source_payload"]),
+            )
+            for row in rows
+        ]
 
     def _db_canonical_validate_trade_request(self, request: CanonicalTradeFillUpsertRequest) -> dict[str, Any]:
         """Validate canonical trade upsert request values.

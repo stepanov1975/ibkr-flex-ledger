@@ -94,6 +94,15 @@ class CanonicalMappingService:
         for raw_record in raw_records:
             section_name = raw_record.section_name.strip()
             if section_name == "Trades":
+                if ":Trade:" not in raw_record.source_row_ref:
+                    continue
+                payload = raw_record.source_payload
+                # FSN[2026-02-14]: ALWAYS skip Trades rows missing ibExecID before strict trade validation.
+                # Context: IBKR live exports can include non-execution Trades rows that still carry transaction fields. | Symptom: fail-fast blocks full run on missing ibExecID.
+                # Guard: only map trade when ibExecID exists and is non-empty. | Test: test_mapping_build_canonical_batch_skips_trade_rows_without_ib_exec_id
+                ib_exec_id = payload.get("ibExecID")
+                if not isinstance(ib_exec_id, str) or not ib_exec_id.strip():
+                    continue
                 instrument_request, trade_request = self._mapping_map_trade_record(
                     account_id=normalized_account_id,
                     functional_currency=normalized_functional_currency,
@@ -125,6 +134,8 @@ class CanonicalMappingService:
                 continue
 
             if section_name == "CorporateActions":
+                if ":CorporateAction:" not in raw_record.source_row_ref:
+                    continue
                 instrument_request, corp_action_request = self._mapping_map_corp_action_record(
                     account_id=normalized_account_id,
                     raw_record=raw_record,

@@ -272,13 +272,20 @@ Included behavior:
 - Canonical mapping service for `Trades`, `CashTransactions`, `ConversionRates`, and `CorporateActions` with fail-fast contract validation
 - Conid-first instrument upsert before event upserts so canonical event rows resolve deterministic `instrument_id`
 - Canonical UPSERT persistence for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action` using frozen natural keys and collision policies
-- Ingestion workflow now runs `canonical_mapping` stage after raw persistence and stores stage counters in diagnostics timeline
+- Ingestion workflow runs `canonical_mapping` stage after raw persistence using current `ingestion_run_id` raw rows only (run-scoped processing)
+- Duplicate raw payload retries are canonical no-op for ingestion when no new run-scoped raw rows are inserted; diagnostics include `canonical_skip_reason=no_new_raw_rows_for_run`
 - Deterministic reprocess workflow replays canonical mapping from `raw_record` only, without adapter request/poll/download
 - Reprocess trigger surfaces exposed through both API and CLI
 
 API endpoint additions:
 
 - `POST /ingestion/reprocess`
+
+Ingestion run list/detail payload additions:
+
+- `canonical_input_row_count`: Number of raw rows considered by canonical mapping for this run.
+- `canonical_duration_ms`: Canonical stage duration in milliseconds.
+- `canonical_skip_reason`: Optional reason when canonical mapping is skipped (for example `no_new_raw_rows_for_run`).
 
 CLI trigger command additions:
 

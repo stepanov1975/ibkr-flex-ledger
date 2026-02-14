@@ -64,6 +64,7 @@ def job_canonical_map_and_persist(
     )
     conid_by_raw_record_id = _job_canonical_build_conid_index(raw_records=raw_records)
 
+    resolved_trade_requests: list[CanonicalTradeFillUpsertRequest] = []
     for trade_request in mapped_batch.trade_fill_requests:
         conid = conid_by_raw_record_id.get(trade_request.source_raw_record_id)
         if conid is None:
@@ -72,8 +73,8 @@ def job_canonical_map_and_persist(
                 f"for source_raw_record_id={trade_request.source_raw_record_id}"
             )
 
-        instrument_id = instrument_id_by_conid.get(conid)
-        if instrument_id is None:
+        instrument_record = instrument_id_by_conid.get(conid)
+        if instrument_record is None:
             raise MappingContractViolationError(
                 "mapping contract violation: unresolved instrument id "
                 f"for trade conid={conid}"
@@ -81,26 +82,48 @@ def job_canonical_map_and_persist(
 
         resolved_trade_request: CanonicalTradeFillUpsertRequest = replace(
             trade_request,
-            instrument_id=str(instrument_id),
+            instrument_id=str(instrument_record.instrument_id),
         )
-        canonical_persistence_repository.db_canonical_trade_fill_upsert(resolved_trade_request)
+        resolved_trade_requests.append(resolved_trade_request)
 
+    resolved_cashflow_requests = []
     for cashflow_request in mapped_batch.cashflow_requests:
         conid = conid_by_raw_record_id.get(cashflow_request.source_raw_record_id)
         if conid is not None and conid in instrument_id_by_conid:
-            cashflow_request = replace(cashflow_request, instrument_id=str(instrument_id_by_conid[conid]))
-        canonical_persistence_repository.db_canonical_cashflow_upsert(cashflow_request)
+            cashflow_request = replace(
+                cashflow_request,
+                instrument_id=str(instrument_id_by_conid[conid].instrument_id),
+            )
+        resolved_cashflow_requests.append(cashflow_request)
 
-    for fx_request in mapped_batch.fx_requests:
-        canonical_persistence_repository.db_canonical_fx_upsert(fx_request)
-
+    resolved_corp_action_requests = []
     for corp_action_request in mapped_batch.corp_action_requests:
         if corp_action_request.conid in instrument_id_by_conid:
             corp_action_request = replace(
                 corp_action_request,
-                instrument_id=str(instrument_id_by_conid[corp_action_request.conid]),
+                instrument_id=str(instrument_id_by_conid[corp_action_request.conid].instrument_id),
             )
-        canonical_persistence_repository.db_canonical_corp_action_upsert(corp_action_request)
+        resolved_corp_action_requests.append(corp_action_request)
+
+    if hasattr(canonical_persistence_repository, "db_canonical_bulk_upsert"):
+        canonical_persistence_repository.db_canonical_bulk_upsert(
+            trade_requests=resolved_trade_requests,
+            cashflow_requests=resolved_cashflow_requests,
+            fx_requests=mapped_batch.fx_requests,
+            corp_action_requests=resolved_corp_action_requests,
+        )
+    else:
+        for trade_request in resolved_trade_requests:
+            canonical_persistence_repository.db_canonical_trade_fill_upsert(trade_request)
+
+        for cashflow_request in resolved_cashflow_requests:
+            canonical_persistence_repository.db_canonical_cashflow_upsert(cashflow_request)
+
+        for fx_request in mapped_batch.fx_requests:
+            canonical_persistence_repository.db_canonical_fx_upsert(fx_request)
+
+        for corp_action_request in resolved_corp_action_requests:
+            canonical_persistence_repository.db_canonical_corp_action_upsert(corp_action_request)
 
     return {
         "instrument_upsert_count": len(mapped_batch.instrument_upsert_requests),

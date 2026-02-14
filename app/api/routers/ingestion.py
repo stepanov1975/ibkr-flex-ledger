@@ -200,6 +200,8 @@ def api_serialize_ingestion_run_record(run_record: IngestionRunRecord) -> dict[s
         RuntimeError: This helper does not raise runtime errors.
     """
 
+    canonical_details = _api_extract_canonical_mapping_details(run_record.state.diagnostics)
+
     return {
         "ingestion_run_id": str(run_record.ingestion_run_id),
         "account_id": run_record.account_id,
@@ -215,6 +217,39 @@ def api_serialize_ingestion_run_record(run_record: IngestionRunRecord) -> dict[s
         "duration_ms": run_record.state.duration_ms,
         "error_code": run_record.state.error_code,
         "error_message": run_record.state.error_message,
+        "canonical_input_row_count": canonical_details.get("canonical_input_row_count"),
+        "canonical_duration_ms": canonical_details.get("canonical_duration_ms"),
+        "canonical_skip_reason": canonical_details.get("canonical_skip_reason"),
         "diagnostics": run_record.state.diagnostics,
         "created_at_utc": run_record.created_at_utc.isoformat(),
     }
+
+
+def _api_extract_canonical_mapping_details(diagnostics: list[dict[str, object]] | None) -> dict[str, object]:
+    """Extract canonical mapping completion details from run diagnostics timeline.
+
+    Args:
+        diagnostics: Optional run diagnostics timeline events.
+
+    Returns:
+        dict[str, object]: Canonical completion details or empty dict when unavailable.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    if diagnostics is None:
+        return {}
+
+    for event in reversed(diagnostics):
+        if event.get("stage") != "canonical_mapping":
+            continue
+        if event.get("status") != "completed":
+            continue
+
+        details = event.get("details")
+        if not isinstance(details, dict):
+            return {}
+        return details
+
+    return {}

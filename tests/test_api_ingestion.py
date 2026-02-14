@@ -267,6 +267,50 @@ def _build_run_record() -> IngestionRunRecord:
     )
 
 
+def _build_run_record_with_canonical_diagnostics() -> IngestionRunRecord:
+    """Build deterministic successful run record with canonical diagnostics.
+
+    Returns:
+        IngestionRunRecord: Typed run record with canonical stage completion details.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    run_id = uuid4()
+    started_at = datetime.now(timezone.utc)
+    return IngestionRunRecord(
+        ingestion_run_id=run_id,
+        account_id="U_TEST",
+        run_type="manual",
+        reference=IngestionRunReference(
+            period_key=date.today().isoformat(),
+            flex_query_id="query",
+            report_date_local=None,
+        ),
+        state=IngestionRunState(
+            status="success",
+            started_at_utc=started_at,
+            ended_at_utc=started_at,
+            duration_ms=200,
+            error_code=None,
+            error_message=None,
+            diagnostics=[
+                {
+                    "stage": "canonical_mapping",
+                    "status": "completed",
+                    "details": {
+                        "canonical_input_row_count": 14946,
+                        "canonical_duration_ms": 1948,
+                        "canonical_skip_reason": None,
+                    },
+                }
+            ],
+        ),
+        created_at_utc=started_at,
+    )
+
+
 def test_api_ingestion_trigger_returns_409_when_run_already_active() -> None:
     """Return HTTP 409 when ingestion trigger collides with active run lock.
 
@@ -372,3 +416,59 @@ def test_api_reprocess_trigger_returns_success() -> None:
     assert response.status_code == 200
     assert response.json()["job_name"] == "reprocess_run"
     assert response.json()["status"] == "success"
+
+
+def test_api_ingestion_run_detail_includes_canonical_summary_fields() -> None:
+    """Return canonical summary fields on run detail payload.
+
+    Returns:
+        None: Assertions validate canonical summary projection.
+
+    Raises:
+        AssertionError: Raised when canonical fields are missing.
+    """
+
+    run_record = _build_run_record_with_canonical_diagnostics()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get(f"/ingestion/runs/{run_record.ingestion_run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["canonical_input_row_count"] == 14946
+    assert payload["canonical_duration_ms"] == 1948
+    assert payload["canonical_skip_reason"] is None
+
+
+def test_api_ingestion_run_list_includes_canonical_summary_fields() -> None:
+    """Return canonical summary fields on run list payload items.
+
+    Returns:
+        None: Assertions validate canonical summary projection.
+
+    Raises:
+        AssertionError: Raised when canonical fields are missing on list items.
+    """
+
+    run_record = _build_run_record_with_canonical_diagnostics()
+    application = create_api_application(
+        settings=_build_settings(),
+        db_health_service=_HealthyDatabaseService(),
+        ingestion_repository=_IngestionRepositoryStub(run_record=run_record),
+        ingestion_orchestrator=_build_success_ingestion_orchestrator(),
+    )
+    client = TestClient(application)
+
+    response = client.get("/ingestion/runs")
+
+    assert response.status_code == 200
+    payload = response.json()["items"][0]
+    assert payload["canonical_input_row_count"] == 14946
+    assert payload["canonical_duration_ms"] == 1948
+    assert payload["canonical_skip_reason"] is None

@@ -363,3 +363,191 @@ def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_deta
     assert "payload_sha256" in details
     assert "raw_artifact_id" in details
     assert "raw_record_count" in details
+
+
+def test_jobs_ingestion_orchestrator_canonical_stage_contains_duration_details() -> None:
+    """Require canonical stage diagnostics to include measured duration.
+
+    Returns:
+        None: Assertions validate canonical diagnostics contract.
+
+    Raises:
+        AssertionError: Raised when canonical-stage details omit duration.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades transactionID=\"T1\" ibExecID=\"EXEC-1\" conid=\"265598\" buySell=\"BUY\" quantity=\"1\" "
+        b"tradePrice=\"100\" currency=\"USD\" reportDate=\"2026-02-14\" dateTime=\"2026-02-14T10:00:00+00:00\" />"
+        b"<OpenPositions /><CashTransactions /><CorporateActions /><ConversionRates />"
+        b"<SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    repository_stub = _RepositoryStub()
+    adapter_stub = _AdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    canonical_repository = _CanonicalRepositoryStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+        canonical_repository=canonical_repository,
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "success"
+    diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
+    canonical_completed = [
+        event
+        for event in diagnostics
+        if event.get("stage") == "canonical_mapping" and event.get("status") == "completed"
+    ]
+    assert len(canonical_completed) == 1
+    details = canonical_completed[0].get("details")
+    assert isinstance(details, dict)
+    assert details["canonical_input_row_count"] == 1
+    assert "canonical_duration_ms" in details
+    assert isinstance(details["canonical_duration_ms"], int)
+    assert details["canonical_duration_ms"] >= 0
+
+
+class _CanonicalRepositoryStub:
+    """Canonical repository stub implementing read and upsert behaviors."""
+
+    def db_raw_record_list_for_run(self, ingestion_run_id):
+        """Return one deterministic trade row for canonical mapping.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[object]: Deterministic raw rows.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        _ = ingestion_run_id
+        return [
+            type(
+                "RawRow",
+                (),
+                {
+                    "raw_record_id": uuid4(),
+                    "ingestion_run_id": uuid4(),
+                    "section_name": "Trades",
+                    "source_row_ref": "Trades:Trade:transactionID=T1",
+                    "report_date_local": None,
+                    "source_payload": {
+                        "ibExecID": "EXEC-1",
+                        "transactionID": "T1",
+                        "conid": "265598",
+                        "buySell": "BUY",
+                        "quantity": "1",
+                        "tradePrice": "100",
+                        "currency": "USD",
+                        "reportDate": "2026-02-14",
+                        "dateTime": "2026-02-14T10:00:00+00:00",
+                    },
+                },
+            )()
+        ]
+
+    def db_canonical_instrument_upsert(self, request):
+        """Return deterministic instrument record.
+
+        Args:
+            request: Canonical instrument upsert request.
+
+        Returns:
+            object: Minimal instrument identity.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return type("InstrumentRecord", (), {"instrument_id": uuid4(), "account_id": request.account_id, "conid": request.conid})()
+
+    def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
+        """Accept bulk canonical requests without side effects.
+
+        Args:
+            trade_requests: Canonical trade requests.
+            cashflow_requests: Canonical cashflow requests.
+            fx_requests: Canonical fx requests.
+            corp_action_requests: Canonical corporate-action requests.
+
+        Returns:
+            None: This stub records no state.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        _ = (trade_requests, cashflow_requests, fx_requests, corp_action_requests)
+
+
+class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
+    """Canonical repository stub returning no run-scoped rows."""
+
+    def db_raw_record_list_for_run(self, ingestion_run_id):
+        """Return no rows for run-scoped canonical mapping.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[object]: Empty row list.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        _ = ingestion_run_id
+        return []
+
+
+def test_jobs_ingestion_orchestrator_canonical_stage_skips_when_run_has_no_new_raw_rows() -> None:
+    """Mark canonical stage as skipped when run-scoped row set is empty.
+
+    Returns:
+        None: Assertions validate canonical skip diagnostics.
+
+    Raises:
+        AssertionError: Raised when skip diagnostics are missing.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades transactionID=\"T1\" /><OpenPositions /><CashTransactions />"
+        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    repository_stub = _RepositoryStub()
+    adapter_stub = _AdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    canonical_repository = _CanonicalRepositoryEmptyRunStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+        canonical_repository=canonical_repository,
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "success"
+    diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
+    canonical_completed = [
+        event
+        for event in diagnostics
+        if event.get("stage") == "canonical_mapping" and event.get("status") == "completed"
+    ]
+    assert len(canonical_completed) == 1
+    details = canonical_completed[0].get("details")
+    assert isinstance(details, dict)
+    assert details["canonical_input_row_count"] == 0
+    assert details["canonical_skip_reason"] == "no_new_raw_rows_for_run"

@@ -122,8 +122,8 @@ def test_mapping_build_canonical_batch_fails_fast_on_contract_violation() -> Non
             source_row_ref="Trades:Trade:transactionID=1002",
             report_date_local=date(2026, 2, 14),
             source_payload={
+                "ibExecID": "EXEC-1002",
                 "transactionID": "1002",
-                "conid": "265598",
                 "buySell": "BUY",
                 "quantity": "10",
                 "tradePrice": "101.00",
@@ -139,3 +139,107 @@ def test_mapping_build_canonical_batch_fails_fast_on_contract_violation() -> Non
             functional_currency="USD",
             raw_records=raw_records,
         )
+
+
+def test_mapping_build_canonical_batch_skips_trade_rows_without_ib_exec_id() -> None:
+    """Skip non-execution trade rows that do not include IB execution identity.
+
+    Returns:
+        None: Assertions validate skip behavior for non-execution trade rows.
+
+    Raises:
+        AssertionError: Raised when non-execution rows are treated as contract violations.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=37400900364",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "37400900364",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "10",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.instrument_upsert_requests) == 0
+    assert len(mapped_batch.trade_fill_requests) == 0
+
+
+def test_mapping_build_canonical_batch_skips_section_only_corp_action_rows() -> None:
+    """Skip section-level corporate-action markers that do not represent action rows.
+
+    Returns:
+        None: Assertions validate skip behavior for section-only markers.
+
+    Raises:
+        AssertionError: Raised when section-only markers trigger contract violations.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CorporateActions",
+            source_row_ref="CorporateActions:section:1",
+            report_date_local=date(2026, 2, 14),
+            source_payload={},
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.instrument_upsert_requests) == 0
+    assert len(mapped_batch.corp_action_requests) == 0
+
+
+def test_mapping_build_canonical_batch_skips_non_execution_trades_rows() -> None:
+    """Skip non-execution rows under Trades section without failing run.
+
+    Returns:
+        None: Assertions validate selective mapping behavior.
+
+    Raises:
+        AssertionError: Raised when non-execution rows are mapped as trade fills.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Order:idx=1",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "conid": "265598",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.trade_fill_requests) == 0
