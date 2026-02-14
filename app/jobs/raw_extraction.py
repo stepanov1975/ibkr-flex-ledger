@@ -80,8 +80,9 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
                 )
                 continue
 
-            for row_index, row_element in enumerate(leaf_rows, start=1):
-                row_payload = dict(sorted(row_element.attrib.items()))
+            for row_index, leaf_row in enumerate(leaf_rows, start=1):
+                row_element = leaf_row.row_element
+                row_payload = leaf_row.row_payload
                 source_row_ref = _job_raw_build_source_row_ref(
                     section_name=section_name,
                     row_tag=row_element.tag,
@@ -99,26 +100,59 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
     return RawPayloadExtractionResult(report_date_local=report_date_local, rows=extracted_rows)
 
 
-def _job_raw_collect_section_leaf_rows(section_element: element_tree.Element) -> list[element_tree.Element]:
+@dataclass(frozen=True)
+class RawSectionLeafRow:
+    """Leaf row element with merged ancestor context attributes.
+
+    Attributes:
+        row_element: Extracted leaf XML element.
+        row_payload: Merged payload where child attributes override ancestor keys.
+    """
+
+    row_element: element_tree.Element
+    row_payload: dict[str, str]
+
+
+def _job_raw_collect_section_leaf_rows(
+    section_element: element_tree.Element,
+    parent_attributes: dict[str, str] | None = None,
+) -> list[RawSectionLeafRow]:
     """Collect leaf row elements recursively under one Flex section.
 
     Args:
         section_element: Section container element under `FlexStatement`.
+        parent_attributes: Optional inherited attributes from ancestor containers.
 
     Returns:
-        list[element_tree.Element]: Deterministically ordered leaf row elements.
+        list[RawSectionLeafRow]: Deterministically ordered leaf rows with merged payload context.
 
     Raises:
         RuntimeError: This helper does not raise runtime errors.
     """
 
-    extracted_leaf_rows: list[element_tree.Element] = []
+    inherited_attributes = dict(parent_attributes or {})
+    inherited_attributes.update(section_element.attrib)
+
+    extracted_leaf_rows: list[RawSectionLeafRow] = []
     for child_element in list(section_element):
         child_rows = list(child_element)
         if child_rows:
-            extracted_leaf_rows.extend(_job_raw_collect_section_leaf_rows(child_element))
+            extracted_leaf_rows.extend(
+                _job_raw_collect_section_leaf_rows(
+                    child_element,
+                    parent_attributes=inherited_attributes,
+                )
+            )
             continue
-        extracted_leaf_rows.append(child_element)
+
+        leaf_payload = dict(inherited_attributes)
+        leaf_payload.update(child_element.attrib)
+        extracted_leaf_rows.append(
+            RawSectionLeafRow(
+                row_element=child_element,
+                row_payload=dict(sorted(leaf_payload.items())),
+            )
+        )
     return extracted_leaf_rows
 
 

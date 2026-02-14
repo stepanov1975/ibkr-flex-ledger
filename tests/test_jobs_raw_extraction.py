@@ -62,3 +62,32 @@ def test_jobs_raw_extraction_extracts_nested_section_rows() -> None:
     assert extraction_result.rows[1].section_name == "FxPositions"
     assert extraction_result.rows[1].source_payload == {"functionalCurrency": "EUR", "quantity": "50"}
     assert extraction_result.rows[1].source_row_ref == "FxPositions:FxLot:idx=2"
+
+
+def test_jobs_raw_extraction_preserves_parent_context_for_nested_leaf_rows() -> None:
+    """Preserve parent attributes when extracting nested leaf rows.
+
+    Returns:
+        None: Assertions validate parent context propagation.
+
+    Raises:
+        AssertionError: Raised when parent attributes are not present in extracted payload.
+    """
+
+    payload_bytes = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\">"
+        b"<FlexStatement accountId=\"U_TEST\" toDate=\"20260214\">"
+        b"<Trades><Account id=\"U123\"><Trade transactionID=\"TX200\" quantity=\"7\" /></Account></Trades>"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+
+    extraction_result = job_raw_extract_payload_rows(payload_bytes=payload_bytes)
+
+    assert len(extraction_result.rows) == 1
+    assert extraction_result.rows[0].section_name == "Trades"
+    assert extraction_result.rows[0].source_row_ref == "Trades:Trade:transactionID=TX200"
+    assert extraction_result.rows[0].source_payload == {
+        "id": "U123",
+        "quantity": "7",
+        "transactionID": "TX200",
+    }
