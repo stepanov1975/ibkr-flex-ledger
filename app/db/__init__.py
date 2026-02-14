@@ -2,6 +2,7 @@
 
 from .health import SQLAlchemyDatabaseHealthService
 from .ingestion_run import SQLAlchemyIngestionRunService
+from .raw_persistence import SQLAlchemyRawPersistenceService
 from .interfaces import (
 	DatabaseHealthPort,
 	IngestionRunAlreadyActiveError,
@@ -9,6 +10,13 @@ from .interfaces import (
 	IngestionRunReference,
 	IngestionRunRepositoryPort,
 	IngestionRunState,
+	RawArtifactPersistRequest,
+	RawArtifactPersistResult,
+	RawArtifactRecord,
+	RawArtifactReference,
+	RawPersistenceRepositoryPort,
+	RawRecordPersistRequest,
+	RawRecordPersistResult,
 )
 from .session import db_create_engine, db_create_session_factory
 
@@ -19,8 +27,16 @@ __all__ = [
 	"IngestionRunReference",
 	"IngestionRunState",
 	"IngestionRunAlreadyActiveError",
+	"RawPersistenceRepositoryPort",
+	"RawArtifactReference",
+	"RawArtifactPersistRequest",
+	"RawArtifactRecord",
+	"RawArtifactPersistResult",
+	"RawRecordPersistRequest",
+	"RawRecordPersistResult",
 	"SQLAlchemyDatabaseHealthService",
 	"SQLAlchemyIngestionRunService",
+	"SQLAlchemyRawPersistenceService",
 	"db_create_engine",
 	"db_create_session_factory",
 ]

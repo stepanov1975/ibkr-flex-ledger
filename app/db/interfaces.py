@@ -98,6 +98,108 @@ class IngestionRunRecord:
     created_at_utc: datetime
 
 
+@dataclass(frozen=True)
+class RawArtifactReference:
+    """Immutable identity fields for one raw artifact.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        period_key: Ingestion period identity key.
+        flex_query_id: Upstream Flex query identifier.
+        payload_sha256: SHA-256 digest hex of immutable raw payload bytes.
+        report_date_local: Optional local report date from payload metadata.
+    """
+
+    account_id: str
+    period_key: str
+    flex_query_id: str
+    payload_sha256: str
+    report_date_local: date | None
+
+
+@dataclass(frozen=True)
+class RawArtifactPersistRequest:
+    """Input payload for one immutable raw artifact persistence operation.
+
+    Attributes:
+        ingestion_run_id: Ingestion run identifier.
+        reference: Immutable dedupe identity values.
+        source_payload: Immutable raw payload bytes from upstream.
+    """
+
+    ingestion_run_id: UUID
+    reference: RawArtifactReference
+    source_payload: bytes
+
+
+@dataclass(frozen=True)
+class RawArtifactRecord:
+    """Persistence model for one immutable raw artifact row.
+
+    Attributes:
+        raw_artifact_id: Unique raw artifact identifier.
+        ingestion_run_id: Ingestion run that first persisted the artifact.
+        reference: Immutable dedupe identity values.
+        source_payload: Immutable raw payload bytes.
+        created_at_utc: Persistence row creation timestamp in UTC.
+    """
+
+    raw_artifact_id: UUID
+    ingestion_run_id: UUID
+    reference: RawArtifactReference
+    source_payload: bytes
+    created_at_utc: datetime
+
+
+@dataclass(frozen=True)
+class RawArtifactPersistResult:
+    """Result payload for immutable raw artifact upsert.
+
+    Attributes:
+        artifact: Persisted raw artifact row.
+        deduplicated: Whether existing row was reused by unique key conflict.
+    """
+
+    artifact: RawArtifactRecord
+    deduplicated: bool
+
+
+@dataclass(frozen=True)
+class RawRecordPersistRequest:
+    """Input payload for one raw row persistence operation.
+
+    Attributes:
+        ingestion_run_id: Ingestion run identifier.
+        raw_artifact_id: Parent immutable raw artifact identifier.
+        artifact_reference: Immutable dedupe identity values.
+        report_date_local: Optional local report date from payload metadata.
+        section_name: Flex section name.
+        source_row_ref: Deterministic source row reference within section.
+        source_payload: Source row payload as JSON-compatible object.
+    """
+
+    ingestion_run_id: UUID
+    raw_artifact_id: UUID
+    artifact_reference: RawArtifactReference
+    report_date_local: date | None
+    section_name: str
+    source_row_ref: str
+    source_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RawRecordPersistResult:
+    """Summary result for raw row batch persistence.
+
+    Attributes:
+        inserted_count: Number of inserted raw rows.
+        deduplicated_count: Number of rows skipped by unique-key conflict.
+    """
+
+    inserted_count: int
+    deduplicated_count: int
+
+
 class IngestionRunRepositoryPort(Protocol):
     """Port definition for ingestion run lifecycle persistence and reads."""
 
@@ -176,4 +278,36 @@ class IngestionRunRepositoryPort(Protocol):
 
         Raises:
             ValueError: Raised when pagination arguments are invalid.
+        """
+
+
+class RawPersistenceRepositoryPort(Protocol):
+    """Port definition for immutable raw artifact and raw row persistence."""
+
+    def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
+        """Persist or reuse immutable raw artifact by dedupe identity key.
+
+        Args:
+            request: Raw artifact persistence request payload.
+
+        Returns:
+            RawArtifactPersistResult: Persisted row and dedupe indicator.
+
+        Raises:
+            ValueError: Raised when request data is invalid.
+            RuntimeError: Raised when persistence fails.
+        """
+
+    def db_raw_record_insert_many(self, requests: list[RawRecordPersistRequest]) -> RawRecordPersistResult:
+        """Insert raw rows with deterministic conflict handling.
+
+        Args:
+            requests: Raw row persistence requests.
+
+        Returns:
+            RawRecordPersistResult: Inserted and deduplicated row counters.
+
+        Raises:
+            ValueError: Raised when requests are invalid.
+            RuntimeError: Raised when persistence fails.
         """

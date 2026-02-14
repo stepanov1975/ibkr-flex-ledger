@@ -48,3 +48,6 @@
 - [2026-02-14] PATTERN :: Required Flex section preflight is centralized in `app/jobs/section_preflight.py` with frozen hard/reconciliation matrices and deterministic `MISSING_REQUIRED_SECTION` diagnostics payload.
 - [2026-02-14] PATTERN :: Stage timeline diagnostics are standardized as JSON array events (`stage`, `status`, `at_utc`, optional `details`) via `app/domain/timeline.py` and persisted in `ingestion_run.diagnostics`.
 - [2026-02-14] PATTERN :: DATABASE_URL selection must follow execution mode: host-shell commands use `127.0.0.1:5433`, container-network commands use `postgres:5432`.
+- [2026-02-14] DECISION :: Task 4 raw persistence uses dedicated immutable `raw_artifact` table with DB-enforced unique key (`account_id`, `period_key`, `flex_query_id`, `payload_sha256`) rather than `raw_record`-only dedupe.
+- [2026-02-14] PATTERN :: Ingestion persist stage now computes payload SHA-256 once, upserts `raw_artifact`, extracts section rows from all detected Flex sections, and writes conflict-aware `raw_record` rows linked by `raw_artifact_id`.
+- [2026-02-14] DECISION :: Duplicate raw artifact ingests remain normal successful runs; diagnostics explicitly expose dedupe/no-op outcomes (`raw_artifact_deduplicated`, inserted/deduplicated row counts).

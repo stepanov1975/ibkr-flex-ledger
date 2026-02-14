@@ -236,6 +236,28 @@ CLI trigger command:
 /stock_app/.venv/bin/python -m app.main ingestion-run
 ```
 
+## Immutable raw persistence baseline (Task 4)
+
+Task 4 replaces the Task 3 persist placeholder with immutable raw artifact and raw row persistence.
+
+Included behavior:
+
+- Dedicated immutable `raw_artifact` persistence with dedupe key `account_id + period_key + flex_query_id + payload_sha256`
+- Raw section-row extraction persisted into `raw_record` for all detected sections (including non-MVP-mapped sections)
+- Raw row provenance linked through `raw_record.raw_artifact_id -> raw_artifact.raw_artifact_id`
+- Persist-stage diagnostics now include `payload_sha256`, `raw_artifact_id`, artifact dedupe flag, and inserted/deduplicated raw row counts
+- Duplicate artifact ingest still finalizes run as `success` with explicit dedupe/no-op diagnostics
+
+Migration files and configuration additions:
+
+- `alembic/versions/20260214_02_task4_raw_artifact_persistence.py`
+
+Task 4 implementation modules:
+
+- `app/db/raw_persistence.py`
+- `app/jobs/raw_extraction.py`
+- `app/jobs/ingestion_orchestrator.py`
+
 ## VS Code virtual environment setup
 
 This workspace is configured to automatically use the project virtual environment.

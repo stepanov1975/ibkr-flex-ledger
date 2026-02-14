@@ -192,3 +192,100 @@ def test_migrations_apply_and_are_idempotent() -> None:
         else:
             os.environ["DATABASE_URL"] = previous_database_url
         _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)
+
+
+def test_migrations_include_raw_artifact_dedupe_contract() -> None:
+    """Require dedicated raw artifact table with unique dedupe identity key.
+
+    Returns:
+        None: Assertions validate migration baseline contract.
+
+    Raises:
+        AssertionError: Raised when raw artifact table or unique key is missing.
+    """
+
+    base_url = _migration_resolve_reachable_base_url()
+    temp_database_name = f"test_raw_artifact_{uuid.uuid4().hex[:10]}"
+    admin_url = _migration_build_database_url(base_url, "postgres")
+    temp_database_url = _migration_build_database_url(base_url, temp_database_name)
+
+    _migration_create_database(admin_url=admin_url, database_name=temp_database_name)
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = temp_database_url
+
+    try:
+        alembic_config = Config("alembic.ini")
+        command.upgrade(alembic_config, "head")
+
+        verification_engine = create_engine(temp_database_url)
+        try:
+            inspector = inspect(verification_engine)
+            table_names = set(inspector.get_table_names())
+            assert "raw_artifact" in table_names
+
+            unique_constraints = inspector.get_unique_constraints("raw_artifact")
+            unique_map = {constraint["name"]: tuple(constraint["column_names"]) for constraint in unique_constraints}
+            assert "uq_raw_artifact_account_period_query_sha256" in unique_map
+            assert unique_map["uq_raw_artifact_account_period_query_sha256"] == (
+                "account_id",
+                "period_key",
+                "flex_query_id",
+                "payload_sha256",
+            )
+        finally:
+            verification_engine.dispose()
+    finally:
+        if previous_database_url is None:
+            del os.environ["DATABASE_URL"]
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)
+
+
+def test_migrations_link_raw_record_to_raw_artifact() -> None:
+    """Require raw row provenance to include explicit raw artifact foreign key.
+
+    Returns:
+        None: Assertions validate raw provenance schema contract.
+
+    Raises:
+        AssertionError: Raised when raw_record linkage to raw_artifact is missing.
+    """
+
+    base_url = _migration_resolve_reachable_base_url()
+    temp_database_name = f"test_raw_record_link_{uuid.uuid4().hex[:10]}"
+    admin_url = _migration_build_database_url(base_url, "postgres")
+    temp_database_url = _migration_build_database_url(base_url, temp_database_name)
+
+    _migration_create_database(admin_url=admin_url, database_name=temp_database_name)
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = temp_database_url
+
+    try:
+        alembic_config = Config("alembic.ini")
+        command.upgrade(alembic_config, "head")
+
+        verification_engine = create_engine(temp_database_url)
+        try:
+            inspector = inspect(verification_engine)
+            raw_record_columns = {column["name"] for column in inspector.get_columns("raw_record")}
+            assert "raw_artifact_id" in raw_record_columns
+
+            foreign_keys = inspector.get_foreign_keys("raw_record")
+            raw_artifact_links = [
+                key
+                for key in foreign_keys
+                if key.get("referred_table") == "raw_artifact"
+                and key.get("constrained_columns") == ["raw_artifact_id"]
+            ]
+            assert len(raw_artifact_links) == 1
+        finally:
+            verification_engine.dispose()
+    finally:
+        if previous_database_url is None:
+            del os.environ["DATABASE_URL"]
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)

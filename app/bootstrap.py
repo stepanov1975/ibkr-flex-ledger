@@ -5,7 +5,12 @@ from fastapi import FastAPI
 from app.api import create_api_application
 from app.config import config_load_settings
 from app.adapters import FlexWebServiceAdapter
-from app.db import SQLAlchemyDatabaseHealthService, SQLAlchemyIngestionRunService, db_create_engine
+from app.db import (
+    SQLAlchemyDatabaseHealthService,
+    SQLAlchemyIngestionRunService,
+    SQLAlchemyRawPersistenceService,
+    db_create_engine,
+)
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
 
 
@@ -23,9 +28,11 @@ def bootstrap_create_application() -> FastAPI:
     engine = db_create_engine(database_url=settings.database_url)
     db_health_service = SQLAlchemyDatabaseHealthService(engine=engine)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
+    raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
     ingestion_orchestrator = IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
+        raw_persistence_repository=raw_persistence_repository,
         flex_adapter=flex_adapter,
         config=IngestionOrchestratorConfig(
             account_id=settings.account_id,
@@ -55,9 +62,11 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
     settings = config_load_settings()
     engine = db_create_engine(database_url=settings.database_url)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
+    raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
     return IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
+        raw_persistence_repository=raw_persistence_repository,
         flex_adapter=flex_adapter,
         config=IngestionOrchestratorConfig(
             account_id=settings.account_id,

@@ -6,7 +6,15 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from app.adapters import AdapterFetchResult
-from app.db.interfaces import IngestionRunRecord, IngestionRunReference, IngestionRunState
+from app.db.interfaces import (
+    IngestionRunRecord,
+    IngestionRunReference,
+    IngestionRunState,
+    RawArtifactPersistResult,
+    RawArtifactRecord,
+    RawArtifactReference,
+    RawRecordPersistResult,
+)
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
 
 
@@ -187,6 +195,67 @@ class _AdapterStub:
         )
 
 
+class _RawPersistenceStub:
+    """Raw persistence stub returning deterministic artifact and row counters."""
+
+    def __init__(self):
+        """Initialize deterministic raw persistence stub state.
+
+        Returns:
+            None: Initializer does not return values.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        self.raw_artifact_id = uuid4()
+
+    def db_raw_artifact_upsert(self, request) -> RawArtifactPersistResult:
+        """Return deterministic artifact upsert result.
+
+        Args:
+            request: Raw artifact persist request.
+
+        Returns:
+            RawArtifactPersistResult: Deterministic raw artifact result.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return RawArtifactPersistResult(
+            artifact=RawArtifactRecord(
+                raw_artifact_id=self.raw_artifact_id,
+                ingestion_run_id=request.ingestion_run_id,
+                reference=RawArtifactReference(
+                    account_id=request.reference.account_id,
+                    period_key=request.reference.period_key,
+                    flex_query_id=request.reference.flex_query_id,
+                    payload_sha256=request.reference.payload_sha256,
+                    report_date_local=request.reference.report_date_local,
+                ),
+                source_payload=request.source_payload,
+                created_at_utc=datetime.now(timezone.utc),
+            ),
+            deduplicated=False,
+        )
+
+    def db_raw_record_insert_many(self, requests) -> RawRecordPersistResult:
+        """Return deterministic raw row insert summary.
+
+        Args:
+            requests: Raw row persistence requests.
+
+        Returns:
+            RawRecordPersistResult: Deterministic insert counters.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
+
+
 def test_jobs_ingestion_orchestrator_marks_failed_on_missing_required_sections() -> None:
     """Finalize ingestion run as failed on required-section preflight failure.
 
@@ -203,8 +272,10 @@ def test_jobs_ingestion_orchestrator_marks_failed_on_missing_required_sections()
     )
     repository_stub = _RepositoryStub()
     adapter_stub = _AdapterStub(payload_bytes=incomplete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
     orchestrator = IngestionJobOrchestrator(
         ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
         flex_adapter=adapter_stub,
         config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
     )
@@ -234,8 +305,10 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
     )
     repository_stub = _RepositoryStub()
     adapter_stub = _AdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
     orchestrator = IngestionJobOrchestrator(
         ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
         flex_adapter=adapter_stub,
         config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
     )
@@ -247,3 +320,46 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
     diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
     assert isinstance(diagnostics, list)
     assert any(event["stage"] == "persist" for event in diagnostics)
+
+
+def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_details() -> None:
+    """Require persist-stage diagnostics to include concrete raw persistence data.
+
+    Returns:
+        None: Assertions validate persisted diagnostics contract.
+
+    Raises:
+        AssertionError: Raised when persist-stage details remain placeholder-only.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades transactionID=\"T1\" /><OpenPositions /><CashTransactions />"
+        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    repository_stub = _RepositoryStub()
+    adapter_stub = _AdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "success"
+    diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
+    persist_completed = [
+        event
+        for event in diagnostics
+        if event.get("stage") == "persist" and event.get("status") == "completed"
+    ]
+    assert len(persist_completed) == 1
+    details = persist_completed[0].get("details")
+    assert isinstance(details, dict)
+    assert "payload_sha256" in details
+    assert "raw_artifact_id" in details
+    assert "raw_record_count" in details

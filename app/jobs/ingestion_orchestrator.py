@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 
 from app.adapters import FlexAdapterPort
-from app.db import IngestionRunRepositoryPort
+from app.db import (
+    IngestionRunRepositoryPort,
+    RawArtifactPersistRequest,
+    RawArtifactReference,
+    RawPersistenceRepositoryPort,
+    RawRecordPersistRequest,
+)
 from app.domain import domain_build_stage_event
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
+from .raw_extraction import job_raw_extract_payload_rows
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
     job_section_preflight_build_missing_required_diagnostics,
@@ -42,6 +50,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
     def __init__(
         self,
         ingestion_repository: IngestionRunRepositoryPort,
+        raw_persistence_repository: RawPersistenceRepositoryPort,
         flex_adapter: FlexAdapterPort,
         config: IngestionOrchestratorConfig,
     ):
@@ -49,6 +58,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
         Args:
             ingestion_repository: DB-layer ingestion run persistence service.
+            raw_persistence_repository: DB-layer immutable raw persistence service.
             flex_adapter: Adapter for upstream Flex retrieval.
             config: Ingestion execution configuration.
 
@@ -61,6 +71,8 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
         if ingestion_repository is None:
             raise ValueError("ingestion_repository must not be None")
+        if raw_persistence_repository is None:
+            raise ValueError("raw_persistence_repository must not be None")
         if flex_adapter is None:
             raise ValueError("flex_adapter must not be None")
         if not config.account_id.strip():
@@ -71,6 +83,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             raise ValueError("config.run_type must not be blank")
 
         self._ingestion_repository = ingestion_repository
+        self._raw_persistence_repository = raw_persistence_repository
         self._flex_adapter = flex_adapter
         self._config = config
 
@@ -159,11 +172,48 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
 
             timeline.append(domain_build_stage_event(stage="persist", status="started"))
+            payload_sha256 = hashlib.sha256(adapter_result.payload_bytes).hexdigest()
+            extraction_result = job_raw_extract_payload_rows(payload_bytes=adapter_result.payload_bytes)
+
+            artifact_result = self._raw_persistence_repository.db_raw_artifact_upsert(
+                request=RawArtifactPersistRequest(
+                    ingestion_run_id=run_record.ingestion_run_id,
+                    reference=RawArtifactReference(
+                        account_id=self._config.account_id,
+                        period_key=period_key,
+                        flex_query_id=self._config.flex_query_id,
+                        payload_sha256=payload_sha256,
+                        report_date_local=extraction_result.report_date_local,
+                    ),
+                    source_payload=adapter_result.payload_bytes,
+                )
+            )
+
+            raw_record_requests = [
+                RawRecordPersistRequest(
+                    ingestion_run_id=run_record.ingestion_run_id,
+                    raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                    artifact_reference=artifact_result.artifact.reference,
+                    report_date_local=extraction_result.report_date_local,
+                    section_name=extracted_row.section_name,
+                    source_row_ref=extracted_row.source_row_ref,
+                    source_payload=extracted_row.source_payload,
+                )
+                for extracted_row in extraction_result.rows
+            ]
+            raw_record_result = self._raw_persistence_repository.db_raw_record_insert_many(raw_record_requests)
+
             timeline.append(
                 domain_build_stage_event(
                     stage="persist",
                     status="completed",
-                    details={"raw_persistence": "deferred_to_task_4"},
+                    details={
+                        "payload_sha256": payload_sha256,
+                        "raw_artifact_id": str(artifact_result.artifact.raw_artifact_id),
+                        "raw_artifact_deduplicated": artifact_result.deduplicated,
+                        "raw_record_count": raw_record_result.inserted_count,
+                        "raw_record_deduplicated_count": raw_record_result.deduplicated_count,
+                    },
                 )
             )
 
