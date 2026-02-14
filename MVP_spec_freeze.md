@@ -16,8 +16,12 @@ Rules:
 ## Global Fixed Decisions (Already Final)
 
 - MVP account scope: strictly single IBKR account.
+- MVP single-account API contract: `account_id` remains internal-only in MVP API payloads; backend data-access layers use one fixed configured account context.
+- MVP base reporting currency: `USD`, fixed at initial setup and immutable in MVP.
 - Time policy: persist timestamps in UTC; apply `Asia/Jerusalem` for UI and business date boundaries.
+- Ingestion overlap policy: single active run lock; reject overlapping triggers with `409` and message `run already active`.
 - Authentication hardening for proxy headers/trust assumptions: out of MVP scope (post-MVP).
+- Reverse-proxy identity header contract validation in application code: out of MVP scope (post-MVP).
 
 ## Reference basis used for this baseline
 
@@ -56,7 +60,9 @@ Goal: define deterministic ordered source lists and tie-break behavior.
 |---|---|---|---|---|
 | 1 | `OpenPositions.markPrice` | Matching `conid` and target `report_date` exists and `markPrice` is not null | Highest source priority always wins | If unavailable, continue to priority 2 |
 | 2 | `Trades.closePrice` | At least one trade row for `conid` on target `report_date` with non-null `closePrice` | Choose row with latest `dateTime`; if tied, highest numeric `transactionID` | If unavailable, continue to priority 3 |
-| 3 | Last execution `tradePrice` on or before target `report_date` | Trade exists for `conid` with non-null `tradePrice` | Latest `dateTime`; then highest numeric `transactionID` | Use value but mark valuation as provisional with diagnostic code `EOD_MARK_FALLBACK_LAST_TRADE` |
+| 3 | Last execution `tradePrice` on or before target `report_date` | Trade exists for `conid` with non-null `tradePrice` | Latest `dateTime`; then highest numeric `transactionID`; then highest raw record primary key | Use value but mark valuation as provisional with diagnostic code `EOD_MARK_FALLBACK_LAST_TRADE` |
+
+If all three sources are missing, valuation is marked provisional and diagnostic code `EOD_MARK_MISSING_ALL_SOURCES` is emitted.
 
 ### 2.2 Execution FX Fallback
 
@@ -64,7 +70,9 @@ Goal: define deterministic ordered source lists and tie-break behavior.
 |---|---|---|---|---|
 | 1 | `Trades.fxRateToBase` | Event row has non-null `fxRateToBase` and non-zero denominator context | Highest source priority always wins | If unavailable, continue to priority 2 |
 | 2 | Derived from `netCashInBase / netCash` | Both values are present and `netCash != 0` | Round to 10 decimal places using half-even | If unavailable, continue to priority 3 |
-| 3 | `ConversionRates` for (`currency`, base, `report_date`) | Matching pair exists for report date (or nearest previous available date) | Pick exact date first, otherwise nearest previous date | If unavailable, use `1.0` only when `currency == base`; otherwise set event provisional and block economic FX output |
+| 3 | `ConversionRates` for (`currency`, base, `report_date`) | Matching pair exists for report date (or nearest previous available date) | Pick exact date first, otherwise nearest previous date; within same date pick latest `ingestion_run_id`, then highest raw record primary key | If unavailable, use `1.0` only when `currency == base`; otherwise set event provisional and block economic FX output |
+
+If all three sources are missing for non-base currency events, emit diagnostic code `FX_RATE_MISSING_ALL_SOURCES`.
 
 Acceptance checks:
 - Same inputs always produce same valuation and economic FX outputs.
@@ -100,6 +108,7 @@ Manual workflow minimum fields:
 Acceptance checks:
 - Any non-allowlisted corporate action becomes mandatory manual.
 - Affected outputs are marked provisional until case resolution.
+- Unresolved manual cases do not block unrelated instruments or global report generation; only affected instruments carry provisional status and unresolved counters.
 
 ---
 
@@ -134,6 +143,8 @@ Goal: define measurable MVP reliability targets and alert thresholds.
 Acceptance checks:
 - Targets are observable from runtime metrics/logs.
 - Alerts can be simulated in test/staging runbooks.
+- Detailed ingestion logs are mandatory and must include at minimum: `run_id`, `stage`, `status`, `started_at_utc`, `ended_at_utc`, `duration_ms`, `source_section`, `source_record_ref`, `error_code`, `error_message`, `exception_type`, `stack_trace`, `retry_count`, and `next_retry_at_utc`.
+- Any failed run must expose a human-readable failure summary plus structured machine-readable diagnostics linked to the same `run_id`.
 
 ---
 
@@ -209,13 +220,135 @@ Goal: define bounded retention for high-volume derived diagnostics while keeping
 
 | Data Class | Keep Duration | Archival Policy | Purge Method | Restore Expectation |
 |---|---|---|---|---|
-| Ingestion diagnostics | 180 days hot | Archive monthly to compressed JSONL (`.jsonl.gz`) by run date | Purge hot rows older than 180 days after archive checksum success | Restorable to analysis tables within 4 hours |
-| Reprocess diagnostics | 365 days hot | Archive monthly to compressed JSONL (`.jsonl.gz`) by run date | Purge hot rows older than 365 days after archive checksum success | Restorable to analysis tables within 4 hours |
-| Snapshot diagnostics | 90 days hot | Archive monthly aggregates only (not full row-level payload) | Purge full-row diagnostics older than 90 days | Aggregate-level restore available within 24 hours |
+| Ingestion diagnostics | 60 days hot | Archive monthly to compressed JSONL (`.jsonl.gz`) by run date | Purge hot rows older than 60 days after archive checksum success | Restorable to analysis tables within 4 hours |
+| Reprocess diagnostics | 60 days hot | Archive monthly to compressed JSONL (`.jsonl.gz`) by run date | Purge hot rows older than 60 days after archive checksum success | Restorable to analysis tables within 4 hours |
+| Snapshot diagnostics | 60 days hot | Archive monthly aggregates only (not full row-level payload) | Purge full-row diagnostics older than 60 days | Aggregate-level restore available within 24 hours |
 
 Acceptance checks:
 - Retention jobs run without deleting immutable raw payloads.
 - Archived diagnostics remain queryable within agreed restore process.
+
+---
+
+## 8) Required Flex Section Matrix
+
+Goal: freeze section-level ingestion requirements so MVP features are deterministic and schema-drift behavior is explicit.
+
+### 8.1 Hard-required sections (fail ingestion run if missing)
+
+- `Trades`
+- `OpenPositions`
+- `CashTransactions`
+- `CorporateActions`
+- `ConversionRates`
+- `SecuritiesInfo`
+- `AccountInformation`
+
+### 8.2 Reconciliation-required sections (fail when reconciliation mode is enabled)
+
+- `MTMPerformanceSummaryInBase`
+- `FIFOPerformanceSummaryInBase`
+
+### 8.3 Future-proof ingest-now sections (non-blocking if absent)
+
+- `InterestAccruals`
+- `ChangeInDividendAccruals`
+- `OpenDividendAccruals`
+- `ChangeInNAV`
+- `StmtFunds`
+- `UnbundledCommissionDetails`
+
+### 8.4 Optional-but-ignored sections in MVP mapping
+
+All other sections are persisted in immutable raw artifacts only and are not mapped into MVP canonical event tables until explicitly promoted by post-MVP scope.
+
+Validation behavior:
+- Missing hard-required sections must fail ingestion with deterministic diagnostic code `MISSING_REQUIRED_SECTION` and explicit section names.
+- Missing reconciliation-required sections must fail reconciliation publish paths with the same diagnostic convention.
+
+---
+
+## 9) API List Pagination, Sorting, and Filter Contract
+
+Goal: freeze deterministic list endpoint behavior while keeping page-size defaults configurable.
+
+Global list query contract:
+- Query params: `limit`, `offset`, `sort_by`, `sort_dir`.
+- Configurable defaults: `API_DEFAULT_LIMIT=50`, `API_MAX_LIMIT=200`, `API_DEFAULT_SORT_DIR=asc`.
+- Validation:
+	- `limit < 1` -> `400 INVALID_PAGINATION`
+	- `offset < 0` -> `400 INVALID_PAGINATION`
+	- unsupported `sort_by` -> `400 INVALID_SORT_FIELD`
+	- unsupported `sort_dir` -> `400 INVALID_SORT_DIRECTION`
+	- `limit > API_MAX_LIMIT` -> clamp to `API_MAX_LIMIT` and expose `applied_limit` in response metadata.
+
+Endpoint-specific defaults and allowed fields:
+
+### 9.1 `GET /instruments`
+- Default sort: `symbol asc, instrument_id asc`
+- Allowed `sort_by`: `symbol`, `conid`, `updated_at_utc`
+- Allowed filters: `label_id`, `search`, `active_only`
+
+### 9.2 `GET /notes`
+- Default sort: `created_at_utc desc, note_id desc`
+- Allowed `sort_by`: `created_at_utc`, `updated_at_utc`, `instrument_id`
+- Allowed filters: `instrument_id`, `label_id`, `created_from`, `created_to`
+
+### 9.3 `GET /ingestion/runs`
+- Default sort: `started_at_utc desc, ingestion_run_id desc`
+- Allowed `sort_by`: `started_at_utc`, `ended_at_utc`, `status`, `duration_ms`
+- Allowed filters: `status`, `from_utc`, `to_utc`, `run_type`
+
+List response envelope (all list endpoints):
+- `items`: array
+- `page`: `{limit, offset, returned, total, has_more, applied_limit}`
+- `sort`: `{sort_by, sort_dir}`
+- `filters`: normalized applied filters
+
+Contract boundary:
+- Runtime-configurable: `API_DEFAULT_LIMIT`, `API_MAX_LIMIT`, `API_DEFAULT_SORT_DIR`.
+- Code-level constants: per-endpoint allowed sort/filter fields and default sort keys.
+
+---
+
+## 10) Backup, PITR, and Restore Runbook Policy
+
+Goal: ensure production recovery behavior can satisfy frozen reliability targets (`RTO <= 4h`) with measurable restore confidence.
+
+Backup scope:
+- PostgreSQL physical base backup.
+- PostgreSQL WAL archive for point-in-time recovery.
+- Application restore prerequisites: runtime config and migration metadata.
+
+Cadence and retention:
+- Full base backup every `24h`.
+- WAL archive shipping every `5m` (archive lag target `<= 5m`).
+- PITR window: `14 days`.
+- Backup retention:
+	- Daily backups: `14 days`
+	- Weekly backups: `8 weeks`
+	- Monthly backups: `12 months`
+
+Recovery objectives:
+- RPO target: `<= 15 minutes`.
+- RTO target: `<= 4 hours`.
+- Preferred restore path: latest successful base backup + WAL replay to selected recovery timestamp.
+
+Verification and drills:
+- After each backup: checksum/integrity verification and backup catalog entry.
+- Weekly: non-production restore smoke test from latest successful backup.
+- Monthly: full restore drill with measured elapsed recovery time and post-restore validation checklist.
+- Failed backup or drill must open an incident with owner, remediation action, and due date.
+
+Post-restore validation minimum:
+- Application health endpoint responds successfully.
+- Database migration state matches expected schema.
+- Latest ingestion runs are queryable.
+- Reporting endpoints return successful responses for a known date range.
+
+Operational ownership:
+- Runbook owner role is required and must be documented.
+- Runbook must include trigger conditions, command sequence, escalation path, and completion sign-off.
 
 ---
 
@@ -230,3 +363,7 @@ Acceptance checks:
 | SLO targets | approved | Product + Engineering | 2026-02-14 | Operational baseline frozen |
 | CSV contracts | approved | Product + Engineering | 2026-02-14 | v1 column contracts frozen |
 | Retention windows | approved | Product + Engineering | 2026-02-14 | Hot/archival windows frozen |
+| Required Flex section matrix | approved | Product + Engineering | 2026-02-14 | Hard-required, reconciliation-required, and non-blocking future-proof section policy frozen |
+| API list contract | approved | Product + Engineering | 2026-02-14 | Configurable pagination defaults and deterministic sort/filter/envelope rules frozen |
+| Backup/restore policy | approved | Product + Engineering | 2026-02-14 | Base backup, WAL/PITR, retention, drill cadence, and validation/runbook requirements frozen |
+| Single-account API contract (`account_id`) | approved | Product + Engineering | 2026-02-14 | `account_id` internal-only in MVP payloads; fixed configured account context in backend |

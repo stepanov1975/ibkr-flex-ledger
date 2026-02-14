@@ -88,19 +88,54 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 Raw input remains immutable. All derived data can be regenerated from raw records.
 
 ### Resolved MVP policy decisions
+- Deployment policy: coordinated single-site deployments only; no backward-compatibility layers, old API support, feature flags, or field aliases in MVP changes.
 - Idempotency policy: dedupe raw artifacts by `period_key + flex_query_id + sha256`, then UPSERT canonical records on stable natural keys.
 - Instrument identity policy: `conid` is canonical for IBKR data; ISIN/CUSIP/FIGI and symbol/localSymbol are aliases with conid-first conflict handling.
+- Parsing boundary policy: Flex parsing remains isolated from accounting and reporting logic; parser output is a mapping input contract, not a ledger dependency.
+- Ingestion flow policy: execute deterministic `request -> poll -> download -> persist` stages with run status tracking and deterministic retry behavior.
+- Ingestion overlap policy: enforce a single active ingestion run lock; reject overlapping triggers with `409` and message `run already active`.
 - Time policy: store all timestamps in UTC; apply `Asia/Jerusalem` for UI rendering and business date boundaries (ingestion windows, daily snapshots, report filters).
-- Unrealized valuation policy: use IBKR end-of-day marks tied to report date; apply one documented fallback when marks are missing.
-- Economic FX policy: use broker-provided execution FX when present; otherwise apply one documented fallback hierarchy.
-- Reconciliation mismatch policy: evaluate diffs with per-metric tolerances and currency-specific decimal precision.
-- Corporate action policy: auto-handle only deterministic low-ambiguity actions; require manual cases for election-based, multi-leg, cost-basis allocation, and option-deliverable adjustments.
+- Base reporting currency policy: `USD` is the canonical base reporting currency in MVP and is immutable after initial setup.
+- Single-account API contract policy: `account_id` is internal-only in MVP API payloads; backend repositories use one fixed configured account context, and external multi-account API exposure is post-MVP.
+- Unrealized valuation policy (EOD mark fallback):
+   1. `OpenPositions.markPrice` (same `conid` + `report_date`)
+   2. `Trades.closePrice` (same `conid` + `report_date`)
+   3. Last known `Trades.tradePrice` on or before `report_date`
+   Tie-break: latest `dateTime`, then highest numeric `transactionID`, then highest raw record primary key. If all missing: mark provisional with `EOD_MARK_MISSING_ALL_SOURCES`.
+- Economic FX policy (execution FX fallback):
+   1. `Trades.fxRateToBase` (non-null and > 0)
+   2. Derived `abs(netCashInBase) / abs(netCash)` when `netCash != 0`
+   3. `ConversionRates.rate` for (`fromCurrency` -> base) on `report_date`, else nearest previous `reportDate`
+   Tie-break: exact date over previous date; within date use latest `ingestion_run_id`, then highest raw record primary key. If all missing: allow `1.0` only for base-currency events; otherwise mark provisional with `FX_RATE_MISSING_ALL_SOURCES`.
+- Reconciliation mismatch policy (frozen matrix):
+   - `realized_pnl`, `unrealized_pnl`, `fees`, `withholding_tax`: abs `max(0.01, minor_unit)`, rel `0.0001`, currency precision (for MVP: `USD/EUR/ILS=2`, `JPY=0`; extend via ISO minor-unit mapping).
+   - `position_qty`: abs `0.000001`, rel `0`, precision `6`.
+   - Formula: `abs(a-b) <= abs_tol OR abs(a-b)/max(abs(b),1e-9) <= rel_tol`; `position_qty` uses absolute-only check.
+- Corporate action policy (frozen boundary):
+   - Auto (safe): `CD`, `CP`, `FA`, `IC`, CUSIP/ISIN alias changes.
+   - Auto-if-unambiguous: `FS`, `FI`, `RS`, `SD`.
+   - Always manual in MVP: `SO`, `CO`, `TC`, `OR`, `TI`, `RI`, `SR`, `DI`, `TO`, `BC`, `CI`, `HD`, `HI`, `CS`, `CC`, `CA`, and `DW`.
+   - Scope rule: any event that requires elections, multi-leg interpretation, cost-basis allocation between instruments, or option deliverable adjustment is always manual in MVP.
 - Manual resolution ownership: single-user operation; unresolved mandatory corporate-action cases mark affected outputs as provisional with visible warnings.
-- Security boundary: authentication is delegated to reverse proxy; no in-app authentication and no reverse-proxy header contract hardening in MVP.
-- Retention policy: keep immutable raw payloads indefinitely for audit; use configurable retention for derived diagnostics if needed.
-- Reliability baseline: define operational SLOs for ingestion success, latency, and recovery before implementation.
+- Manual backlog behavior policy: unresolved manual corporate-action cases must not block unrelated instruments or global report generation; only affected instruments remain provisional with explicit unresolved counters.
+- Security boundary: authentication is delegated to reverse proxy; no in-app authentication and no reverse-proxy identity header contract checks in MVP.
+- Retention policy: keep immutable raw payloads indefinitely for audit; retain derived diagnostics for `60 days` hot retention, then archive before purge.
+- Reliability baseline (frozen SLOs): ingestion success `>=99.0%` (rolling 30 days), ingestion duration `p95 <= 15 minutes` (rolling 14 days), RTO `<= 4 hours`; alerts at success `<98.0%`, any run `>30 minutes`, or unresolved incident at `2 hours`.
+- Backup and restore policy (frozen): PostgreSQL full base backup every `24h`, WAL archive shipping every `5m`, PITR window `14 days`, backup retention (`14` daily, `8` weekly, `12` monthly), restore target `RPO <= 15m` and `RTO <= 4h`, with weekly restore smoke tests and monthly full restore drill.
 - Missing required sections policy: mark ingestion run failed, preserve diagnostics, and block publishing incomplete downstream snapshots.
-- Export baseline: provide CSV exports for key report endpoints with stable column contracts.
+- Required Flex section matrix policy (frozen):
+   - Hard-required for MVP publish (fail run if missing): `Trades`, `OpenPositions`, `CashTransactions`, `CorporateActions`, `ConversionRates`, `SecuritiesInfo`, `AccountInformation`.
+   - Reconciliation-required in MVP (fail run when reconciliation mode is enabled and section is missing): `MTMPerformanceSummaryInBase`, `FIFOPerformanceSummaryInBase`.
+   - Future-proof ingest-now, non-blocking if absent: `InterestAccruals`, `ChangeInDividendAccruals`, `OpenDividendAccruals`, `ChangeInNAV`, `StmtFunds`, `UnbundledCommissionDetails`.
+   - Optional-but-ignored in MVP mapping: all other sections remain raw-only persistence until explicitly promoted.
+- API list contract policy (frozen, configurable defaults):
+   - Shared query params for list endpoints: `limit`, `offset`, `sort_by`, `sort_dir`.
+   - Environment-configurable defaults: `API_DEFAULT_LIMIT=50`, `API_MAX_LIMIT=200`, `API_DEFAULT_SORT_DIR=asc`.
+   - Validation: `limit < 1` -> `400 INVALID_PAGINATION`; `offset < 0` -> `400 INVALID_PAGINATION`; invalid `sort_by` -> `400 INVALID_SORT_FIELD`; invalid `sort_dir` -> `400 INVALID_SORT_DIRECTION`; `limit > API_MAX_LIMIT` is clamped and reported as `applied_limit`.
+   - Endpoint sorting/filtering rules are code-level constants (not runtime-configurable) for deterministic behavior.
+- Export baseline: provide CSV exports with schema version `v1` and fixed column contracts for `GET /reports/pnl/by-instrument`, `GET /reports/pnl/by-label`, and `GET /reports/reconciliation/diff`.
+- Ingestion observability baseline: structured logs are mandatory with fields `run_id`, `stage`, `status`, `started_at_utc`, `ended_at_utc`, `duration_ms`, `source_section`, `source_record_ref`, `error_code`, `error_message`, `exception_type`, `stack_trace`, `retry_count`, `next_retry_at_utc`.
+- Ingestion diagnostics UX baseline (MVP minimum): runs list with status/duration, run stage timeline, error panel, source trace panel, retry visibility, and one-click copy for `run_id` and structured error payload.
 
 ### Specification freeze required before implementation completion
 - Canonical natural-key definitions per event type (`trade_fill`, `cashflow`, `fx`, `corp_action`) must be documented in one versioned mapping spec.
@@ -129,7 +164,7 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 - `event_fx`
 - `event_corp_action`
 - `position_lot`
-- `pnl_snapshot_daily` (recommended for reporting speed)
+- `pnl_snapshot_daily` (mandatory in MVP for deterministic day-level reporting and reconciliation)
 
 ### Required Traceability Fields
 - Source report metadata (query id, report date, retrieval timestamp)
@@ -144,6 +179,7 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 
 ### Validation Rules
 - Reject ingestion when mandatory Flex sections are missing
+- Emit deterministic diagnostic code `MISSING_REQUIRED_SECTION` with missing section names for preflight and runtime validation failures
 - Fail transformation when required fields are absent or incompatible
 - Persist structured diagnostics (record type, field, reason, sample source row)
 
@@ -208,9 +244,9 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 
 ### Acceptance Criteria
 - Closed trade sequences produce expected realized P&L
-- Open lots produce expected unrealized P&L using IBKR end-of-day marks tied to report date, with documented fallback behavior
+- Open lots produce expected unrealized P&L using IBKR end-of-day marks tied to report date, with the frozen EOD fallback hierarchy
 - Daily snapshots persist and are queryable by date range
-- Economic reporting uses broker-provided execution FX when present and otherwise uses one documented fallback hierarchy
+- Economic reporting uses broker-provided execution FX when present and otherwise uses the frozen FX fallback hierarchy
 - Snapshot and report date boundaries are interpreted in `Asia/Jerusalem` and executed as UTC-boundary queries
 
 ---
@@ -266,11 +302,75 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 - `DELETE /instruments/{id}/labels/{label_id}`
 - `POST /notes`, `GET /notes`
 
+### List endpoint defaults and constraints
+- `GET /instruments`
+   - default sort: `symbol asc, instrument_id asc`
+   - allowed `sort_by`: `symbol`, `conid`, `updated_at_utc`
+   - filters: `label_id`, `search`, `active_only`
+- `GET /notes`
+   - default sort: `created_at_utc desc, note_id desc`
+   - allowed `sort_by`: `created_at_utc`, `updated_at_utc`, `instrument_id`
+   - filters: `instrument_id`, `label_id`, `created_from`, `created_to`
+- `GET /ingestion/runs`
+   - default sort: `started_at_utc desc, ingestion_run_id desc`
+   - allowed `sort_by`: `started_at_utc`, `ended_at_utc`, `status`, `duration_ms`
+   - filters: `status`, `from_utc`, `to_utc`, `run_type`
+
+### List response envelope
+- `items`: array
+- `page`: `{limit, offset, returned, total, has_more, applied_limit}`
+- `sort`: `{sort_by, sort_dir}`
+- `filters`: normalized applied filters
+
 ### Reporting
 - `GET /reports/pnl/by-instrument`
 - `GET /reports/pnl/by-label`
 - `GET /reports/reconciliation/diff`
 - `GET /reports/provenance` (event/raw trace by report item)
+
+### CSV export contracts (`v1`)
+- Contract stability rule: column names, order, datatypes, and nullability are stable within `v1`; breaking changes require a new schema version.
+- Validation rule: reject export payloads that violate `v1` column order or datatype/nullability contracts.
+- `GET /reports/pnl/by-instrument` CSV columns in order:
+   1. `report_date_local` (`date`, non-null)
+   2. `instrument_id` (`uuid`, non-null)
+   3. `conid` (`text`, non-null)
+   4. `symbol` (`text`, non-null)
+   5. `currency` (`text`, non-null)
+   6. `position_qty` (`decimal(24,8)`, non-null)
+   7. `cost_basis` (`decimal(24,8)`, nullable)
+   8. `realized_pnl` (`decimal(24,8)`, non-null)
+   9. `unrealized_pnl` (`decimal(24,8)`, non-null)
+   10. `total_pnl` (`decimal(24,8)`, non-null)
+   11. `provisional` (`boolean`, non-null)
+- `GET /reports/pnl/by-label` CSV columns in order:
+   1. `report_date_local` (`date`, non-null)
+   2. `label_id` (`uuid`, non-null)
+   3. `label_name` (`text`, non-null)
+   4. `instrument_count` (`integer`, non-null)
+   5. `realized_pnl` (`decimal(24,8)`, non-null)
+   6. `unrealized_pnl` (`decimal(24,8)`, non-null)
+   7. `total_pnl` (`decimal(24,8)`, non-null)
+   8. `fees` (`decimal(24,8)`, non-null)
+   9. `withholding_tax` (`decimal(24,8)`, non-null)
+   10. `provisional` (`boolean`, non-null)
+- `GET /reports/reconciliation/diff` CSV columns in order:
+   1. `report_date_local` (`date`, non-null)
+   2. `instrument_id` (`uuid`, non-null)
+   3. `conid` (`text`, non-null)
+   4. `symbol` (`text`, non-null)
+   5. `metric` (`text`, non-null)
+   6. `broker_value` (`decimal(24,8)`, nullable)
+   7. `economic_value` (`decimal(24,8)`, nullable)
+   8. `abs_diff` (`decimal(24,8)`, non-null)
+   9. `rel_diff` (`decimal(24,8)`, nullable)
+   10. `tolerance_abs` (`decimal(24,8)`, non-null)
+   11. `tolerance_rel` (`decimal(24,8)`, non-null)
+   12. `within_tolerance` (`boolean`, non-null)
+   13. `formula_context` (`text`, nullable)
+   14. `source_event_id` (`uuid`, nullable)
+   15. `source_raw_record_id` (`uuid`, nullable)
+   16. `provisional` (`boolean`, non-null)
 
 ---
 
@@ -307,7 +407,7 @@ Working artifact: `MVP_spec_freeze.md` is the authoritative template for these d
 4. **Data replay correctness**
    - Mitigation: immutable raw storage plus deterministic reprocessing
 5. **Operational reliability drift**
-   - Mitigation: run locking, timeout and retry/backoff policy, and SLO-backed alert thresholds
+   - Mitigation: single active run lock with `409` on overlap, timeout and retry/backoff policy, and SLO-backed alert thresholds
 
 ---
 
