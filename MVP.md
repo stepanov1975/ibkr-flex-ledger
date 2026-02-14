@@ -82,6 +82,20 @@ Build a self-hosted web application that imports IBKR activity using Flex Web Se
 ### Core Principle
 Raw input remains immutable. All derived data can be regenerated from raw records.
 
+### Resolved MVP policy decisions
+- Idempotency policy: dedupe raw artifacts by `period_key + flex_query_id + sha256`, then UPSERT canonical records on stable natural keys.
+- Instrument identity policy: `conid` is canonical for IBKR data; ISIN/CUSIP/FIGI and symbol/localSymbol are aliases with conid-first conflict handling.
+- Unrealized valuation policy: use IBKR end-of-day marks tied to report date; apply one documented fallback when marks are missing.
+- Economic FX policy: use broker-provided execution FX when present; otherwise apply one documented fallback hierarchy.
+- Reconciliation mismatch policy: evaluate diffs with per-metric tolerances and currency-specific decimal precision.
+- Corporate action policy: auto-handle only deterministic low-ambiguity actions; require manual cases for election-based, multi-leg, cost-basis allocation, and option-deliverable adjustments.
+- Manual resolution ownership: single-user operation; unresolved mandatory corporate-action cases mark affected outputs as provisional with visible warnings.
+- Security boundary: authentication is delegated to reverse proxy; no in-app authentication in MVP.
+- Retention policy: keep immutable raw payloads indefinitely for audit; use configurable retention for derived diagnostics if needed.
+- Reliability baseline: define operational SLOs for ingestion success, latency, and recovery before implementation.
+- Missing required sections policy: mark ingestion run failed, preserve diagnostics, and block publishing incomplete downstream snapshots.
+- Export baseline: provide CSV exports for key report endpoints with stable column contracts.
+
 ---
 
 ## 3. Data Contract and Storage Plan
@@ -104,6 +118,11 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Source report metadata (query id, report date, retrieval timestamp)
 - Source identifiers per row (`ibkr_ref` or equivalent)
 - Transformation provenance (`ingestion_run_id`, source record link)
+
+### Canonical event contract requirements
+- Define required fields per event type with strict enum values and nullability rules.
+- Version parser/mapping contracts by Flex section so schema drift fails fast with clear diagnostics.
+- Ensure deterministic canonical output identity so replay/reprocess yields stable record keys.
 
 ### Validation Rules
 - Reject ingestion when mandatory Flex sections are missing
@@ -140,7 +159,8 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 ### Acceptance Criteria
 - A scheduled run can ingest one full report end-to-end
 - Failed runs persist clear error diagnostics
-- Re-running same source date is idempotent at ingestion-run level policy (explicit overwrite or explicit duplicate handling)
+- Re-ingesting the same period dedupes raw artifacts via `period_key + flex_query_id + sha256`
+- Canonical records converge via UPSERT on stable natural keys without duplicate business events
 
 ---
 
@@ -150,11 +170,13 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Mappers for stock trades, fees, dividends, withholding tax, and FX
 - Corporate action event capture with `requires_manual` flag
 - Reprocess command: regenerate canonical events from raw records only
+- Instrument identity mapper with `conid` canonicalization and alias persistence strategy
 
 ### Acceptance Criteria
 - Canonical events generated with deterministic output
 - Reprocess run reproduces same event set from same raw source
 - Missing field or section produces hard-fail with actionable diagnostics
+- Non-deterministic or ambiguous corporate-action inference opens manual case and blocks affected instrument recompute outputs
 
 ---
 
@@ -168,8 +190,9 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 
 ### Acceptance Criteria
 - Closed trade sequences produce expected realized P&L
-- Open lots produce expected unrealized P&L from latest snapshot/marks
+- Open lots produce expected unrealized P&L using IBKR end-of-day marks tied to report date, with documented fallback behavior
 - Daily snapshots persist and are queryable by date range
+- Economic reporting uses broker-provided execution FX when present and otherwise uses one documented fallback hierarchy
 
 ---
 
@@ -197,11 +220,13 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Economic mode (full-cost perspective)
 - Diff views by day and instrument
 - Link-back path: report row -> event -> raw record
+- Diff metadata that includes formula/rule context and tolerance basis
 
 ### Acceptance Criteria
 - User can explain any displayed metric via full provenance chain
-- Reconciliation mismatches are visible, not hidden
+- Reconciliation mismatches are visible, not hidden, and evaluated using per-metric tolerance with currency-specific precision
 - Diff output includes enough context for troubleshooting
+- Outputs impacted by unresolved mandatory manual cases are clearly marked provisional with unresolved counters
 
 ---
 
@@ -255,11 +280,13 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 1. **Flex schema drift**
    - Mitigation: strict validation, versioned mappers, golden fixtures
 2. **Reconciliation variance with broker summaries**
-   - Mitigation: explicit mode separation and transparent diff tooling
+   - Mitigation: explicit mode separation, formula/rule metadata in diff output, and documented tolerance policy
 3. **Corporate action complexity**
-   - Mitigation: deterministic flagging and manual intervention workflow
+   - Mitigation: conservative automation boundary, deterministic flagging, and provisional-output warnings for unresolved mandatory cases
 4. **Data replay correctness**
    - Mitigation: immutable raw storage plus deterministic reprocessing
+5. **Operational reliability drift**
+   - Mitigation: run locking, timeout and retry/backoff policy, and SLO-backed alert thresholds
 
 ---
 

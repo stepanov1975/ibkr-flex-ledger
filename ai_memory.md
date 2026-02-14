@@ -4,3 +4,4 @@
 - [2026-02-14] DECISION :: Environment baseline includes PostgreSQL 17 installed with cluster 17/main online on port 5432.
 - [2026-02-14] PATTERN :: Keep external IBKR/Flex repositories under references/ as read-only study material; reuse architecture patterns (parser boundary, poll-download flow, report section checklist) without direct code copy.
 - [2026-02-14] DECISION :: Pre-implementation protocol requires scanning references/REFERENCE_NOTES.md before any feature work or significant bug fix to maximize reuse and prevent duplicate design effort.
+- [2026-02-14] DECISION :: MVP.md now encodes resolved evaluation policies as explicit requirements: idempotency (period_key + flex_query_id + sha256 plus canonical UPSERT), conid-first identity, EOD mark and FX fallback rules, reconciliation tolerance policy, manual corporate-action workflow, reverse-proxy auth boundary, retention defaults, missing-section failure handling, and CSV export baseline.
