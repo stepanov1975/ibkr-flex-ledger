@@ -1,0 +1,1 @@
+- [2026-02-14] DECISION :: MVP scope documented in MVP.md with seven core feature groups: ingestion, canonical events, stocks-first ledger, labels/notes, reporting drilldown, reconciliation modes, and operational reliability gates.
