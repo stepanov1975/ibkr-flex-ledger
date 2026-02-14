@@ -3,6 +3,14 @@
 Date: 2026-02-14
 Purpose: Local study notes for reuse decisions in this project.
 
+## Mandatory boundary
+
+All code in `references/` is for reference only.
+
+- It is not part of the project runtime.
+- Do not import, execute, or wire this code directly into project modules.
+- Use it only to inform architecture and implementation patterns in project-native code.
+
 ## Cloned repositories
 
 - csingley/ibflex

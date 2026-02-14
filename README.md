@@ -8,6 +8,14 @@ Self-hosted portfolio accounting and analytics app for Interactive Brokers (IBKR
 
 The codebase must be structured in a strongly modular way from the start because additional functionality will be added later.
 
+### Reference code boundary (mandatory)
+
+Code under `references/` is reference material only. It is not part of this application runtime.
+
+- Do not import Python/TypeScript modules from `references/` into project code.
+- Do not call CLI entry points from `references/` as part of app jobs or services.
+- Reuse ideas and patterns only; implement project-native code in the main application modules.
+
 - `max_plan.md` is the reference for end-state architecture and future modules.
 - `references/REFERENCE_NOTES.md` is the reference index of external projects and reusable patterns.
 - Features described in `max_plan.md` are not initial implementation scope.

@@ -96,32 +96,9 @@ Raw input remains immutable. All derived data can be regenerated from raw record
 - Missing required sections policy: mark ingestion run failed, preserve diagnostics, and block publishing incomplete downstream snapshots.
 - Export baseline: provide CSV exports for key report endpoints with stable column contracts.
 
-### Reference-informed implementation constraints
-- Flex API flow is a strict 2-step state machine: `SendRequest` -> poll `GetStatement` until ready -> persist immutable payload.
-- Error handling must classify Flex codes into retryable (`1009`, `1018`, `1019`) vs non-retryable token/auth failures (`1012`, `1015`) and avoid retries for token failures.
-- Retry behavior must use bounded exponential backoff with jitter and support server hint delays (`retry_after`) when present.
-- Ingestion transport must isolate HTTP operations behind a protocol/interface so retry and parser behavior can be tested with mocked clients.
-- Response parsing must map API payloads into typed response models before domain mapping, including explicit handling for success/error wrappers.
-- Flex configuration validation must enforce an MVP required-section checklist before first production run.
-
 ---
 
 ## 3. Data Contract and Storage Plan
-
-### Flex report configuration baseline (required)
-The Flex query used for MVP ingestion must include these sections at minimum:
-- Account Information
-- Mark-to-Market Performance Summary in Base
-- Open Positions
-- Realized and Unrealized Performance Summary in Base
-
-Recommended for operational completeness and future extension readiness:
-- Change in NAV
-- Month & Year to Date Performance Summary in Base
-- Option Exercises, Assignments, and Expirations
-
-Operational settings baseline:
-- Format XML, period bounded to supported range, breakout by day enabled, and all audit fields enabled.
 
 ### Main Tables (MVP)
 - `instrument` (stocks only)
@@ -151,8 +128,6 @@ Operational settings baseline:
 - Reject ingestion when mandatory Flex sections are missing
 - Fail transformation when required fields are absent or incompatible
 - Persist structured diagnostics (record type, field, reason, sample source row)
-- Enforce timezone-aware datetime normalization at mapping boundary (store canonical timestamps in UTC)
-- Validate required-column contracts with strict schema checks and lazy error collection for diagnostics output
 
 ---
 
@@ -180,16 +155,12 @@ Operational settings baseline:
 - Ingestion run lifecycle: started/success/failed
 - Immutable raw payload persistence
 - Raw-row extraction into `raw_record`
-- Two-step ingestion state machine implementation: submit request, poll statement, persist payload
-- Error taxonomy and retry engine with retryable/non-retryable code mapping
 
 ### Acceptance Criteria
 - A scheduled run can ingest one full report end-to-end
 - Failed runs persist clear error diagnostics
 - Re-ingesting the same period dedupes raw artifacts via `period_key + flex_query_id + sha256`
 - Canonical records converge via UPSERT on stable natural keys without duplicate business events
-- Token/auth failures are terminal for the run (no retry loop); transient API/network failures retry with bounded backoff and jitter
-- Polling handles "statement in progress" responses deterministically and exits with actionable timeout diagnostics when retry budget is exhausted
 
 ---
 
@@ -200,14 +171,12 @@ Operational settings baseline:
 - Corporate action event capture with `requires_manual` flag
 - Reprocess command: regenerate canonical events from raw records only
 - Instrument identity mapper with `conid` canonicalization and alias persistence strategy
-- Canonical schema validator for required fields/types with lazy error collection mode for debugging
 
 ### Acceptance Criteria
 - Canonical events generated with deterministic output
 - Reprocess run reproduces same event set from same raw source
 - Missing field or section produces hard-fail with actionable diagnostics
 - Non-deterministic or ambiguous corporate-action inference opens manual case and blocks affected instrument recompute outputs
-- Mapper normalizes signed broker quantities into canonical side + absolute quantity rules and enforces timezone-aware execution timestamps
 
 ---
 
@@ -298,9 +267,6 @@ Operational settings baseline:
 - FX conversion event handling
 - Schema drift detection and diagnostic quality
 - Reprocess determinism from immutable raw inputs
-- Flex client retry matrix tests: transient server busy/rate-limit/in-progress retries, token errors no-retry, and timeout exhaustion paths
-- Section checklist validation tests: missing required sections fail ingestion before publish
-- Polling workflow tests: submit->poll->download success path and failure diagnostics path
 
 ### Completion Gates
 - All MVP tests pass

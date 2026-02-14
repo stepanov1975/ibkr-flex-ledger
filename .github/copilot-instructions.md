@@ -2,6 +2,7 @@
 1. Always read README.md at the start of the session to load architectural decisions, conventions, and patterns.
 2. Use Tree of Thoughts (ToT) for implementation of new features or complex bug fixes.
 3. When bug discovered/need to be fixed, if this bug can be reproduced using test, **first** create test thatreproduces bug, run test see it fails, fix bug, run test see it pass.
+4. Code under `references/` is reference material only. It is not part of this application runtime. Reuse ideas and patterns only; implement project-native code in the main application modules.
 
 ### No Backward Compatibility Code Needed
 - **Single-site application** with coordinated deployments
@@ -108,10 +109,12 @@
 ## TESTING STANDARDS
 Important! When creating or running tests **always read `testing.md` for detailed testing protocols.**
 **Code to support legacy functionality should never be added to project only to make old tests pass after project code changes made**
+**Never** create tests for code in `references/` directory
 
 ## LINTING 
 1. **Pre-Completion Gate:** Code is NOT complete until linting passes with zero errors.
 2. **Always** read `linting.md` for detailed JavaScript and Python linting protocols.
+3. **Never** run linting on code in `references/` directory
 
 ## Stale File Handling
 When you encounter issues that seem to persist despite your fixes, consider the possibility of stale files.
