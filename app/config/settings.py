@@ -22,6 +22,12 @@ class AppSettings(BaseSettings):
         account_id: Internal single-account identifier used for MVP processing context.
         ibkr_flex_token: Flex Web Service token.
         ibkr_flex_query_id: Flex query identifier.
+        ibkr_flex_initial_wait_seconds: Delay before first statement poll attempt.
+        ibkr_flex_retry_attempts: Number of poll attempts.
+        ibkr_flex_backoff_base_seconds: Base retry delay for exponential backoff.
+        ibkr_flex_backoff_max_seconds: Maximum retry delay cap.
+        ibkr_flex_jitter_min_multiplier: Minimum retry jitter multiplier.
+        ibkr_flex_jitter_max_multiplier: Maximum retry jitter multiplier.
         api_default_limit: Default list endpoint limit.
         api_max_limit: Maximum allowed list endpoint limit.
     """
@@ -40,6 +46,12 @@ class AppSettings(BaseSettings):
     account_id: str = Field(default="DEFAULT_ACCOUNT", min_length=1)
     ibkr_flex_token: str = Field(min_length=1)
     ibkr_flex_query_id: str = Field(min_length=1)
+    ibkr_flex_initial_wait_seconds: float = Field(default=5.0, ge=0)
+    ibkr_flex_retry_attempts: int = Field(default=7, ge=1)
+    ibkr_flex_backoff_base_seconds: float = Field(default=10.0, ge=0)
+    ibkr_flex_backoff_max_seconds: float = Field(default=60.0, gt=0)
+    ibkr_flex_jitter_min_multiplier: float = Field(default=0.5, gt=0)
+    ibkr_flex_jitter_max_multiplier: float = Field(default=1.5, gt=0)
     api_default_limit: int = Field(default=50, ge=1)
     api_max_limit: int = Field(default=200, ge=1)
 
@@ -57,6 +69,24 @@ class AppSettings(BaseSettings):
         default_limit = info.data.get("api_default_limit", 50)
         if value < default_limit:
             raise ValueError("api_max_limit must be greater than or equal to api_default_limit")
+        return value
+
+    @field_validator("ibkr_flex_backoff_max_seconds")
+    @classmethod
+    def _validate_backoff_cap_bounds(cls, value: float, info) -> float:
+        backoff_base_seconds = float(info.data.get("ibkr_flex_backoff_base_seconds", 10.0))
+        if value < backoff_base_seconds:
+            raise ValueError("ibkr_flex_backoff_max_seconds must be greater than or equal to ibkr_flex_backoff_base_seconds")
+        return value
+
+    @field_validator("ibkr_flex_jitter_max_multiplier")
+    @classmethod
+    def _validate_jitter_bounds(cls, value: float, info) -> float:
+        jitter_min_multiplier = float(info.data.get("ibkr_flex_jitter_min_multiplier", 0.5))
+        if value < jitter_min_multiplier:
+            raise ValueError(
+                "ibkr_flex_jitter_max_multiplier must be greater than or equal to ibkr_flex_jitter_min_multiplier"
+            )
         return value
 
 

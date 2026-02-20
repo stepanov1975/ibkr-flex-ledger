@@ -38,7 +38,15 @@ def bootstrap_create_application() -> FastAPI:
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
-    flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
+    flex_adapter = FlexWebServiceAdapter(
+        token=settings.ibkr_flex_token,
+        initial_wait_seconds=settings.ibkr_flex_initial_wait_seconds,
+        retry_attempts=settings.ibkr_flex_retry_attempts,
+        retry_backoff_base_seconds=settings.ibkr_flex_backoff_base_seconds,
+        retry_max_backoff_seconds=settings.ibkr_flex_backoff_max_seconds,
+        jitter_min_multiplier=settings.ibkr_flex_jitter_min_multiplier,
+        jitter_max_multiplier=settings.ibkr_flex_jitter_max_multiplier,
+    )
     ingestion_orchestrator = IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
         raw_persistence_repository=raw_persistence_repository,
@@ -87,7 +95,15 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
-    flex_adapter = FlexWebServiceAdapter(token=settings.ibkr_flex_token)
+    flex_adapter = FlexWebServiceAdapter(
+        token=settings.ibkr_flex_token,
+        initial_wait_seconds=settings.ibkr_flex_initial_wait_seconds,
+        retry_attempts=settings.ibkr_flex_retry_attempts,
+        retry_backoff_base_seconds=settings.ibkr_flex_backoff_base_seconds,
+        retry_max_backoff_seconds=settings.ibkr_flex_backoff_max_seconds,
+        jitter_min_multiplier=settings.ibkr_flex_jitter_min_multiplier,
+        jitter_max_multiplier=settings.ibkr_flex_jitter_max_multiplier,
+    )
     return IngestionJobOrchestrator(
         ingestion_repository=ingestion_repository,
         raw_persistence_repository=raw_persistence_repository,

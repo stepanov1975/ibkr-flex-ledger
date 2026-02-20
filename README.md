@@ -177,6 +177,17 @@ Required settings for startup validation:
 - `IBKR_FLEX_TOKEN`
 - `IBKR_FLEX_QUERY_ID`
 
+Optional Flex retry strategy tuning settings:
+
+- `IBKR_FLEX_INITIAL_WAIT_SECONDS` (default `5.0`)
+- `IBKR_FLEX_RETRY_ATTEMPTS` (default `7`)
+- `IBKR_FLEX_BACKOFF_BASE_SECONDS` (default `10.0`)
+- `IBKR_FLEX_BACKOFF_MAX_SECONDS` (default `60.0`)
+- `IBKR_FLEX_JITTER_MIN_MULTIPLIER` (default `0.5`)
+- `IBKR_FLEX_JITTER_MAX_MULTIPLIER` (default `1.5`)
+
+Retry behavior uses exponential backoff with jitter and preserves IBKR code-specific retry floors for `1009`, `1018`, and `1019`.
+
 If required settings are missing or invalid, startup fails with actionable validation output.
 
 ## Schema and migrations baseline (Task 2)

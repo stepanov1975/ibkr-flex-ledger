@@ -52,7 +52,10 @@ def test_adapters_flex_poll_retries_on_throttled_error_code_1018(monkeypatch: py
         token="token",
         initial_wait_seconds=0,
         retry_attempts=2,
-        retry_increment_seconds=0,
+        retry_backoff_base_seconds=0,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
     )
 
     request_success_payload = (
@@ -100,7 +103,10 @@ def test_adapters_flex_poll_retries_on_server_busy_error_code_1009(monkeypatch: 
         token="token",
         initial_wait_seconds=0,
         retry_attempts=2,
-        retry_increment_seconds=0,
+        retry_backoff_base_seconds=0,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
     )
 
     request_success_payload = (
@@ -158,3 +164,57 @@ def test_adapters_flex_request_known_error_code_uses_fallback_message(monkeypatc
 
     with pytest.raises(ValueError, match=r"code=1012, message=Token has expired\."):
         adapter.adapter_fetch_report(query_id="query-id")
+
+
+def test_adapters_flex_retry_wait_uses_exponential_backoff_with_cap_and_jitter() -> None:
+    """Calculate exponential backoff wait with deterministic jitter and cap.
+
+    Args:
+        None: This test uses deterministic adapter configuration only.
+
+    Returns:
+        None: Assertions verify wait-seconds calculation contract.
+
+    Raises:
+        AssertionError: Raised when computed wait values are incorrect.
+    """
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=0,
+        retry_backoff_base_seconds=4,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
+        random_unit_interval_provider=lambda: 0.0,
+    )
+
+    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(4.0)
+    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=1) == pytest.approx(8.0)
+    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=2) == pytest.approx(10.0)
+
+
+def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
+    """Return initial wait when jittered backoff is lower than configured initial floor.
+
+    Args:
+        None: This test uses deterministic adapter configuration only.
+
+    Returns:
+        None: Assertions verify initial wait floor behavior.
+
+    Raises:
+        AssertionError: Raised when initial wait floor is not applied.
+    """
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=5,
+        retry_backoff_base_seconds=1,
+        retry_max_backoff_seconds=60,
+        jitter_min_multiplier=0.5,
+        jitter_max_multiplier=0.5,
+        random_unit_interval_provider=lambda: 0.0,
+    )
+
+    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)

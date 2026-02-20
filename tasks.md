@@ -1,72 +1,39 @@
 # Task Plan
-Task 6 implements deterministic valuation and FX fallback hierarchies from the frozen spec on top of completed Task 5 canonical mapping. Current verified state: canonical persistence exists for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action`; Task 5 mapping currently writes FX events only from `ConversionRates` rows and does not yet apply the full frozen FX fallback order (`Trades.fxRateToBase` -> `netCashInBase/netCash` -> `ConversionRates`). There is also no implemented valuation resolver yet for the frozen EOD mark hierarchy (`OpenPositions.markPrice` -> same-day `Trades.closePrice` -> last `Trades.tradePrice` on/before report date). Task 6 must add reusable project-native fallback services, deterministic tie-break behavior, and diagnostics codes (`EOD_MARK_FALLBACK_LAST_TRADE`, `EOD_MARK_MISSING_ALL_SOURCES`, `FX_RATE_MISSING_ALL_SOURCES`) with minimal diff by extending existing mapping/db/job patterns rather than introducing parallel pipelines.
-
-Resume notes if interrupted:
-- Continue from the first subtask still in `status: planned`.
-- Keep DB access in `app/db/*` only and reuse existing canonical pipeline wiring.
-- Keep reference usage as pattern-only (never import from `references/`).
-- Treat `MVP_spec_freeze.md` section 2 as normative for ordering and tie-break rules.
+Evaluate Improvement #1 from `docs/ibkr_import_reference_improvements.md` (retry strategy) against the current project implementation in `app/adapters/flex_web_service.py`, including upstream wiring (`app/bootstrap.py`, `app/config/settings.py`) and existing adapter tests. Determine whether exponential backoff with jitter is a net benefit for this codebase given current retry floors for IBKR error codes (`1009`, `1018`, `1019`), deterministic diagnostics expectations, and MVP operational constraints. If beneficial, implement a minimal project-native solution that preserves existing architecture boundaries, keeps deterministic testability, updates only necessary settings/wiring, and adds focused regression tests. Validate with project-required Python lint/test workflow before final documentation updates.
 
 ## Subtasks
-1. **Reference and reuse audit for Task 6 extension points** — `status: planned`
-   - **Description:** Confirm exact modules, contracts, and reference patterns to extend so Task 6 is implemented with the smallest safe diff.
-   - [ ] Re-audit project-native extension points in `app/mapping/service.py`, `app/jobs/canonical_pipeline.py`, `app/db/interfaces.py`, and `app/db/canonical_persistence.py`.
-   - [ ] Re-check `references/REFERENCE_NOTES.md` and inspect relevant patterns in `references/finx-reports-ib` and `references/ibflex` for mark/FX source fields and tie-break signals.
-   - [ ] Produce implementation notes in this file summary indicating exactly which existing modules will be extended and which new modules (if any) are justified.
-   - **Acceptance criteria:** The chosen implementation path is explicitly tied to existing project modules and avoids duplicate logic paths.
-   - **Summary:** (fill after completion)
+1. **Decision analysis for Improvement #1** — `status: done`
+	- **Description:** Produce a code-grounded decision on whether Improvement #1 should be adopted in this project.
+	 [] Trace current retry/backoff control flow and invariants in adapter + orchestrator integration points.
+	[] Compare current behavior to reference retry pattern benefits and risks for this project.
+	[] Record explicit go/no-go decision with technical rationale and constraints impact.
+	- **Summary:** Current adapter uses linear backoff (`initial_wait + attempt * increment`) with no jitter, which is weaker under concurrent retry storms and does not match proven IBKR transient error handling patterns. Improvement #1 is beneficial for this project because exponential backoff + jitter reduces synchronized retry spikes while preserving existing per-error retry floors (`1009`/`1018`/`1019`) through `max(backoff, code_floor)`. Change scope is low-risk because retry logic is centralized inside `FlexWebServiceAdapter` and covered by focused adapter tests.
 
-2. **Create failing regression tests for frozen fallback hierarchies** — `status: planned`
-   - **Description:** Add red tests first to capture missing Task 6 behavior before modifying runtime code.
-   - [ ] Add tests for EOD mark fallback source order and tie-break rules, including `EOD_MARK_FALLBACK_LAST_TRADE` and `EOD_MARK_MISSING_ALL_SOURCES` outcomes.
-   - [ ] Add tests for FX fallback source order (`fxRateToBase` -> derived ratio -> `ConversionRates`) and tie-break rules (exact date, nearest previous, latest `ingestion_run_id`, highest raw record primary key).
-   - [ ] Add tests for provisional behavior when non-base-currency FX has no available source and ensure `FX_RATE_MISSING_ALL_SOURCES` is emitted.
-   - **Acceptance criteria:** New Task 6 tests fail on current code and are deterministic across repeated runs.
-   - **Summary:** (fill after completion)
+2. **Implement adapter retry strategy (if approved by Subtask 1)** — `status: done`
+	- **Description:** Apply a minimal, maintainable retry-strategy change in project-native adapter code only if Subtask 1 concludes it is beneficial.
+	 [] Reuse existing retry helpers/patterns where possible; add no duplicate logic.
+	[] Replace linear backoff with exponential backoff + jitter and preserve per-error minimum retry floors via `max(computed_backoff, code_floor)`.
+	[] Keep configuration injectable for deterministic tests and operational tuning, with strict input validation.
+	- **Summary:** Implemented exponential backoff with jitter in `app/adapters/flex_web_service.py` using a dedicated `_AdapterRetryStrategy` dataclass to keep retry logic centralized and maintainable. Preserved IBKR error-code retry floors by combining computed backoff with code-specific minimum delays via `max(calculated_wait, retry_floor)` semantics. Exposed retry strategy parameters in runtime configuration via `AppSettings` and wired them through `app/bootstrap.py` for both API and CLI orchestration paths.
 
-3. **Extend typed contracts and DB read methods for fallback inputs** — `status: planned`
-   - **Description:** Add explicit typed contracts and repository methods needed to resolve mark and FX fallbacks without ad-hoc dictionaries.
-   - [ ] Extend `app/db/interfaces.py` with read models for valuation and FX candidate rows (OpenPositions, Trades, ConversionRates) and deterministic diagnostics outputs.
-   - [ ] Add/extend DB read repository methods in `app/db/canonical_persistence.py` to fetch candidate rows keyed by account, conid, currency pair, and report date.
-   - [ ] Reuse existing repository/service naming conventions and keep SQL isolated to `app/db/*`.
-   - **Acceptance criteria:** Contracts and repository ports fully represent Task 6 fallback inputs/outputs and are consumed by services without raw dict unpacking.
-   - **Summary:** (fill after completion)
+3. **Add and run targeted regression tests** — `status: done`
+	- **Description:** Validate the new retry behavior with focused tests and prove no regression in current retry semantics.
+	 [] Add/update adapter tests to cover exponential growth, jitter bounds, and error-code retry floors.
+	[] Run targeted pytest module(s) for adapter behavior and confirm pass.
+	[] Ensure tests assert deterministic behavior via controlled jitter/random source.
+	- **Summary:** Updated `tests/test_adapters_flex_web_service.py` to use new adapter parameters and added deterministic tests for exponential backoff with cap and initial-wait floor behavior. Executed `pytest tests/test_adapters_flex_web_service.py` and confirmed all tests pass (6/6).
 
-4. **Implement reusable valuation and FX fallback services** — `status: planned`
-   - **Description:** Implement deterministic fallback logic as reusable services for Task 6 and upcoming Task 7 ledger/snapshot work.
-   - [ ] Implement EOD mark resolver with frozen priority order, tie-breaks, and deterministic diagnostic/provisional outputs.
-   - [ ] Implement FX resolver with frozen priority order, half-even rounding for derived ratio to 10 decimals, and deterministic diagnostic/provisional outputs.
-   - [ ] Add FSN notes and runtime guards only where non-obvious constraints are necessary to prevent regression loops.
-   - **Acceptance criteria:** Services return stable outputs for identical inputs and encode source + diagnostic decisions exactly per frozen spec.
-   - **Summary:** (fill after completion)
+4. **Run lint gates for touched Python modules** — `status: done`
+	- **Description:** Satisfy project completion gate for Python quality checks on changed code.
+	 [] Run `pylint` on touched Python module(s) with project-approved disables.
+	[] Run `ruff check . --ignore=E501,W293,W291` and resolve new issues from this task scope.
+	[] Confirm no new lint errors remain in modified files.
+	- **Summary:** Ran `pylint` on touched app modules and resolved the `too-many-instance-attributes` refactor warning by grouping retry state into `_AdapterRetryStrategy`. Ran `ruff check app tests --ignore=E501,W293,W291` (first-party scope only, per project rule excluding `references/`) and confirmed all checks passed.
 
-5. **Integrate Task 6 fallback engine into canonical pipeline flow** — `status: planned`
-   - **Description:** Wire fallback services into existing canonical mapping/persistence flow without creating a parallel orchestration path.
-   - [ ] Replace current FX-only-from-ConversionRates behavior with full Task 6 FX fallback resolution in canonical pipeline mapping outputs.
-   - [ ] Persist resolved FX values/source/provisional/diagnostic fields into `event_fx` via existing canonical persistence APIs.
-   - [ ] Ensure ingestion/reprocess timelines include Task 6-relevant diagnostics summary counters where appropriate.
-   - **Acceptance criteria:** Ingestion and reprocess flows both produce deterministic FX fallback results and diagnostics from the same shared path.
-   - **Summary:** (fill after completion)
-
-6. **Run Task 6 validation gates (tests and lint)** — `status: planned`
-   - **Description:** Validate Task 6 changes with project testing and linting protocols.
-   - [ ] Run targeted Task 6 tests first, then adjacent ingestion/mapping/canonical tests impacted by wiring changes.
-   - [ ] Run `ruff` on project code (excluding `references/`) and resolve all new issues.
-   - [ ] Run `pylint` per project protocol on Task 6 touched modules and resolve all new issues.
-   - **Acceptance criteria:** Task 6 regression suite passes and lint gates pass with zero new errors in changed code.
-   - **Summary:** (fill after completion)
-
-7. **Update README and memory** — `status: planned`
-   - **Description:** revise `README.md` and `ai_memory.md` to reflect changes
-   - [ ] Update `README.md` Task 6 section with implemented fallback hierarchies, diagnostics semantics, and affected workflow surfaces.
-   - [ ] Add durable Task 6 decisions/patterns to `ai_memory.md` using required format.
-   - [ ] Remove stale documentation that still describes Task 6 functionality as missing.
-   - **Acceptance criteria:** Documentation and memory reflect actual Task 6 implementation and no longer contradict runtime behavior.
-   - **Summary:** (fill after completion)
+5. **Update README and memory** — `status: done`
+	- **Description:** revise `README.md` and `ai_memory.md` to reflect changes
+	- **Summary:** Updated `README.md` with optional Flex retry tuning settings and documented the exponential backoff + jitter behavior with preserved IBKR retry floors. Added durable memory entries in `ai_memory.md` describing the retry strategy fix and project pattern for centralized retry settings wiring.
 
 ## Clarifying Questions
-Q1: For EOD mark outputs in Task 6, should the resolver persist intermediate mark decisions in DB now, or return deterministic outputs for immediate Task 6 tests and Task 7 consumption without new persistence tables?
-A1: Pending information from user.
+None at this stage.
 
-Q2: For tie-break rule "highest raw record primary key", should UUID ordering (`raw_record_id` descending) be treated as the canonical implementation of "highest" in this codebase?
-A2: Pending information from user.

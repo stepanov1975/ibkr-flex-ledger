@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import random
 import socket
 import time
-from typing import Final
+from dataclasses import dataclass
+from typing import Callable, Final
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -13,6 +15,69 @@ import xml.etree.ElementTree as element_tree
 from app.domain import domain_build_stage_event
 
 from .interfaces import AdapterFetchResult, FlexAdapterPort
+
+
+@dataclass(frozen=True)
+class _AdapterRetryStrategy:
+    """Immutable retry strategy config and calculation helpers.
+
+    Attributes:
+        initial_wait_seconds: Delay floor before each poll attempt.
+        retry_attempts: Number of polling attempts.
+        backoff_base_seconds: Base delay for exponential backoff.
+        max_backoff_seconds: Exponential delay cap before jitter.
+        jitter_min_multiplier: Minimum jitter multiplier.
+        jitter_max_multiplier: Maximum jitter multiplier.
+        random_unit_interval_provider: Provider returning value in [0.0, 1.0].
+    """
+
+    initial_wait_seconds: float
+    retry_attempts: int
+    backoff_base_seconds: float
+    max_backoff_seconds: float
+    jitter_min_multiplier: float
+    jitter_max_multiplier: float
+    random_unit_interval_provider: Callable[[], float]
+
+    def strategy_calculate_retry_wait_seconds(self, retry_index: int) -> float:
+        """Calculate exponential retry wait with cap and jitter.
+
+        Args:
+            retry_index: Zero-based retry attempt index.
+
+        Returns:
+            float: Computed wait seconds for the poll attempt.
+
+        Raises:
+            ValueError: Raised when retry index is negative.
+            RuntimeError: Raised when jitter provider returns out-of-range value.
+        """
+
+        if retry_index < 0:
+            raise ValueError("retry_index must be >= 0")
+
+        backoff_seconds = self.backoff_base_seconds * (2**retry_index)
+        capped_backoff_seconds = min(backoff_seconds, self.max_backoff_seconds)
+        jitter_multiplier = self.strategy_calculate_jitter_multiplier()
+        jittered_backoff_seconds = capped_backoff_seconds * jitter_multiplier
+        return max(float(self.initial_wait_seconds), float(jittered_backoff_seconds))
+
+    def strategy_calculate_jitter_multiplier(self) -> float:
+        """Return jitter multiplier using configured min/max bounds.
+
+        Returns:
+            float: Jitter multiplier value.
+
+        Raises:
+            RuntimeError: Raised when jitter source returns value outside [0.0, 1.0].
+        """
+
+        random_ratio = float(self.random_unit_interval_provider())
+        if random_ratio < 0.0 or random_ratio > 1.0:
+            raise RuntimeError("random_unit_interval_provider must return a value in [0.0, 1.0]")
+
+        jitter_span = self.jitter_max_multiplier - self.jitter_min_multiplier
+        return self.jitter_min_multiplier + (random_ratio * jitter_span)
 
 
 class FlexWebServiceAdapter(FlexAdapterPort):
@@ -52,9 +117,13 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         token: str,
         base_url: str = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService",
         api_version: str = "3",
-        initial_wait_seconds: int = 5,
+        initial_wait_seconds: float = 5.0,
         retry_attempts: int = 7,
-        retry_increment_seconds: int = 10,
+        retry_backoff_base_seconds: float = 10.0,
+        retry_max_backoff_seconds: float = 60.0,
+        jitter_min_multiplier: float = 0.5,
+        jitter_max_multiplier: float = 1.5,
+        random_unit_interval_provider: Callable[[], float] | None = None,
         request_timeout_seconds: float = 30.0,
     ):
         """Initialize Flex Web Service adapter.
@@ -65,7 +134,11 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             api_version: Flex API version value.
             initial_wait_seconds: Delay before first poll attempt.
             retry_attempts: Number of download polling attempts.
-            retry_increment_seconds: Linear backoff increment per retry.
+            retry_backoff_base_seconds: Base retry delay used by exponential backoff.
+            retry_max_backoff_seconds: Maximum retry delay cap before applying jitter.
+            jitter_min_multiplier: Minimum jitter multiplier for computed retry delay.
+            jitter_max_multiplier: Maximum jitter multiplier for computed retry delay.
+            random_unit_interval_provider: Optional provider returning random values in [0.0, 1.0].
             request_timeout_seconds: HTTP request timeout in seconds.
 
         Returns:
@@ -89,17 +162,31 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             raise ValueError("retry_attempts must be >= 1")
         if initial_wait_seconds < 0:
             raise ValueError("initial_wait_seconds must be >= 0")
-        if retry_increment_seconds < 0:
-            raise ValueError("retry_increment_seconds must be >= 0")
+        if retry_backoff_base_seconds < 0:
+            raise ValueError("retry_backoff_base_seconds must be >= 0")
+        if retry_max_backoff_seconds <= 0:
+            raise ValueError("retry_max_backoff_seconds must be > 0")
+        if jitter_min_multiplier <= 0:
+            raise ValueError("jitter_min_multiplier must be > 0")
+        if jitter_max_multiplier <= 0:
+            raise ValueError("jitter_max_multiplier must be > 0")
+        if jitter_max_multiplier < jitter_min_multiplier:
+            raise ValueError("jitter_max_multiplier must be >= jitter_min_multiplier")
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be > 0")
 
         self._token = normalized_token
         self._base_url = normalized_base_url.rstrip("/")
         self._api_version = normalized_api_version
-        self._initial_wait_seconds = initial_wait_seconds
-        self._retry_attempts = retry_attempts
-        self._retry_increment_seconds = retry_increment_seconds
+        self._retry_strategy = _AdapterRetryStrategy(
+            initial_wait_seconds=initial_wait_seconds,
+            retry_attempts=retry_attempts,
+            backoff_base_seconds=retry_backoff_base_seconds,
+            max_backoff_seconds=retry_max_backoff_seconds,
+            jitter_min_multiplier=jitter_min_multiplier,
+            jitter_max_multiplier=jitter_max_multiplier,
+            random_unit_interval_provider=random_unit_interval_provider or random.random,
+        )
         self._request_timeout_seconds = request_timeout_seconds
 
     def adapter_source_name(self) -> str:
@@ -200,9 +287,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         query_parameters = {"q": reference_code, "t": self._token, "v": self._api_version}
         pending_retry_delay_seconds = 0
 
-        for retry_index in range(self._retry_attempts):
+        for retry_index in range(self._retry_strategy.retry_attempts):
             wait_seconds = max(
-                self._initial_wait_seconds + (retry_index * self._retry_increment_seconds),
+                self._adapter_calculate_retry_wait_seconds(retry_index=retry_index),
                 pending_retry_delay_seconds,
             )
             pending_retry_delay_seconds = 0
@@ -340,10 +427,41 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         """
 
         if error_code == self._THROTTLED_ERROR_CODE:
-            return max(10, self._retry_increment_seconds)
+            return 10
         if error_code == self._SERVER_BUSY_ERROR_CODE:
-            return max(5, self._retry_increment_seconds)
-        return max(5, self._retry_increment_seconds)
+            return 5
+        return 5
+
+    def _adapter_calculate_retry_wait_seconds(self, retry_index: int) -> float:
+        """Calculate exponential retry wait with cap and jitter.
+
+        Args:
+            retry_index: Zero-based retry attempt index.
+
+        Returns:
+            float: Computed wait seconds for the poll attempt.
+
+        Raises:
+            ValueError: Raised when retry index is negative.
+            RuntimeError: Raised when jitter provider returns out-of-range value.
+        """
+
+        if retry_index < 0:
+            raise ValueError("retry_index must be >= 0")
+
+        return self._retry_strategy.strategy_calculate_retry_wait_seconds(retry_index=retry_index)
+
+    def _adapter_calculate_jitter_multiplier(self) -> float:
+        """Return jitter multiplier using configured min/max bounds.
+
+        Returns:
+            float: Jitter multiplier value.
+
+        Raises:
+            RuntimeError: Raised when jitter source returns value outside [0.0, 1.0].
+        """
+
+        return self._retry_strategy.strategy_calculate_jitter_multiplier()
 
     def _adapter_parse_xml(self, payload: bytes, context_label: str) -> element_tree.Element:
         """Parse payload as XML and raise deterministic parsing errors.
