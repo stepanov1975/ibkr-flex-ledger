@@ -14,6 +14,34 @@ _DOMAIN_FLEX_TIMESTAMP_TZ_ABBREVIATION_TO_OFFSET = {
     "EDT": "-0400",
 }
 
+_DOMAIN_FLEX_NULL_SENTINELS = frozenset({"-", "--", "N/A"})
+
+
+def domain_flex_normalize_optional_text(value: object | None) -> str | None:
+    """Normalize one optional Flex text value using shared null-sentinel policy.
+
+    Args:
+        value: Candidate value from Flex payload.
+
+    Returns:
+        str | None: Normalized text value or None when missing/sentinel.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+
+    normalized_value = value.strip()
+    if not normalized_value:
+        return None
+    if normalized_value in _DOMAIN_FLEX_NULL_SENTINELS:
+        return None
+    return normalized_value
+
 
 def domain_flex_parse_local_date(value: str) -> date | None:
     """Parse one Flex local date value into `date`.
@@ -221,6 +249,7 @@ def _domain_flex_normalize_timestamp_to_utc_iso(value: datetime) -> str:
 
 
 __all__ = [
+    "domain_flex_normalize_optional_text",
     "domain_flex_parse_local_date",
     "domain_flex_parse_timestamp_to_utc_iso",
 ]

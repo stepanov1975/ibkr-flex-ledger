@@ -2,7 +2,31 @@
 
 from datetime import date
 
-from app.domain.flex_parsing import domain_flex_parse_local_date, domain_flex_parse_timestamp_to_utc_iso
+from app.domain.flex_parsing import (
+    domain_flex_normalize_optional_text,
+    domain_flex_parse_local_date,
+    domain_flex_parse_timestamp_to_utc_iso,
+)
+
+
+def test_domain_flex_normalize_optional_text_maps_known_null_sentinels_to_none() -> None:
+    """Map known IBKR null sentinels to None for optional text values.
+
+    Returns:
+        None: Assertions validate deterministic null-sentinel normalization.
+
+    Raises:
+        AssertionError: Raised when null-sentinel values are not normalized.
+    """
+
+    assert domain_flex_normalize_optional_text(None) is None
+    assert domain_flex_normalize_optional_text(1) is None
+    assert domain_flex_normalize_optional_text("") is None
+    assert domain_flex_normalize_optional_text("  ") is None
+    assert domain_flex_normalize_optional_text("-") is None
+    assert domain_flex_normalize_optional_text("--") is None
+    assert domain_flex_normalize_optional_text("N/A") is None
+    assert domain_flex_normalize_optional_text(" value ") == "value"
 
 
 def test_domain_flex_parse_local_date_accepts_supported_variants() -> None:

@@ -550,3 +550,116 @@ def test_mapping_build_canonical_batch_fails_when_optional_cashflow_timestamp_in
             functional_currency="USD",
             raw_records=raw_records,
         )
+
+
+def test_mapping_build_canonical_batch_treats_optional_numeric_null_sentinel_as_none() -> None:
+    """Map IBKR null sentinel numeric text to None for optional fields.
+
+    Returns:
+        None: Assertions validate deterministic sentinel normalization.
+
+    Raises:
+        AssertionError: Raised when null sentinel is treated as contract violation.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2006",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2006",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "withholdingTax": "N/A",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.cashflow_requests) == 1
+    assert mapped_batch.cashflow_requests[0].withholding_tax is None
+
+
+def test_mapping_build_canonical_batch_treats_optional_timestamp_null_sentinel_as_none() -> None:
+    """Map IBKR null sentinel timestamp text to None for optional fields.
+
+    Returns:
+        None: Assertions validate deterministic sentinel normalization.
+
+    Raises:
+        AssertionError: Raised when null sentinel is treated as invalid timestamp.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2007",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2007",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "reportDate": "2026-02-14",
+                "dateTime": "--",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.cashflow_requests) == 1
+    assert mapped_batch.cashflow_requests[0].effective_at_utc is None
+
+
+def test_mapping_build_canonical_batch_treats_report_date_null_sentinel_as_missing() -> None:
+    """Fallback to row report date when payload reportDate contains null sentinel.
+
+    Returns:
+        None: Assertions validate deterministic report date fallback behavior.
+
+    Raises:
+        AssertionError: Raised when null sentinel reportDate triggers contract violation.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2008",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2008",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "reportDate": "-",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.cashflow_requests) == 1
+    assert mapped_batch.cashflow_requests[0].report_date_local == "2026-02-14"

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import date
 
-from app.domain.flex_parsing import domain_flex_parse_local_date, domain_flex_parse_timestamp_to_utc_iso
+from app.domain.flex_parsing import (
+    domain_flex_normalize_optional_text,
+    domain_flex_parse_local_date,
+    domain_flex_parse_timestamp_to_utc_iso,
+)
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
     CanonicalCorpActionUpsertRequest,
@@ -569,15 +573,7 @@ class CanonicalMappingService:
             str | None: Normalized string value or None.
         """
 
-        value = payload.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            return None
-        normalized_value = value.strip()
-        if not normalized_value:
-            return None
-        return normalized_value
+        return domain_flex_normalize_optional_text(payload.get(key))
 
     def _mapping_required_decimal_value(
         self,
