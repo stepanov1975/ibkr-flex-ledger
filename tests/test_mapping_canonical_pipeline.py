@@ -245,6 +245,82 @@ def test_mapping_build_canonical_batch_skips_non_execution_trades_rows() -> None
     assert len(mapped_batch.trade_fill_requests) == 0
 
 
+def test_mapping_build_canonical_batch_ignores_trade_token_outside_row_tag() -> None:
+    """Ignore rows whose row-tag is not `Trade` even when reference text contains `:Trade:`.
+
+    Returns:
+        None: Assertions validate row-tag based routing behavior.
+
+    Raises:
+        AssertionError: Raised when non-Trade row tags are routed as trades.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Order:id=ROW:Trade:marker",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-ORDER-1",
+                "transactionID": "200100",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1",
+                "tradePrice": "10.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+                "dateTime": "2026-02-14T10:00:00+00:00",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.trade_fill_requests) == 0
+
+
+def test_mapping_build_canonical_batch_ignores_corp_action_token_outside_row_tag() -> None:
+    """Ignore rows whose row-tag is not `CorporateAction` despite reference token text.
+
+    Returns:
+        None: Assertions validate row-tag based corp-action routing.
+
+    Raises:
+        AssertionError: Raised when non-CorporateAction row tags are routed as corp actions.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CorporateActions",
+            source_row_ref="CorporateActions:Summary:id=ROW:CorporateAction:marker",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "actionID": "CA-2001",
+                "transactionID": "4001",
+                "conid": "265598",
+                "type": "IC",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.corp_action_requests) == 0
+
+
 def test_mapping_build_canonical_batch_accepts_compact_report_date_format() -> None:
     """Accept compact reportDate format used by some IBKR payloads.
 

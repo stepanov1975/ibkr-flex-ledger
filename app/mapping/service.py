@@ -124,7 +124,7 @@ class CanonicalMappingService:
         for raw_record in raw_records:
             section_name = raw_record.section_name.strip()
             if section_name == "Trades":
-                if ":Trade:" not in raw_record.source_row_ref:
+                if not self._mapping_row_matches_tag(raw_record, expected_row_tag="Trade"):
                     continue
                 payload = raw_record.source_payload
                 # FSN[2026-02-14]: ALWAYS skip Trades rows missing ibExecID before strict trade validation.
@@ -164,7 +164,7 @@ class CanonicalMappingService:
                 continue
 
             if section_name == "CorporateActions":
-                if ":CorporateAction:" not in raw_record.source_row_ref:
+                if not self._mapping_row_matches_tag(raw_record, expected_row_tag="CorporateAction"):
                     continue
                 instrument_request, corp_action_request = self._mapping_map_corp_action_record(
                     account_id=normalized_account_id,
@@ -181,6 +181,50 @@ class CanonicalMappingService:
             fx_requests=tuple(fx_requests),
             corp_action_requests=tuple(corp_action_requests),
         )
+
+    def _mapping_row_matches_tag(self, raw_record: RawRecordForMapping, expected_row_tag: str) -> bool:
+        """Check whether `source_row_ref` encodes one expected row tag for a section.
+
+        Args:
+            raw_record: Raw row payload for routing.
+            expected_row_tag: Expected row element tag.
+
+        Returns:
+            bool: True when row tag is present and matches expected tag.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        parsed_row_tag = self._mapping_extract_row_tag(raw_record)
+        return parsed_row_tag == expected_row_tag
+
+    def _mapping_extract_row_tag(self, raw_record: RawRecordForMapping) -> str | None:
+        """Extract row tag from deterministic `source_row_ref` format.
+
+        Args:
+            raw_record: Raw row payload for routing.
+
+        Returns:
+            str | None: Parsed row tag when section/tag prefix is valid; otherwise None.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        section_name = raw_record.section_name.strip()
+        source_row_ref = raw_record.source_row_ref.strip()
+        source_row_ref_parts = source_row_ref.split(":", 2)
+        if len(source_row_ref_parts) < 2:
+            return None
+
+        parsed_section_name = source_row_ref_parts[0].strip()
+        parsed_row_tag = source_row_ref_parts[1].strip()
+        if not parsed_section_name or not parsed_row_tag:
+            return None
+        if parsed_section_name != section_name:
+            return None
+        return parsed_row_tag
 
     def _mapping_map_trade_record(
         self,
