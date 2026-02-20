@@ -1,52 +1,53 @@
 # Task Plan
-Evaluate Improvement #4 from `docs/ibkr_import_reference_improvements.md` (persistent HTTP connection pooling for Flex polling) against the current project implementation before any functional change. Current adapter (`app/adapters/flex_web_service.py`) uses `urllib.request.urlopen` per request/poll call, while reference (`references/ngv_reports_ibkr/ngv_reports_ibkr/flex_client.py`) uses a persistent session. Execute one milestone at a time with a hard decision gate: if not beneficial for this codebase, document technical rationale and stop without code changes; if beneficial, apply a minimal project-native implementation with regression coverage and lint/test validation.
+Evaluate Improvement #5 from `docs/ibkr_import_reference_improvements.md`: centralize IBKR Flex error-code semantics with a project-native enum and shared classification sets. The current adapter already includes typed exceptions and distributed code constants/sets in `app/adapters/flex_web_service.py`; the task is to verify whether further centralization is genuinely beneficial for this codebase. Execution must proceed milestone-by-milestone with a hard decision gate: if not beneficial, document technical rationale and stop without code changes; if beneficial, implement the smallest project-native change, add focused regression coverage, run required quality gates, and then update project docs/memory.
 
 ## Subtasks
-1. **Improvement #4 Deep Comparison and Reuse Audit** — `status: done`
-	- **Description:** Build a project-specific comparison between current adapter behavior and reference pooling behavior, including reuse opportunities and constraints.
-	- [ ] Re-read Improvement #4 requirements and extract concrete acceptance targets.
-	- [ ] Map current transport flow in `app/adapters/flex_web_service.py` (request path, poll loop path, timeout/error mapping, lifecycle expectations).
-	- [ ] Inspect reference patterns from repositories listed in `references/REFERENCE_NOTES.md` relevant to persistent HTTP clients and polling.
-	- [ ] Produce a concise comparison matrix (benefits, risks, complexity, dependency impact, testability impact) scoped to this project.
-	- **Summary:** Current adapter uses `urllib.request.urlopen` per call, so each poll attempt can incur new connection setup. Reference evidence confirms stronger pooling patterns: `ngv_reports_ibkr` uses persistent session (`requests.Session`), `flexquery` uses `urllib3.PoolManager`, while other references are mixed and less robust. Project-fit matrix conclusion: pooling provides measurable operational benefit for frequent poll loops, with low complexity if implemented inside adapter transport boundary only; dependency impact can remain minimal by using already-installed `httpx`.
+1. **Analyze Improvement #5 and Current Implementation** — `status: done`
+   - **Description:** Build a fact-based baseline of current behavior before any decision or code change.
+   - [x] Re-read Improvement #5 requirements in `docs/ibkr_import_reference_improvements.md` and extract concrete expected outcomes.
+   - [x] Inspect current project implementation in `app/adapters/flex_web_service.py`, `app/adapters/flex_errors.py`, and relevant tests for error-code mapping/classification usage.
+   - [x] Identify existing reuse points and duplication hotspots to satisfy DRY with minimal net-new code.
+   - [x] Produce a concise current-state summary with explicit references to where semantics are currently defined.
+   - **Summary:** Current semantics are partially centralized but still adapter-local and stringly typed: canonical fallback messages live in `_KNOWN_FLEX_ERROR_MESSAGES`, retry classification in `_RETRYABLE_POLL_ERROR_CODES`, token routing via `_TOKEN_EXPIRED_ERROR_CODE`/`_TOKEN_INVALID_ERROR_CODE`, plus separate branching in `_adapter_retry_delay_seconds_for_error()` and `_adapter_raise_request_error()` inside `app/adapters/flex_web_service.py`. Typed exceptions are already strong in `app/adapters/flex_errors.py`. Test coverage in `tests/test_adapters_flex_web_service.py` verifies selected code-based behavior (`1009`, `1018`, `1012`) and non-retryable branching, but there is no single exported canonical code model reused across adapter decision points.
 
-2. **Decision Gate: NO-GO vs GO** — `status: done`
-	- **Description:** Decide whether Improvement #4 is beneficial for this project, based on architecture, operational profile, and maintainability.
-	- [ ] Evaluate technical fit with current adapter abstraction and orchestrator contracts.
-	- [ ] Evaluate trade-offs (connection reuse gains vs added state/lifecycle complexity and failure modes).
-	- [ ] Record explicit decision criteria and final decision.
-	- [ ] If NO-GO: document rationale, constraints, and stop execution.
-	- [ ] If GO: define minimal change boundary and proceed to next subtask.
-	- **Summary:** Decision = GO. Improvement is beneficial because connection reuse targets a real hot path (polling), keeps higher-layer contracts unchanged, and improves efficiency/robustness under retry scenarios. Best project-native option is `httpx.Client` (already in requirements), avoiding new dependency introduction while giving explicit pooling, timeout controls, and maintainable exception mapping.
+2. **Reference Audit Across Approved Repositories** — `status: done`
+   - **Description:** Validate reference patterns from repositories listed in `references/REFERENCE_NOTES.md` for similar error-code centralization design.
+   - [x] Inspect `references/ngv_reports_ibkr` implementation details for enum-based code semantics and classification sets.
+   - [x] Check other relevant approved references for comparable patterns and trade-offs (for example maintainability/testability impacts).
+   - [x] Record what is reusable as architecture ideas (not runtime imports/copy).
+   - [x] Produce a comparison summary: reference strength vs project fit.
+   - **Summary:** `references/ngv_reports_ibkr/ngv_reports_ibkr/flex_client.py` provides the strongest relevant pattern: `FlexErrorCode` enum plus centralized `RETRYABLE_ERROR_CODES` and `TOKEN_ERROR_CODES`, reused in one `_raise_for_error()` decision point for consistent routing. `references/flexquery/flexquery/flexquery.py` confirms pooled transport but does not provide comparable enum-based classification centralization. Reusable architecture idea for this project is to keep one canonical code model and reusable membership checks while retaining project-native typed exceptions and avoiding any runtime dependency on reference code.
 
-3. **Implement Project-Native Connection Pooling (Conditional on GO)** — `status: done`
-	- **Description:** Introduce persistent HTTP transport pooling in the adapter with the smallest safe diff and no unrelated refactoring.
-	- [ ] Reuse existing adapter structure and typed error mapping; avoid changing higher-layer interfaces.
-	- [ ] Replace per-call transport with a persistent client approach that supports connection reuse.
-	- [ ] Preserve existing timeout semantics, retry behavior, diagnostics timeline behavior, and typed exceptions.
-	- [ ] Ensure resource lifecycle is explicit and safe for long-running processes.
-	- [ ] Keep dependency choices aligned with project standards and current requirements.
-	- **Summary:** Implemented pooled transport in `app/adapters/flex_web_service.py` by replacing per-call `urllib` usage with adapter-owned persistent `httpx.Client`. Kept all existing adapter interfaces and orchestrator-facing behavior unchanged (same request/poll flow, retry logic, stage timeline events, and typed exception mapping). Added explicit lifecycle helpers (`adapter_close`, context-manager enter/exit) to make transport resource handling explicit without touching higher layers.
+3. **Decision Gate: Beneficial vs Not Beneficial** — `status: done`
+   - **Description:** Decide whether Improvement #5 should be adopted in this project.
+   - [x] Compare current vs reference by correctness, robustness, clarity, and maintenance cost in this architecture.
+   - [x] Evaluate risks (over-engineering, churn, behavior drift, unnecessary abstraction) and constraints (single-site deployment, no backward-compat layer).
+   - [x] If NOT beneficial: document technical reasons and stop execution with no code changes.
+   - [x] If beneficial: define the minimal safe change boundary and acceptance criteria for implementation.
+   - **Summary:** Decision = GO. Improvement #5 is beneficial because current behavior is correct but semantics are split across multiple adapter-local constants and conditional branches, increasing change risk when new codes are added. A minimal project-native centralization (single adapter module with enum + classification/message maps and helper predicates) improves clarity and reuse with low churn. Acceptance boundary: preserve all existing runtime behavior (same typed exceptions, retry/token routing outcomes, diagnostics structure, and error messages), with focused code movement only.
 
-4. **Regression Tests and Quality Gates (Conditional on GO)** — `status: done`
-	- **Description:** Add/adjust targeted tests to validate pooling behavior and run required quality checks.
-	- [ ] Add or update tests in `tests/test_adapters_flex_web_service.py` to reproduce and validate the targeted behavior change.
-	- [ ] Run focused pytest for adapter tests and confirm pass.
-	- [ ] Run `ruff` and `pylint` for touched project files and resolve new issues.
-	- [ ] Confirm no unrelated test/lint scope is modified.
-	- **Summary:** Updated `tests/test_adapters_flex_web_service.py` for the new `httpx` transport error surface and added regression coverage to verify one persistent client instance is reused across request+poll calls. Validation completed: `pytest tests/test_adapters_flex_web_service.py` passed (9/9), `ruff check` passed on touched files, and `pylint` passed (10.00/10) on touched files.
+4. **Implement Minimal Project-Native Centralization (Conditional on GO)** — `status: done`
+   - **Description:** Implement only if Subtask 3 concludes GO.
+   - [x] Introduce/extend a single canonical error-code model (enum + classification sets) in the smallest appropriate adapter-layer location.
+   - [x] Reuse existing typed exceptions and route request/poll classification through the canonical model.
+   - [x] Preserve all current external behavior contracts (exception types, diagnostics semantics, retry policy, orchestrator compatibility).
+   - [x] Keep diffs focused to Improvement #5 only; avoid unrelated refactoring.
+   - **Summary:** Added `app/adapters/flex_error_codes.py` as the single canonical source for known Flex error semantics: `FlexErrorCode` enum, default message map, and classification sets (`FLEX_RETRYABLE_POLL_CODES`, `FLEX_TOKEN_CODES`, `FLEX_FATAL_CODES`) with shared helper functions. Updated `app/adapters/flex_web_service.py` to consume this module for fallback message resolution, retryable classification checks, retry-delay overrides, and token error routing (`1012`/`1015`) while preserving existing typed exceptions and adapter public behavior.
 
-5. **Update README and memory (GO path only)** — `status: done`
-	- **Description:** revise `README.md` and `ai_memory.md` only when implementation changes are applied.
-	- [ ] Execute this subtask only if Subtask 2 decision is GO.
-	- [ ] Update `README.md` only if behavior/configuration/operational guidance changed.
-	- [ ] Add durable decision/pattern/fix entry to `ai_memory.md` using required `- [YYYY-MM-DD] {TAG} :: ...` format.
-	- [ ] Ensure documentation reflects final reality only (no transitional notes).
-	- **Summary:** `README.md` required no change because user-facing configuration and operational behavior remain the same. Added durable architecture decision entry to `ai_memory.md` documenting Improvement #4 GO adoption and the project-native pooled `httpx.Client` transport pattern.
+5. **Regression Tests and Quality Gates (Conditional on GO)** — `status: done`
+   - **Description:** Validate behavior for the specific improvement with focused automated checks.
+   - [x] Add/adjust targeted tests in existing adapter test modules to cover new centralized classification behavior.
+   - [x] Run focused pytest scope for touched behavior and confirm pass/fail expectations.
+   - [x] Run `ruff` and `pylint` per project protocol on touched files and resolve new issues.
+   - [x] Confirm no unrelated functional behavior changed.
+   - **Summary:** Added `tests/test_adapters_flex_error_codes.py` for centralized semantics coverage (set disjointness, fatal-set composition, message fallback, retry-delay routing). Validation executed successfully: `pytest tests/test_adapters_flex_web_service.py tests/test_adapters_flex_error_codes.py` (13 passed), `ruff check` (all checks passed), and `pylint` on touched files (10.00/10). No behavior outside adapter error-classification semantics was changed.
+
+6. **Update README and memory** — `status: done`
+   - **Description:** revise `README.md` and `ai_memory.md` to reflect finalized outcomes.
+   - [x] Update `README.md` if operational/developer-facing behavior changed.
+   - [x] Add durable entry to `ai_memory.md` using required format `- [YYYY-MM-DD] {TAG} :: ...`.
+   - [x] Ensure docs reflect final current reality only.
+   - **Summary:** `README.md` required no update because runtime interfaces and user-facing operations did not change. Added durable decision entry to `ai_memory.md` documenting Improvement #5 GO adoption and the new centralized adapter error-code semantics module/pattern.
 
 ## Clarifying Questions
-Q1: If the decision is NO-GO, do you want me to still complete Subtask 5 with memory-only documentation of the decision?
-A1: No. If decision is NO-GO, stop after documenting rationale in Subtask 2 and do not execute Subtask 5.
-
-Q2: If the decision is GO, do you prefer using the already-installed `httpx` client for pooling, or adding `requests` to mirror the reference style?
-A2: Choose the best option for this codebase during implementation design (bias to minimal dependency and maintainability).
+None at this stage.

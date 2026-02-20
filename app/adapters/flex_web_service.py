@@ -13,6 +13,12 @@ import httpx
 
 from app.domain import domain_build_stage_event
 
+from .flex_error_codes import (
+    FLEX_RETRYABLE_POLL_CODES,
+    FlexErrorCode,
+    flex_error_default_message,
+    flex_error_retry_delay_seconds,
+)
 from .flex_errors import (
     FlexAdapterConnectionError,
     FlexAdapterTimeoutError,
@@ -92,35 +98,6 @@ class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
     _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/httpx)"
-    _KNOWN_FLEX_ERROR_MESSAGES: Final[dict[str, str]] = {
-        "1003": "Statement is not available.",
-        "1004": "Statement is incomplete at this time. Please try again shortly.",
-        "1005": "Settlement data is not ready at this time. Please try again shortly.",
-        "1006": "FIFO P/L data is not ready at this time. Please try again shortly.",
-        "1007": "MTM P/L data is not ready at this time. Please try again shortly.",
-        "1008": "MTM and FIFO P/L data is not ready at this time. Please try again shortly.",
-        "1009": "The server is under heavy load. Statement could not be generated at this time. Please try again shortly.",
-        "1010": "Legacy Flex Queries are no longer supported. Please convert over to Activity Flex.",
-        "1011": "Service account is inactive.",
-        "1012": "Token has expired.",
-        "1013": "IP restriction.",
-        "1014": "Query is invalid.",
-        "1015": "Token is invalid.",
-        "1016": "Account in invalid.",
-        "1017": "Reference code is invalid.",
-        "1018": "Too many requests have been made from this token. Please try again shortly.",
-        "1019": "Statement generation in progress. Please try again shortly.",
-        "1020": "Invalid request or unable to validate request.",
-        "1021": "Statement could not be retrieved at this time. Please try again shortly.",
-    }
-    _SERVER_BUSY_ERROR_CODE: Final[str] = "1009"
-    _NOT_READY_ERROR_CODE: Final[str] = "1019"
-    _THROTTLED_ERROR_CODE: Final[str] = "1018"
-    _TOKEN_EXPIRED_ERROR_CODE: Final[str] = "1012"
-    _TOKEN_INVALID_ERROR_CODE: Final[str] = "1015"
-    _RETRYABLE_POLL_ERROR_CODES: Final[frozenset[str]] = frozenset(
-        {_SERVER_BUSY_ERROR_CODE, _NOT_READY_ERROR_CODE, _THROTTLED_ERROR_CODE}
-    )
 
     def __init__(
         self,
@@ -375,7 +352,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 return poll_payload
 
             error_code, error_message = self._adapter_extract_response_error(poll_root)
-            if error_code in self._RETRYABLE_POLL_ERROR_CODES:
+            if error_code in FLEX_RETRYABLE_POLL_CODES:
                 pending_retry_delay_seconds = self._adapter_retry_delay_seconds_for_error(error_code)
                 retryable_error = FlexRetryableStatementError(
                     message=(
@@ -473,7 +450,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         error_code = (response_root.findtext("ErrorCode") or "UNKNOWN").strip()
         error_message = (response_root.findtext("ErrorMessage") or "").strip()
         if not error_message:
-            error_message = self._KNOWN_FLEX_ERROR_MESSAGES.get(error_code, fallback_message)
+            error_message = flex_error_default_message(error_code=error_code, fallback_message=fallback_message)
         return error_code, error_message
 
     def _adapter_retry_delay_seconds_for_error(self, error_code: str) -> int:
@@ -489,11 +466,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             RuntimeError: This helper does not raise runtime errors.
         """
 
-        if error_code == self._THROTTLED_ERROR_CODE:
-            return 10
-        if error_code == self._SERVER_BUSY_ERROR_CODE:
-            return 5
-        return 5
+        return flex_error_retry_delay_seconds(error_code=error_code)
 
     def _adapter_calculate_retry_wait_seconds(self, retry_index: int) -> float:
         """Calculate exponential retry wait with cap and jitter.
@@ -581,9 +554,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         """
 
         message = f"Flex request rejected: code={error_code}, message={error_message}"
-        if error_code == self._TOKEN_EXPIRED_ERROR_CODE:
+        if error_code == FlexErrorCode.TOKEN_EXPIRED.value:
             raise FlexTokenExpiredError(message, error_code=error_code)
-        if error_code == self._TOKEN_INVALID_ERROR_CODE:
+        if error_code == FlexErrorCode.INVALID_TOKEN.value:
             raise FlexTokenInvalidError(message, error_code=error_code)
         raise FlexRequestError(message, error_code=error_code)
 
