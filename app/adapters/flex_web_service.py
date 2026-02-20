@@ -7,10 +7,9 @@ import socket
 import time
 from dataclasses import dataclass
 from typing import Callable, Final
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 import xml.etree.ElementTree as element_tree
+
+import httpx
 
 from app.domain import domain_build_stage_event
 
@@ -92,7 +91,7 @@ class _AdapterRetryStrategy:
 class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
-    _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/urllib.request)"
+    _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/httpx)"
     _KNOWN_FLEX_ERROR_MESSAGES: Final[dict[str, str]] = {
         "1003": "Statement is not available.",
         "1004": "Statement is incomplete at this time. Please try again shortly.",
@@ -199,6 +198,52 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             random_unit_interval_provider=random_unit_interval_provider or random.random,
         )
         self._request_timeout_seconds = request_timeout_seconds
+        self._http_client = httpx.Client(
+            headers={"User-Agent": self._USER_AGENT},
+            timeout=self._request_timeout_seconds,
+        )
+
+    def adapter_close(self) -> None:
+        """Close pooled HTTP transport resources.
+
+        Returns:
+            None: Closes adapter HTTP resources in-place.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        self._http_client.close()
+
+    def __enter__(self) -> "FlexWebServiceAdapter":
+        """Enter context manager and return adapter instance.
+
+        Returns:
+            FlexWebServiceAdapter: Active adapter instance.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        """Exit context manager and close pooled HTTP resources.
+
+        Args:
+            exc_type: Exception type propagated by context manager.
+            exc: Exception instance propagated by context manager.
+            traceback: Exception traceback propagated by context manager.
+
+        Returns:
+            None: Closes adapter resources as side effect.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        _ = (exc_type, exc, traceback)
+        self.adapter_close()
 
     def adapter_source_name(self) -> str:
         """Return stable adapter source label.
@@ -376,23 +421,18 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             FlexAdapterTimeoutError: Raised for timeout conditions.
         """
 
-        full_url = f"{url}?{urlencode(query_parameters)}"
         try:
-            request = Request(full_url, method="GET", headers={"User-Agent": self._USER_AGENT})
-            with urlopen(request, timeout=self._request_timeout_seconds) as response:
-                status_code = int(response.getcode() or 200)
-                payload = response.read()
-        except TimeoutError as error:
+            response = self._http_client.get(url, params=query_parameters)
+            response.raise_for_status()
+            payload = response.content
+        except httpx.TimeoutException as error:
             raise FlexAdapterTimeoutError("Flex transport request timed out") from error
-        except HTTPError as error:
-            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.code}") from error
-        except URLError as error:
-            if isinstance(error.reason, (TimeoutError, socket.timeout)):
+        except httpx.HTTPStatusError as error:
+            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from error
+        except httpx.RequestError as error:
+            if isinstance(error.__cause__, (TimeoutError, socket.timeout)):
                 raise FlexAdapterTimeoutError("Flex transport request timed out") from error
             raise FlexAdapterConnectionError("Flex transport request failed") from error
-
-        if status_code >= 400:
-            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {status_code}")
 
         return bytes(payload)
 

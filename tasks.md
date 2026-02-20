@@ -1,47 +1,52 @@
 # Task Plan
-Evaluate Improvement #2 from [docs/ibkr_import_reference_improvements.md](docs/ibkr_import_reference_improvements.md) (typed Flex exception hierarchy) against the current adapter-orchestrator error flow, then implement only if it is a net maintainability and robustness gain for this codebase. The work must stay strictly within adapter/orchestrator error semantics and tests, avoid unrelated refactors, reuse existing patterns, and follow project testing/linting gates. If the analysis concludes the change is not beneficial, no code changes are applied and execution stops with a documented technical rationale.
+Evaluate Improvement #4 from `docs/ibkr_import_reference_improvements.md` (persistent HTTP connection pooling for Flex polling) against the current project implementation before any functional change. Current adapter (`app/adapters/flex_web_service.py`) uses `urllib.request.urlopen` per request/poll call, while reference (`references/ngv_reports_ibkr/ngv_reports_ibkr/flex_client.py`) uses a persistent session. Execute one milestone at a time with a hard decision gate: if not beneficial for this codebase, document technical rationale and stop without code changes; if beneficial, apply a minimal project-native implementation with regression coverage and lint/test validation.
 
 ## Subtasks
-1. **Decision gate: evaluate Improvement #2 fit** — `status: done`
-	 - **Description:** Perform a focused comparison between reference and project-native implementation, then decide go/no-go based on architecture fit and operational impact.
-		 - [ ] Review Improvement #2 details and reference behavior in `references/ngv_reports_ibkr`.
-		 - [ ] Trace current exception flow in adapter and job orchestrators, including error-code mapping and diagnostics behavior.
-		 - [ ] Produce a written decision with explicit trade-offs, risks, and impact scope.
-	 - **Acceptance Criteria:** A clear documented decision exists: either (a) stop with technical rationale and no code changes, or (b) proceed with a scoped implementation design.
-	 - **Summary:** GO decision. Improvement #2 is a net benefit because current adapter errors are raised as built-ins (`ValueError`/`RuntimeError`/`ConnectionError`/`TimeoutError`), which forces orchestrators to classify broad categories and loses phase-specific intent (request vs statement vs token lifecycle). A project-native typed exception hierarchy improves robustness and maintainability by centralizing semantics at adapter boundary, preserving cause chaining, enabling more deterministic run error codes/triage, and keeping behavior backward-compatible at successful-path and retry-policy levels.
+1. **Improvement #4 Deep Comparison and Reuse Audit** — `status: done`
+	- **Description:** Build a project-specific comparison between current adapter behavior and reference pooling behavior, including reuse opportunities and constraints.
+	- [ ] Re-read Improvement #4 requirements and extract concrete acceptance targets.
+	- [ ] Map current transport flow in `app/adapters/flex_web_service.py` (request path, poll loop path, timeout/error mapping, lifecycle expectations).
+	- [ ] Inspect reference patterns from repositories listed in `references/REFERENCE_NOTES.md` relevant to persistent HTTP clients and polling.
+	- [ ] Produce a concise comparison matrix (benefits, risks, complexity, dependency impact, testability impact) scoped to this project.
+	- **Summary:** Current adapter uses `urllib.request.urlopen` per call, so each poll attempt can incur new connection setup. Reference evidence confirms stronger pooling patterns: `ngv_reports_ibkr` uses persistent session (`requests.Session`), `flexquery` uses `urllib3.PoolManager`, while other references are mixed and less robust. Project-fit matrix conclusion: pooling provides measurable operational benefit for frequent poll loops, with low complexity if implemented inside adapter transport boundary only; dependency impact can remain minimal by using already-installed `httpx`.
 
-2. **Implement typed adapter exception hierarchy** — `status: done`
-	 - **Description:** If Subtask 1 is go, add project-native typed exceptions and integrate them in Flex adapter request/poll/transport paths with cause chaining.
-		 - [ ] Reuse existing adapter structure and add a dedicated exception module in `app/adapters/`.
-		 - [ ] Replace generic built-in raises in adapter with phase-aware typed exceptions while preserving current messages/error codes.
-		 - [ ] Keep retry semantics and stage timeline behavior unchanged except for improved exception typing.
-	 - **Acceptance Criteria:** Adapter raises typed exceptions for request, statement, retryable, and token lifecycle failures without changing successful fetch behavior.
-	 - **Summary:** Added project-native typed Flex adapter exceptions in `app/adapters/flex_errors.py` and exported them from adapter package API. Updated `app/adapters/flex_web_service.py` to raise typed request/statement/transport/token exceptions with preserved upstream messages and error codes, plus cause chaining for transport/XML failures. Retry behavior and successful fetch flow remain unchanged.
+2. **Decision Gate: NO-GO vs GO** — `status: done`
+	- **Description:** Decide whether Improvement #4 is beneficial for this project, based on architecture, operational profile, and maintainability.
+	- [ ] Evaluate technical fit with current adapter abstraction and orchestrator contracts.
+	- [ ] Evaluate trade-offs (connection reuse gains vs added state/lifecycle complexity and failure modes).
+	- [ ] Record explicit decision criteria and final decision.
+	- [ ] If NO-GO: document rationale, constraints, and stop execution.
+	- [ ] If GO: define minimal change boundary and proceed to next subtask.
+	- **Summary:** Decision = GO. Improvement is beneficial because connection reuse targets a real hot path (polling), keeps higher-layer contracts unchanged, and improves efficiency/robustness under retry scenarios. Best project-native option is `httpx.Client` (already in requirements), avoiding new dependency introduction while giving explicit pooling, timeout controls, and maintainable exception mapping.
 
-3. **Align orchestrator error policy and diagnostics** — `status: done`
-	 - **Description:** If Subtask 2 is done, update orchestrator exception-to-error-code mapping and failure diagnostics to use typed exception semantics.
-		 - [ ] Extend ingestion/reprocess exception handling branches to classify adapter-typed failures deterministically.
-		 - [ ] Preserve existing run finalization contract and timeline shape.
-		 - [ ] Ensure token/request/statement failures map to stable error codes that improve operational triage.
-	 - **Acceptance Criteria:** Failed runs retain deterministic finalization and now classify typed adapter failures in a more precise, policy-aligned way.
-	 - **Summary:** Updated orchestrator error classification to consume typed adapter failures. `IngestionJobOrchestrator` now maps token/request/statement adapter errors to dedicated deterministic codes (`INGESTION_TOKEN_EXPIRED_ERROR`, `INGESTION_TOKEN_INVALID_ERROR`, `INGESTION_REQUEST_ERROR`, `INGESTION_STATEMENT_ERROR`) while preserving existing timeout/connection/contract fallbacks. `CanonicalReprocessOrchestrator` mapping was aligned similarly for deterministic future-proof classification without changing run-finalization/timeline contracts.
+3. **Implement Project-Native Connection Pooling (Conditional on GO)** — `status: done`
+	- **Description:** Introduce persistent HTTP transport pooling in the adapter with the smallest safe diff and no unrelated refactoring.
+	- [ ] Reuse existing adapter structure and typed error mapping; avoid changing higher-layer interfaces.
+	- [ ] Replace per-call transport with a persistent client approach that supports connection reuse.
+	- [ ] Preserve existing timeout semantics, retry behavior, diagnostics timeline behavior, and typed exceptions.
+	- [ ] Ensure resource lifecycle is explicit and safe for long-running processes.
+	- [ ] Keep dependency choices aligned with project standards and current requirements.
+	- **Summary:** Implemented pooled transport in `app/adapters/flex_web_service.py` by replacing per-call `urllib` usage with adapter-owned persistent `httpx.Client`. Kept all existing adapter interfaces and orchestrator-facing behavior unchanged (same request/poll flow, retry logic, stage timeline events, and typed exception mapping). Added explicit lifecycle helpers (`adapter_close`, context-manager enter/exit) to make transport resource handling explicit without touching higher layers.
 
-4. **Regression tests and quality gates** — `status: done`
-	 - **Description:** Add or update tests to prove new behavior and run required test/lint checks for changed Python modules.
-		 - [ ] Add targeted tests that reproduce and validate typed exception behavior in adapter and orchestrator flows.
-		 - [ ] Run targeted pytest modules relevant to changed files.
-		 - [ ] Run `pylint` and `ruff` per project protocol; fix all new issues introduced by this work.
-	 - **Acceptance Criteria:** Relevant tests pass, and linting passes with zero new errors for the changed scope.
-	 - **Summary:** Added targeted regression tests for typed exception behavior in adapter and orchestrator flows. Verified with `pytest` on `test_adapters_flex_web_service.py`, `test_jobs_ingestion_orchestrator.py`, and `test_jobs_reprocess.py` (all pass). Ran `ruff` on changed files (pass). Ran `pylint` on changed scope; only pre-existing cross-file duplicate-code signal (`R0801`) remained, and non-duplicate checks pass cleanly.
+4. **Regression Tests and Quality Gates (Conditional on GO)** — `status: done`
+	- **Description:** Add/adjust targeted tests to validate pooling behavior and run required quality checks.
+	- [ ] Add or update tests in `tests/test_adapters_flex_web_service.py` to reproduce and validate the targeted behavior change.
+	- [ ] Run focused pytest for adapter tests and confirm pass.
+	- [ ] Run `ruff` and `pylint` for touched project files and resolve new issues.
+	- [ ] Confirm no unrelated test/lint scope is modified.
+	- **Summary:** Updated `tests/test_adapters_flex_web_service.py` for the new `httpx` transport error surface and added regression coverage to verify one persistent client instance is reused across request+poll calls. Validation completed: `pytest tests/test_adapters_flex_web_service.py` passed (9/9), `ruff check` passed on touched files, and `pylint` passed (10.00/10) on touched files.
 
-5. **Update README and memory** — `status: done`
-	 - **Description:** revise `README.md` and `ai_memory.md` to reflect changes
-		 - [ ] Update `README.md` only if operator-visible behavior/contracts changed.
-		 - [ ] Add durable decision/pattern/fix entries to `ai_memory.md` using required format and date.
-		 - [ ] Remove or avoid stale notes so memory reflects current code reality.
-	 - **Acceptance Criteria:** Documentation and memory are consistent with final implementation decision and code behavior.
-	 - **Summary:** Updated `README.md` ingestion baseline to reflect typed Flex adapter failure classification with deterministic error-code routing. Updated `ai_memory.md` with durable decision/pattern entries documenting project-native typed adapter exceptions and orchestrator mapping policy.
+5. **Update README and memory (GO path only)** — `status: done`
+	- **Description:** revise `README.md` and `ai_memory.md` only when implementation changes are applied.
+	- [ ] Execute this subtask only if Subtask 2 decision is GO.
+	- [ ] Update `README.md` only if behavior/configuration/operational guidance changed.
+	- [ ] Add durable decision/pattern/fix entry to `ai_memory.md` using required `- [YYYY-MM-DD] {TAG} :: ...` format.
+	- [ ] Ensure documentation reflects final reality only (no transitional notes).
+	- **Summary:** `README.md` required no change because user-facing configuration and operational behavior remain the same. Added durable architecture decision entry to `ai_memory.md` documenting Improvement #4 GO adoption and the project-native pooled `httpx.Client` transport pattern.
 
 ## Clarifying Questions
-Q1: No blocking clarifications identified at planning stage. May implementation proceed with project-native exception names (not necessarily reference-identical names) if Subtask 1 is go?
-A1: Approved. Implementation may proceed with project-native exception names.
+Q1: If the decision is NO-GO, do you want me to still complete Subtask 5 with memory-only documentation of the decision?
+A1: No. If decision is NO-GO, stop after documenting rationale in Subtask 2 and do not execute Subtask 5.
+
+Q2: If the decision is GO, do you prefer using the already-installed `httpx` client for pooling, or adding `requests` to mirror the reference style?
+A2: Choose the best option for this codebase during implementation design (bias to minimal dependency and maintainability).

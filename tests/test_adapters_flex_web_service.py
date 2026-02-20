@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from urllib.error import URLError
+from unittest.mock import Mock
+
+import httpx
 
 import pytest
 
@@ -31,11 +33,11 @@ def test_adapters_flex_http_timeout_reason_raises_timeout_error(monkeypatch: pyt
 
     adapter = FlexWebServiceAdapter(token="token")
 
-    def _raise_timeout(_request, timeout=None):
-        _ = timeout
-        raise URLError(TimeoutError("timed out"))
+    def _raise_timeout(_self: object, url: str, params: dict[str, str]) -> bytes:
+        _ = (url, params)
+        raise httpx.TimeoutException("timed out")
 
-    monkeypatch.setattr(flex_module, "urlopen", _raise_timeout)
+    monkeypatch.setattr(flex_module.httpx.Client, "get", _raise_timeout)
 
     with pytest.raises(FlexAdapterTimeoutError, match="timed out"):
         adapter.adapter_fetch_report(query_id="query-id")
@@ -295,3 +297,47 @@ def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
     )
 
     assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)
+
+
+def test_adapters_flex_transport_client_reused_across_request_and_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reuse one pooled HTTP client instance for request and polling calls.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions verify pooled client reuse behavior.
+
+    Raises:
+        AssertionError: Raised when adapter creates or uses more than one client instance.
+    """
+
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    success_payload = b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement /></FlexStatements></FlexQueryResponse>"
+    request_response = Mock()
+    request_response.raise_for_status.return_value = None
+    request_response.content = request_success_payload
+    poll_response = Mock()
+    poll_response.raise_for_status.return_value = None
+    poll_response.content = success_payload
+    fake_client = Mock()
+    fake_client.get.side_effect = [request_response, poll_response]
+    client_creation_count = 0
+
+    def _fake_client_factory(*args: object, **kwargs: object) -> Mock:
+        _ = (args, kwargs)
+        nonlocal client_creation_count
+        client_creation_count += 1
+        return fake_client
+
+    monkeypatch.setattr(flex_module.httpx, "Client", _fake_client_factory)
+
+    adapter = FlexWebServiceAdapter(token="token", initial_wait_seconds=0, retry_attempts=1)
+    result = adapter.adapter_fetch_report(query_id="query-id")
+
+    assert result.payload_bytes == success_payload
+    assert client_creation_count == 1
+    assert fake_client.get.call_count == 2
