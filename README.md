@@ -330,6 +330,39 @@ Task 5 implementation modules:
 - `app/jobs/canonical_pipeline.py`
 - `app/jobs/reprocess_orchestrator.py`
 
+## Stocks-first FIFO ledger and daily snapshots (Task 7)
+
+Task 7 adds the first project-native stocks FIFO ledger computation flow and persists daily snapshot outputs.
+
+Included behavior:
+
+- Deterministic FIFO lot matching for stock trades with stable tie-break ordering (`trade_timestamp_utc` then source row id)
+- Realized and unrealized PnL computation with fee/withholding impacts applied in Task 7 snapshot aggregation
+- Automatic snapshot stage execution after successful ingestion runs (`snapshot` timeline stage persisted in run diagnostics)
+- Day-level snapshot persistence into `pnl_snapshot_daily` and open-lot persistence into `position_lot` via db-layer-only interfaces
+- UTC timestamp handling with Asia/Jerusalem business-date boundary conversion for snapshot report dates
+
+API endpoint additions:
+
+- `GET /snapshots/daily`
+
+Snapshot list query parameters:
+
+- Pagination: `limit`, `offset`
+- Sort: `sort_by` in (`report_date_local`, `instrument_id`, `total_pnl`, `created_at_utc`), `sort_dir` in (`asc`, `desc`)
+- Date filters: `report_date_from`, `report_date_to` (inclusive, `YYYY-MM-DD`)
+
+Task 7 implementation modules:
+
+- `app/ledger/fifo_engine.py`
+- `app/ledger/snapshot_dates.py`
+- `app/ledger/snapshot_service.py`
+- `app/db/ledger_snapshot.py`
+- `app/api/routers/snapshot.py`
+- `app/jobs/ingestion_orchestrator.py`
+- `tests/test_ledger_fifo_snapshot.py`
+- `tests/test_api_snapshot.py`
+
 ## VS Code virtual environment setup
 
 This workspace is configured to automatically use the project virtual environment.

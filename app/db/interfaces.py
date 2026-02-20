@@ -678,3 +678,274 @@ class CanonicalPersistenceRepositoryPort(Protocol):
             ValueError: Raised when request values are invalid.
             RuntimeError: Raised when persistence operation fails.
         """
+
+
+@dataclass(frozen=True)
+class LedgerTradeFillRecord:
+    """Typed trade-fill row used by FIFO ledger computations.
+
+    Attributes:
+        event_trade_fill_id: Canonical trade-fill identifier.
+        account_id: Internal account context identifier.
+        instrument_id: Canonical instrument identifier.
+        source_raw_record_id: Source raw row identifier.
+        trade_timestamp_utc: Trade timestamp in UTC.
+        report_date_local: Local business date associated with trade.
+        side: Trade side (`BUY` or `SELL`).
+        quantity: Trade quantity.
+        price: Trade price.
+        fees: Optional fees amount.
+        commission: Optional commission amount.
+        functional_currency: Functional/base currency code.
+    """
+
+    event_trade_fill_id: UUID
+    account_id: str
+    instrument_id: UUID
+    source_raw_record_id: UUID
+    trade_timestamp_utc: datetime
+    report_date_local: date
+    side: str
+    quantity: str
+    price: str
+    fees: str | None
+    commission: str | None
+    functional_currency: str
+
+
+@dataclass(frozen=True)
+class LedgerCashflowRecord:
+    """Typed cashflow row used to incorporate fees and withholding impacts.
+
+    Attributes:
+        event_cashflow_id: Canonical cashflow identifier.
+        account_id: Internal account context identifier.
+        instrument_id: Optional canonical instrument identifier.
+        report_date_local: Local business date associated with cashflow.
+        withholding_tax: Optional withholding tax amount.
+        fees: Optional fees amount.
+        functional_currency: Functional/base currency code.
+    """
+
+    event_cashflow_id: UUID
+    account_id: str
+    instrument_id: UUID | None
+    report_date_local: date
+    withholding_tax: str | None
+    fees: str | None
+    functional_currency: str
+
+
+@dataclass(frozen=True)
+class PositionLotUpsertRequest:
+    """Input contract for deterministic position-lot persistence.
+
+    Attributes:
+        position_lot_id: Deterministic lot identifier.
+        account_id: Internal account context identifier.
+        instrument_id: Canonical instrument identifier.
+        open_event_trade_fill_id: Opening trade-fill identifier.
+        opened_at_utc: Lot-open timestamp in UTC.
+        closed_at_utc: Optional lot-close timestamp in UTC.
+        open_quantity: Original lot open quantity.
+        remaining_quantity: Remaining lot quantity.
+        open_price: Lot open price.
+        cost_basis_open: Lot open cost basis.
+        realized_pnl_to_date: Realized PnL associated with this lot.
+        status: Lot status (`open` or `closed`).
+    """
+
+    position_lot_id: str
+    account_id: str
+    instrument_id: str
+    open_event_trade_fill_id: str
+    opened_at_utc: datetime
+    closed_at_utc: datetime | None
+    open_quantity: str
+    remaining_quantity: str
+    open_price: str
+    cost_basis_open: str
+    realized_pnl_to_date: str
+    status: str
+
+
+@dataclass(frozen=True)
+class PnlSnapshotDailyUpsertRequest:
+    """Input contract for deterministic daily PnL snapshot persistence.
+
+    Attributes:
+        account_id: Internal account context identifier.
+        report_date_local: Local report date in YYYY-MM-DD format.
+        instrument_id: Canonical instrument identifier.
+        position_qty: Open quantity.
+        cost_basis: Optional cost basis value.
+        realized_pnl: Realized PnL value.
+        unrealized_pnl: Unrealized PnL value.
+        total_pnl: Total PnL value.
+        fees: Total fees impact.
+        withholding_tax: Total withholding-tax impact.
+        currency: Functional/base currency code.
+        provisional: Whether snapshot values are provisional.
+        valuation_source: Optional valuation source label.
+        fx_source: Optional FX source label.
+        ingestion_run_id: Optional ingestion run identifier.
+    """
+
+    account_id: str
+    report_date_local: str
+    instrument_id: str
+    position_qty: str
+    cost_basis: str | None
+    realized_pnl: str
+    unrealized_pnl: str
+    total_pnl: str
+    fees: str
+    withholding_tax: str
+    currency: str
+    provisional: bool
+    valuation_source: str | None
+    fx_source: str | None
+    ingestion_run_id: str | None
+
+
+@dataclass(frozen=True)
+class PnlSnapshotDailyRecord:
+    """Typed daily PnL snapshot read model.
+
+    Attributes:
+        pnl_snapshot_daily_id: Daily snapshot identifier.
+        account_id: Internal account context identifier.
+        report_date_local: Local report date.
+        instrument_id: Canonical instrument identifier.
+        position_qty: Open quantity.
+        cost_basis: Optional cost basis value.
+        realized_pnl: Realized PnL value.
+        unrealized_pnl: Unrealized PnL value.
+        total_pnl: Total PnL value.
+        fees: Total fees impact.
+        withholding_tax: Total withholding-tax impact.
+        currency: Functional/base currency code.
+        provisional: Whether snapshot values are provisional.
+        valuation_source: Optional valuation source label.
+        fx_source: Optional FX source label.
+        ingestion_run_id: Optional ingestion run identifier.
+        created_at_utc: Snapshot row creation timestamp in UTC.
+    """
+
+    pnl_snapshot_daily_id: UUID
+    account_id: str
+    report_date_local: date
+    instrument_id: UUID
+    position_qty: str
+    cost_basis: str | None
+    realized_pnl: str
+    unrealized_pnl: str
+    total_pnl: str
+    fees: str
+    withholding_tax: str
+    currency: str
+    provisional: bool
+    valuation_source: str | None
+    fx_source: str | None
+    ingestion_run_id: UUID | None
+    created_at_utc: datetime
+
+
+class LedgerSnapshotRepositoryPort(Protocol):
+    """Port definition for Task 7 ledger inputs and snapshot persistence."""
+
+    def db_ledger_trade_fill_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str | None = None,
+    ) -> list[LedgerTradeFillRecord]:
+        """List trade-fill rows for FIFO computation in deterministic order.
+
+        Args:
+            account_id: Internal account identifier.
+            through_report_date_local: Optional inclusive local-date upper bound.
+
+        Returns:
+            list[LedgerTradeFillRecord]: Deterministically ordered trade fills.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when database read fails.
+        """
+
+    def db_ledger_cashflow_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str | None = None,
+    ) -> list[LedgerCashflowRecord]:
+        """List cashflow rows for fee/withholding adjustments in deterministic order.
+
+        Args:
+            account_id: Internal account identifier.
+            through_report_date_local: Optional inclusive local-date upper bound.
+
+        Returns:
+            list[LedgerCashflowRecord]: Deterministically ordered cashflows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when database read fails.
+        """
+
+    def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
+        """UPSERT deterministic position-lot rows in one batch operation.
+
+        Args:
+            requests: Position-lot upsert requests.
+
+        Returns:
+            None: Persistence is applied as side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence fails.
+        """
+
+    def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
+        """UPSERT daily snapshot rows in one batch operation.
+
+        Args:
+            requests: Daily snapshot upsert requests.
+
+        Returns:
+            None: Persistence is applied as side effect.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence fails.
+        """
+
+    def db_pnl_snapshot_daily_list(
+        self,
+        account_id: str,
+        limit: int,
+        offset: int,
+        sort_by: str,
+        sort_dir: str,
+        report_date_from: str | None = None,
+        report_date_to: str | None = None,
+    ) -> list[PnlSnapshotDailyRecord]:
+        """List persisted daily snapshots for API/report surfaces.
+
+        Args:
+            account_id: Internal account identifier.
+            limit: Maximum row count.
+            offset: Number of rows to skip.
+            sort_by: Sort field name.
+            sort_dir: Sort direction (`asc` or `desc`).
+            report_date_from: Optional inclusive lower report-date bound.
+            report_date_to: Optional inclusive upper report-date bound.
+
+        Returns:
+            list[PnlSnapshotDailyRecord]: Deterministically ordered daily snapshots.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when database read fails.
+        """
+

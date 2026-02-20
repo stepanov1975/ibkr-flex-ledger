@@ -1,4 +1,5 @@
 """Job-layer ingestion orchestrator with deterministic stage timeline persistence."""
+# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from app.db import (
     RawRecordPersistRequest,
 )
 from app.domain import domain_build_stage_event
+from app.ledger import StockLedgerSnapshotService
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import job_raw_extract_payload_rows
@@ -68,6 +70,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         flex_adapter: FlexAdapterPort,
         config: IngestionOrchestratorConfig,
         canonical_repository: CanonicalPersistenceRepositoryPort | RawRecordReadRepositoryPort | None = None,
+        snapshot_service: StockLedgerSnapshotService | None = None,
     ):
         """Initialize ingestion orchestrator dependencies.
 
@@ -104,6 +107,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         self._flex_adapter = flex_adapter
         self._config = config
         self._canonical_repository = canonical_repository
+        self._snapshot_service = snapshot_service
 
     def job_supported_names(self) -> tuple[str, ...]:
         """Return supported job names.
@@ -261,6 +265,11 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     )
                 )
 
+            self._job_append_snapshot_stage_timeline(
+                run_record_id=str(run_record.ingestion_run_id),
+                timeline=timeline,
+            )
+
             timeline.append(domain_build_stage_event(stage="run", status="success"))
             self._ingestion_repository.db_ingestion_run_finalize(
                 ingestion_run_id=run_record.ingestion_run_id,
@@ -370,3 +379,51 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         if isinstance(error, ValueError):
             return "INGESTION_CONTRACT_ERROR"
         return "INGESTION_UNEXPECTED_ERROR"
+
+    def _job_append_snapshot_stage_timeline(self, run_record_id: str, timeline: list[dict[str, object]]) -> None:
+        """Append snapshot stage timeline events for automatic Task 7 execution.
+
+        Args:
+            run_record_id: Ingestion run identifier.
+            timeline: Mutable timeline payload being persisted.
+
+        Returns:
+            None: Timeline is updated as side effect.
+
+        Raises:
+            RuntimeError: Raised when snapshot service execution fails.
+        """
+
+        timeline.append(domain_build_stage_event(stage="snapshot", status="started"))
+        snapshot_started_at = datetime.now(timezone.utc)
+        if self._snapshot_service is None:
+            timeline.append(
+                domain_build_stage_event(
+                    stage="snapshot",
+                    status="completed",
+                    details={"snapshot_skip_reason": "snapshot_service_not_configured"},
+                )
+            )
+            return
+
+        snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
+            account_id=self._config.account_id,
+            ingestion_run_id=run_record_id,
+            run_completed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+        snapshot_duration_ms = max(
+            0,
+            int((datetime.now(timezone.utc) - snapshot_started_at).total_seconds() * 1000),
+        )
+        timeline.append(
+            domain_build_stage_event(
+                stage="snapshot",
+                status="completed",
+                details={
+                    "report_date_local": snapshot_result.report_date_local,
+                    "snapshot_row_count": snapshot_result.snapshot_row_count,
+                    "position_lot_row_count": snapshot_result.position_lot_row_count,
+                    "snapshot_duration_ms": snapshot_duration_ms,
+                },
+            )
+        )

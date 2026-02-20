@@ -256,6 +256,59 @@ class _RawPersistenceStub:
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
 
+class _SnapshotServiceStub:
+    """Snapshot service stub capturing automatic snapshot execution calls."""
+
+    def __init__(self):
+        """Initialize snapshot service call capture state.
+
+        Returns:
+            None: Initializer does not return values.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        self.calls: list[dict[str, str | None]] = []
+
+    def ledger_snapshot_build_and_persist(
+        self,
+        account_id: str,
+        ingestion_run_id: str | None,
+        run_completed_at_utc: str,
+    ):
+        """Capture snapshot trigger parameters and return deterministic result.
+
+        Args:
+            account_id: Internal account identifier.
+            ingestion_run_id: Ingestion run identifier.
+            run_completed_at_utc: Run completion UTC timestamp.
+
+        Returns:
+            object: Lightweight snapshot build result.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        self.calls.append(
+            {
+                "account_id": account_id,
+                "ingestion_run_id": ingestion_run_id,
+                "run_completed_at_utc": run_completed_at_utc,
+            }
+        )
+        return type(
+            "SnapshotResult",
+            (),
+            {
+                "report_date_local": "2026-02-20",
+                "snapshot_row_count": 1,
+                "position_lot_row_count": 1,
+            },
+        )()
+
+
 def test_jobs_ingestion_orchestrator_marks_failed_on_missing_required_sections() -> None:
     """Finalize ingestion run as failed on required-section preflight failure.
 
@@ -317,6 +370,44 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
 
     assert result.status == "success"
     assert repository_stub.finalize_calls[0]["status"] == "success"
+
+
+def test_jobs_ingestion_orchestrator_runs_snapshot_stage_on_success() -> None:
+    """Trigger automatic snapshot build at the end of successful ingestion.
+
+    Returns:
+        None: Assertions validate snapshot-stage execution semantics.
+
+    Raises:
+        AssertionError: Raised when snapshot stage is not triggered.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    repository_stub = _RepositoryStub()
+    adapter_stub = _AdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    snapshot_service_stub = _SnapshotServiceStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+        snapshot_service=snapshot_service_stub,
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "success"
+    assert len(snapshot_service_stub.calls) == 1
+    snapshot_timeline_events = [
+        event for event in repository_stub.finalize_calls[0]["diagnostics"] if event.get("stage") == "snapshot"
+    ]
+    assert snapshot_timeline_events[-1]["status"] == "completed"
 
 
 def test_jobs_ingestion_orchestrator_returns_failed_result_on_adapter_timeout() -> None:

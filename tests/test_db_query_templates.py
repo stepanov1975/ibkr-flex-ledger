@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.db.canonical_persistence import SQLAlchemyCanonicalPersistenceService
 from app.db.ingestion_run import SQLAlchemyIngestionRunService
+from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
 class _MappingResultStub:
@@ -296,3 +297,51 @@ def test_db_ingestion_run_list_rejects_unsupported_sort_field() -> None:
     except ValueError as error:
         assert str(error) == "unsupported sort_by=created_at_utc"
     assert len(connection.executed_queries) == 0
+
+
+def test_db_ledger_trade_fill_list_uses_typed_nullable_date_predicate() -> None:
+    """Use typed nullable-date predicate in ledger trade-fill query template.
+
+    Returns:
+        None: Assertions validate SQL template text.
+
+    Raises:
+        AssertionError: Raised when typed nullable-date casting is missing.
+    """
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyLedgerSnapshotService(engine=_EngineStub(connection=connection))
+
+    service.db_ledger_trade_fill_list_for_account(account_id="U_TEST", through_report_date_local="2026-02-20")
+
+    executed_query = connection.executed_queries[0]
+    assert "CAST(:through_report_date_local AS date) IS NULL" in executed_query
+    assert "report_date_local <= CAST(:through_report_date_local AS date)" in executed_query
+
+
+def test_db_snapshot_list_uses_typed_nullable_date_predicates() -> None:
+    """Use typed nullable-date predicates in snapshot list query templates.
+
+    Returns:
+        None: Assertions validate SQL template text.
+
+    Raises:
+        AssertionError: Raised when typed nullable-date casting is missing.
+    """
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyLedgerSnapshotService(engine=_EngineStub(connection=connection))
+
+    service.db_pnl_snapshot_daily_list(
+        account_id="U_TEST",
+        limit=10,
+        offset=0,
+        sort_by="report_date_local",
+        sort_dir="desc",
+        report_date_from="2026-02-01",
+        report_date_to="2026-02-28",
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert "CAST(:report_date_from AS date) IS NULL" in executed_query
+    assert "CAST(:report_date_to AS date) IS NULL" in executed_query

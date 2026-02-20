@@ -1,4 +1,5 @@
 """Canonical mapping service for Task 5 raw-to-canonical transformations."""
+# pylint: disable=duplicate-code
 
 from __future__ import annotations
 

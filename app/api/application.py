@@ -6,10 +6,10 @@ This module defines API application composition used by the MVP runtime.
 from fastapi import FastAPI
 
 from app.config import AppSettings
-from app.db import DatabaseHealthPort, IngestionRunRepositoryPort
+from app.db import DatabaseHealthPort, IngestionRunRepositoryPort, LedgerSnapshotRepositoryPort
 from app.jobs import JobOrchestratorPort
 
-from .routers import api_create_health_router, api_create_ingestion_router
+from .routers import api_create_health_router, api_create_ingestion_router, api_create_snapshot_router
 
 
 def create_api_application(
@@ -18,6 +18,7 @@ def create_api_application(
     ingestion_repository: IngestionRunRepositoryPort,
     ingestion_orchestrator: JobOrchestratorPort,
     reprocess_orchestrator: JobOrchestratorPort | None = None,
+    snapshot_repository: LedgerSnapshotRepositoryPort | None = None,
 ) -> FastAPI:
     """Create the FastAPI application instance for the service.
 
@@ -27,6 +28,7 @@ def create_api_application(
         ingestion_repository: Ingestion run repository for list/detail APIs.
         ingestion_orchestrator: Job orchestrator for ingestion trigger execution.
         reprocess_orchestrator: Optional job orchestrator for reprocess trigger execution.
+        snapshot_repository: Optional repository for Task 7 daily snapshot reads.
 
     Returns:
         FastAPI: Framework application instance with foundation metadata.
@@ -62,6 +64,13 @@ def create_api_application(
             reprocess_orchestrator=reprocess_orchestrator,
         )
     )
+    if snapshot_repository is not None:
+        application.include_router(
+            api_create_snapshot_router(
+                settings=settings,
+                snapshot_repository=snapshot_repository,
+            )
+        )
 
     return application
 

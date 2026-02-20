@@ -11,6 +11,7 @@ from app.db import (
     SQLAlchemyCanonicalPersistenceService,
     SQLAlchemyDatabaseHealthService,
     SQLAlchemyIngestionRunService,
+    SQLAlchemyLedgerSnapshotService,
     SQLAlchemyRawPersistenceService,
     db_create_engine,
 )
@@ -20,6 +21,7 @@ from app.jobs import (
     IngestionJobOrchestrator,
     IngestionOrchestratorConfig,
 )
+from app.ledger import StockLedgerSnapshotService
 
 
 def bootstrap_create_application() -> FastAPI:
@@ -38,6 +40,8 @@ def bootstrap_create_application() -> FastAPI:
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
+    snapshot_repository = SQLAlchemyLedgerSnapshotService(engine=engine)
+    snapshot_service = StockLedgerSnapshotService(repository=snapshot_repository)
     flex_adapter = FlexWebServiceAdapter(
         token=settings.ibkr_flex_token,
         initial_wait_seconds=settings.ibkr_flex_initial_wait_seconds,
@@ -59,6 +63,7 @@ def bootstrap_create_application() -> FastAPI:
             functional_currency="USD",
         ),
         canonical_repository=canonical_repository,
+        snapshot_service=snapshot_service,
     )
     reprocess_orchestrator = CanonicalReprocessOrchestrator(
         raw_read_repository=canonical_repository,
@@ -77,6 +82,7 @@ def bootstrap_create_application() -> FastAPI:
         ingestion_repository=ingestion_repository,
         ingestion_orchestrator=ingestion_orchestrator,
         reprocess_orchestrator=reprocess_orchestrator,
+        snapshot_repository=snapshot_repository,
     )
 
 
@@ -95,6 +101,8 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
+    snapshot_repository = SQLAlchemyLedgerSnapshotService(engine=engine)
+    snapshot_service = StockLedgerSnapshotService(repository=snapshot_repository)
     flex_adapter = FlexWebServiceAdapter(
         token=settings.ibkr_flex_token,
         initial_wait_seconds=settings.ibkr_flex_initial_wait_seconds,
@@ -116,6 +124,7 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
             functional_currency="USD",
         ),
         canonical_repository=canonical_repository,
+        snapshot_service=snapshot_service,
     )
 
 
