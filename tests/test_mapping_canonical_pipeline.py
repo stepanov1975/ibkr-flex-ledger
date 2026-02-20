@@ -400,6 +400,47 @@ def test_mapping_build_canonical_batch_fails_when_required_trade_numeric_invalid
         )
 
 
+def test_mapping_build_canonical_batch_accepts_required_trade_decimal_with_thousands_separator() -> None:
+    """Accept comma-separated thousands formatting for required trade numerics.
+
+    Returns:
+        None: Assertions validate deterministic decimal normalization.
+
+    Raises:
+        AssertionError: Raised when comma-formatted required numerics are rejected.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1005A",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1005A",
+                "transactionID": "1005A",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1,234.56",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+                "dateTime": "2026-02-14T10:00:00+00:00",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.trade_fill_requests) == 1
+    assert mapped_batch.trade_fill_requests[0].quantity == "1234.56"
+
+
 def test_mapping_build_canonical_batch_fails_when_trade_timestamp_invalid() -> None:
     """Fail fast when trade timestamp uses unsupported datetime format.
 
@@ -514,6 +555,44 @@ def test_mapping_build_canonical_batch_fails_when_optional_cashflow_numeric_inva
             functional_currency="USD",
             raw_records=raw_records,
         )
+
+
+def test_mapping_build_canonical_batch_accepts_optional_cashflow_decimal_with_thousands_separator() -> None:
+    """Accept comma-separated thousands formatting for optional cashflow numerics.
+
+    Returns:
+        None: Assertions validate deterministic decimal normalization.
+
+    Raises:
+        AssertionError: Raised when comma-formatted optional numerics are rejected.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2004A",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2004A",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "withholdingTax": "1,000.25",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.cashflow_requests) == 1
+    assert mapped_batch.cashflow_requests[0].withholding_tax == "1000.25"
 
 
 def test_mapping_build_canonical_batch_fails_when_optional_cashflow_timestamp_invalid() -> None:

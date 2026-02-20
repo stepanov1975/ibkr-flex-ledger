@@ -596,8 +596,9 @@ class CanonicalMappingService:
         """
 
         value = self._mapping_required_value(payload, key, raw_record)
-        self._mapping_validate_decimal_value(value=value, key=key, raw_record=raw_record)
-        return value
+        normalized_value = self._mapping_normalize_decimal_text(value)
+        self._mapping_validate_decimal_value(value=normalized_value, key=key, raw_record=raw_record)
+        return normalized_value
 
     def _mapping_optional_decimal_value(
         self,
@@ -622,8 +623,27 @@ class CanonicalMappingService:
         value = self._mapping_optional_value(payload, key)
         if value is None:
             return None
-        self._mapping_validate_decimal_value(value=value, key=key, raw_record=raw_record)
-        return value
+        normalized_value = self._mapping_normalize_decimal_text(value)
+        self._mapping_validate_decimal_value(value=normalized_value, key=key, raw_record=raw_record)
+        return normalized_value
+
+    def _mapping_normalize_decimal_text(self, value: str) -> str:
+        """Normalize Flex decimal-like text before validation.
+
+        Args:
+            value: Candidate decimal text value.
+
+        Returns:
+            str: Decimal text normalized for deterministic parsing.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        # FSN[2026-02-20]: ALWAYS strip comma thousands separators before Decimal parsing.
+        # Context: IBKR exports may emit numeric fields as locale-formatted text (for example, 1,234.56). | Symptom: Decimal(value) raises ConversionSyntax.
+        # Guard: mapping decimal validation runs after normalization and rejects remaining invalid values. | Test: test_mapping_build_canonical_batch_accepts_required_trade_decimal_with_thousands_separator
+        return value.replace(",", "")
 
     def _mapping_validate_decimal_value(self, value: str, key: str, raw_record: RawRecordForMapping) -> None:
         """Validate that a text value is finite decimal content.
