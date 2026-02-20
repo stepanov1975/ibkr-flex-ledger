@@ -411,12 +411,7 @@ class CanonicalMappingService:
         """
 
         payload = raw_record.source_payload
-        timestamp_value = self._mapping_optional_value(payload, "dateTime")
-        if timestamp_value is not None:
-            return timestamp_value
-
-        report_date_local = self._mapping_resolve_report_date(raw_record, payload)
-        return f"{report_date_local}T00:00:00+00:00"
+        return self._mapping_required_value(payload, "dateTime", raw_record)
 
     def _mapping_resolve_report_date(self, raw_record: RawRecordForMapping, payload: dict[str, object]) -> str:
         """Resolve report date in deterministic YYYY-MM-DD format.
@@ -536,7 +531,7 @@ class CanonicalMappingService:
         if value is None:
             return None
         if not isinstance(value, str):
-            return str(value)
+            return None
         normalized_value = value.strip()
         if not normalized_value:
             return None

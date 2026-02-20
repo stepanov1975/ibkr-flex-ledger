@@ -91,3 +91,27 @@ def test_jobs_raw_extraction_preserves_parent_context_for_nested_leaf_rows() -> 
         "quantity": "7",
         "transactionID": "TX200",
     }
+
+
+def test_jobs_raw_extraction_rejects_mismatched_flex_statements_count() -> None:
+    """Reject payload when FlexStatements count attribute mismatches statement nodes.
+
+    Returns:
+        None: Assertions validate malformed payload rejection.
+
+    Raises:
+        AssertionError: Raised when malformed count is accepted.
+    """
+
+    payload_bytes = (
+        b"<FlexQueryResponse><FlexStatements count=\"2\">"
+        b"<FlexStatement accountId=\"U_TEST\" toDate=\"20260214\">"
+        b"<Trades><Trade transactionID=\"TX100\" quantity=\"10\" /></Trades>"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+
+    try:
+        job_raw_extract_payload_rows(payload_bytes=payload_bytes)
+        assert False, "expected ValueError for mismatched FlexStatements count"
+    except ValueError as error:
+        assert "FlexStatements count attribute does not match" in str(error)

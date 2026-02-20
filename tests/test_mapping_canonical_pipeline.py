@@ -271,6 +271,7 @@ def test_mapping_build_canonical_batch_accepts_compact_report_date_format() -> N
                 "tradePrice": "101.00",
                 "currency": "USD",
                 "reportDate": "20260214",
+                "dateTime": "2026-02-14T10:00:00+00:00",
             },
         )
     ]
@@ -320,3 +321,41 @@ def test_mapping_build_canonical_batch_accepts_slash_report_date_format() -> Non
 
     assert len(mapped_batch.cashflow_requests) == 1
     assert mapped_batch.cashflow_requests[0].report_date_local == "2026-02-14"
+
+
+def test_mapping_build_canonical_batch_fails_when_trade_timestamp_missing() -> None:
+    """Fail fast when execution trade row omits dateTime timestamp.
+
+    Returns:
+        None: Assertions validate deterministic contract error behavior.
+
+    Raises:
+        AssertionError: Raised when missing trade timestamp is accepted.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1004",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1004",
+                "transactionID": "1004",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    with pytest.raises(MappingContractViolationError, match="missing required field dateTime"):
+        mapping_build_canonical_batch(
+            account_id="U_TEST",
+            functional_currency="USD",
+            raw_records=raw_records,
+        )

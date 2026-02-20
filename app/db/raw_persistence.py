@@ -60,16 +60,17 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
 
         try:
             with self._engine.begin() as connection:
-                inserted_row = connection.execute(
+                persisted_row = connection.execute(
                     text(
                         "INSERT INTO raw_artifact ("
                         "ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, report_date_local, source_payload"
                         ") VALUES ("
                         ":ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, :report_date_local, :source_payload"
                         ") "
-                        "ON CONFLICT (account_id, period_key, flex_query_id, payload_sha256) DO NOTHING "
+                        "ON CONFLICT (account_id, period_key, flex_query_id, payload_sha256) DO UPDATE SET "
+                        "created_at_utc = raw_artifact.created_at_utc "
                         "RETURNING raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
-                        "payload_sha256, report_date_local, source_payload, created_at_utc"
+                        "payload_sha256, report_date_local, source_payload, created_at_utc, (xmax = 0) AS inserted"
                     ),
                     {
                         "ingestion_run_id": request.ingestion_run_id,
@@ -82,34 +83,14 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                     },
                 ).mappings().fetchone()
 
-                if inserted_row is not None:
-                    return RawArtifactPersistResult(
-                        artifact=self._db_raw_map_artifact_row(inserted_row),
-                        deduplicated=False,
-                    )
+                if persisted_row is None:
+                    raise RuntimeError("raw artifact upsert failed to return persisted row")
 
-                reused_row = connection.execute(
-                    text(
-                        "SELECT raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
-                        "payload_sha256, report_date_local, source_payload, created_at_utc "
-                        "FROM raw_artifact "
-                        "WHERE account_id = :account_id AND period_key = :period_key "
-                        "AND flex_query_id = :flex_query_id AND payload_sha256 = :payload_sha256"
-                    ),
-                    {
-                        "account_id": normalized_reference.account_id,
-                        "period_key": normalized_reference.period_key,
-                        "flex_query_id": normalized_reference.flex_query_id,
-                        "payload_sha256": normalized_reference.payload_sha256,
-                    },
-                ).mappings().fetchone()
-
-                if reused_row is None:
-                    raise RuntimeError("raw artifact upsert conflict occurred without existing row")
+                deduplicated = not bool(persisted_row["inserted"])
 
                 return RawArtifactPersistResult(
-                    artifact=self._db_raw_map_artifact_row(reused_row),
-                    deduplicated=True,
+                    artifact=self._db_raw_map_artifact_row(persisted_row),
+                    deduplicated=deduplicated,
                 )
         except SQLAlchemyError as error:
             raise RuntimeError("raw artifact persistence failed") from error

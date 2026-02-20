@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import xml.etree.ElementTree as element_tree
 
+from .flex_payload_validation import job_flex_parse_payload_with_statements
+
 
 @dataclass(frozen=True)
 class RawExtractedRow:
@@ -48,17 +50,7 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
         ValueError: Raised when payload is empty or malformed XML.
     """
 
-    if not payload_bytes:
-        raise ValueError("payload_bytes must not be empty")
-
-    try:
-        root = element_tree.fromstring(payload_bytes)
-    except element_tree.ParseError as error:
-        raise ValueError("payload_bytes must contain valid XML") from error
-
-    statements = root.findall(".//FlexStatement")
-    if not statements:
-        raise ValueError("FlexStatement node not found in payload")
+    _, statements = job_flex_parse_payload_with_statements(payload_bytes=payload_bytes)
 
     report_date_local = _job_raw_extract_report_date_local(statements[0])
     extracted_rows: list[RawExtractedRow] = []

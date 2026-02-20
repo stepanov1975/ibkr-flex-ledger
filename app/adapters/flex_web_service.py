@@ -322,7 +322,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         for retry_index in range(self._retry_strategy.retry_attempts):
             wait_seconds = max(
-                self._adapter_calculate_retry_wait_seconds(retry_index=retry_index),
+                self.adapter_calculate_retry_wait_seconds(retry_index=retry_index),
                 pending_retry_delay_seconds,
             )
             pending_retry_delay_seconds = 0
@@ -467,22 +467,6 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         """
 
         return flex_error_retry_delay_seconds(error_code=error_code)
-
-    def _adapter_calculate_retry_wait_seconds(self, retry_index: int) -> float:
-        """Calculate exponential retry wait with cap and jitter.
-
-        Args:
-            retry_index: Zero-based retry attempt index.
-
-        Returns:
-            float: Computed wait seconds for the poll attempt.
-
-        Raises:
-            ValueError: Raised when retry index is negative.
-            RuntimeError: Raised when jitter provider returns out-of-range value.
-        """
-
-        return self.adapter_calculate_retry_wait_seconds(retry_index=retry_index)
 
     def adapter_calculate_retry_wait_seconds(self, retry_index: int) -> float:
         """Calculate exponential retry wait with cap and jitter.

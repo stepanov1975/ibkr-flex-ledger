@@ -105,28 +105,15 @@ def job_canonical_map_and_persist(
             )
         resolved_corp_action_requests.append(corp_action_request)
 
-    if hasattr(canonical_persistence_repository, "db_canonical_bulk_upsert"):
-        canonical_persistence_repository.db_canonical_bulk_upsert(
-            trade_requests=resolved_trade_requests,
-            cashflow_requests=resolved_cashflow_requests,
-            fx_requests=mapped_batch.fx_requests,
-            corp_action_requests=resolved_corp_action_requests,
-        )
-    else:
-        for trade_request in resolved_trade_requests:
-            canonical_persistence_repository.db_canonical_trade_fill_upsert(trade_request)
-
-        for cashflow_request in resolved_cashflow_requests:
-            canonical_persistence_repository.db_canonical_cashflow_upsert(cashflow_request)
-
-        for fx_request in mapped_batch.fx_requests:
-            canonical_persistence_repository.db_canonical_fx_upsert(fx_request)
-
-        for corp_action_request in resolved_corp_action_requests:
-            canonical_persistence_repository.db_canonical_corp_action_upsert(corp_action_request)
+    canonical_persistence_repository.db_canonical_bulk_upsert(
+        trade_requests=resolved_trade_requests,
+        cashflow_requests=resolved_cashflow_requests,
+        fx_requests=mapped_batch.fx_requests,
+        corp_action_requests=resolved_corp_action_requests,
+    )
 
     return {
-        "instrument_upsert_count": len(mapped_batch.instrument_upsert_requests),
+        "instrument_upsert_count": len(instrument_id_by_conid),
         "trade_fill_count": len(mapped_batch.trade_fill_requests),
         "cashflow_count": len(mapped_batch.cashflow_requests),
         "fx_count": len(mapped_batch.fx_requests),

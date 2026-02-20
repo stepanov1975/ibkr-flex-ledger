@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Final
-import xml.etree.ElementTree as element_tree
+
+from .flex_payload_validation import job_flex_parse_payload_with_statements
 
 MISSING_REQUIRED_SECTION_CODE: Final[str] = "MISSING_REQUIRED_SECTION"
 
@@ -146,17 +147,7 @@ def job_section_preflight_extract_section_names(payload_bytes: bytes) -> set[str
         ValueError: Raised when payload is empty or does not contain `FlexStatement`.
     """
 
-    if not payload_bytes:
-        raise ValueError("payload_bytes must not be empty")
-
-    try:
-        root = element_tree.fromstring(payload_bytes)
-    except element_tree.ParseError as error:
-        raise ValueError("payload_bytes must contain valid XML") from error
-
-    statements = root.findall(".//FlexStatement")
-    if not statements:
-        raise ValueError("FlexStatement node not found in payload")
+    _, statements = job_flex_parse_payload_with_statements(payload_bytes=payload_bytes)
 
     section_names: set[str] = set()
     for statement in statements:

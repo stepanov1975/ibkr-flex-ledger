@@ -655,3 +655,26 @@ class CanonicalPersistenceRepositoryPort(Protocol):
             ValueError: Raised when request values are invalid.
             RuntimeError: Raised when persistence operation fails.
         """
+
+    def db_canonical_bulk_upsert(
+        self,
+        trade_requests: list[CanonicalTradeFillUpsertRequest],
+        cashflow_requests: list[CanonicalCashflowUpsertRequest],
+        fx_requests: list[CanonicalFxUpsertRequest],
+        corp_action_requests: list[CanonicalCorpActionUpsertRequest],
+    ) -> None:
+        """UPSERT canonical event batches in one shared transaction.
+
+        Args:
+            trade_requests: Canonical trade-fill requests.
+            cashflow_requests: Canonical cashflow requests.
+            fx_requests: Canonical FX requests.
+            corp_action_requests: Canonical corporate-action requests.
+
+        Returns:
+            None: Event upserts are persisted as side effects.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """

@@ -155,6 +155,31 @@ class _CanonicalPersistRepositoryStub:
 
         _ = request
 
+    def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
+        """Capture canonical bulk upsert calls via per-request delegations.
+
+        Args:
+            trade_requests: Canonical trade requests.
+            cashflow_requests: Canonical cashflow requests.
+            fx_requests: Canonical FX requests.
+            corp_action_requests: Canonical corporate-action requests.
+
+        Returns:
+            None: Captured as side effect.
+
+        Raises:
+            RuntimeError: This stub does not raise runtime errors.
+        """
+
+        for trade_request in trade_requests:
+            self.db_canonical_trade_fill_upsert(trade_request)
+        for cashflow_request in cashflow_requests:
+            self.db_canonical_cashflow_upsert(cashflow_request)
+        for fx_request in fx_requests:
+            self.db_canonical_fx_upsert(fx_request)
+        for corp_action_request in corp_action_requests:
+            self.db_canonical_corp_action_upsert(corp_action_request)
+
 
 class _IngestionRepositoryStub:
     """Capture reprocess run finalize diagnostics for assertions."""
@@ -418,6 +443,7 @@ def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query(
                 "tradePrice": "100.10",
                 "currency": "USD",
                 "reportDate": "2026-02-14",
+                    "dateTime": "2026-02-14T10:00:00+00:00",
             },
         )
     ]
