@@ -14,6 +14,15 @@ _DOMAIN_FLEX_TIMESTAMP_TZ_ABBREVIATION_TO_OFFSET = {
     "EDT": "-0400",
 }
 
+_DOMAIN_FLEX_SUPPORTED_DATE_FORMATS = (
+    "%Y/%m/%d",
+    "%Y-%m-%d",
+    "%Y%m%d",
+    "%m/%d/%Y",
+    "%m/%d/%y",
+    "%d-%b-%y",
+)
+
 _DOMAIN_FLEX_NULL_SENTINELS = frozenset({"-", "--", "N/A"})
 
 
@@ -71,7 +80,7 @@ def domain_flex_parse_local_date(value: str) -> date | None:
         except ValueError:
             pass
 
-        for supported_format in ("%Y/%m/%d", "%Y-%m-%d", "%Y%m%d"):
+        for supported_format in _DOMAIN_FLEX_SUPPORTED_DATE_FORMATS:
             try:
                 return datetime.strptime(candidate, supported_format).date()
             except ValueError:

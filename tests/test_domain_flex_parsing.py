@@ -42,6 +42,9 @@ def test_domain_flex_parse_local_date_accepts_supported_variants() -> None:
     assert domain_flex_parse_local_date("2026-02-14") == date(2026, 2, 14)
     assert domain_flex_parse_local_date("20260214") == date(2026, 2, 14)
     assert domain_flex_parse_local_date("2026/02/14") == date(2026, 2, 14)
+    assert domain_flex_parse_local_date("02/14/2026") == date(2026, 2, 14)
+    assert domain_flex_parse_local_date("02/14/26") == date(2026, 2, 14)
+    assert domain_flex_parse_local_date("14-Feb-26") == date(2026, 2, 14)
     assert domain_flex_parse_local_date("2026-02-14T10:00:00+00:00") == date(2026, 2, 14)
 
 
