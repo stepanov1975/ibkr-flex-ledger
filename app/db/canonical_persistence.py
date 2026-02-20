@@ -24,6 +24,22 @@ from app.db.interfaces import (
 class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, RawRecordReadRepositoryPort):
     """SQLAlchemy implementation of canonical mapping read and UPSERT operations."""
 
+    _RAW_RECORD_SELECT_COLUMNS = (
+        "SELECT raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+        "report_date_local, section_name, source_row_ref, source_payload "
+        "FROM raw_record "
+    )
+    _RAW_RECORD_QUERY_BY_PERIOD = (
+        _RAW_RECORD_SELECT_COLUMNS
+        + "WHERE account_id = :account_id AND period_key = :period_key AND flex_query_id = :flex_query_id "
+        + "ORDER BY created_at_utc ASC, raw_record_id ASC"
+    )
+    _RAW_RECORD_QUERY_BY_RUN_ID = (
+        _RAW_RECORD_SELECT_COLUMNS
+        + "WHERE ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
+        + "ORDER BY created_at_utc ASC, raw_record_id ASC"
+    )
+
     def __init__(self, engine: Engine):
         """Initialize canonical persistence service.
 
@@ -68,9 +84,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         normalized_flex_query_id = self._db_canonical_validate_non_empty_text(flex_query_id, "flex_query_id")
 
         return self._db_canonical_read_raw_rows(
-            where_clause=(
-                "account_id = :account_id AND period_key = :period_key AND flex_query_id = :flex_query_id"
-            ),
+            query_template=self._RAW_RECORD_QUERY_BY_PERIOD,
             parameters={
                 "account_id": normalized_account_id,
                 "period_key": normalized_period_key,
@@ -96,7 +110,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             raise ValueError("ingestion_run_id must not be None")
 
         return self._db_canonical_read_raw_rows(
-            where_clause="ingestion_run_id = CAST(:ingestion_run_id AS uuid)",
+            query_template=self._RAW_RECORD_QUERY_BY_RUN_ID,
             parameters={"ingestion_run_id": str(ingestion_run_id)},
         )
 
@@ -432,11 +446,15 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             description=self._db_canonical_validate_optional_text(request.description),
         )
 
-    def _db_canonical_read_raw_rows(self, where_clause: str, parameters: dict[str, Any]) -> list[RawRecordForCanonicalMapping]:
+    def _db_canonical_read_raw_rows(
+        self,
+        query_template: str,
+        parameters: dict[str, Any],
+    ) -> list[RawRecordForCanonicalMapping]:
         """Read raw rows using one deterministic query shape.
 
         Args:
-            where_clause: SQL WHERE predicate fragment.
+            query_template: Fixed SQL query template.
             parameters: Bound query parameters.
 
         Returns:
@@ -449,13 +467,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
-                        "report_date_local, section_name, source_row_ref, source_payload "
-                        "FROM raw_record "
-                        f"WHERE {where_clause} "
-                        "ORDER BY created_at_utc ASC, raw_record_id ASC"
-                    ),
+                    text(query_template),
                     parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:

@@ -34,6 +34,31 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         "duration_ms": "duration_ms",
     }
     _INGESTION_RUN_ALLOWED_SORT_DIRECTIONS = {"asc", "desc"}
+    _INGESTION_RUN_LIST_SELECT_COLUMNS = (
+        "SELECT "
+        "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+        "report_date_local, started_at_utc, ended_at_utc, duration_ms, "
+        "error_code, error_message, diagnostics, created_at_utc "
+        "FROM ingestion_run "
+    )
+    _INGESTION_RUN_LIST_QUERY_BY_SORT = {
+        ("started_at_utc", "asc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY started_at_utc asc, ingestion_run_id asc LIMIT :limit OFFSET :offset",
+        ("started_at_utc", "desc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY started_at_utc desc, ingestion_run_id desc LIMIT :limit OFFSET :offset",
+        ("ended_at_utc", "asc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY ended_at_utc asc, ingestion_run_id asc LIMIT :limit OFFSET :offset",
+        ("ended_at_utc", "desc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY ended_at_utc desc, ingestion_run_id desc LIMIT :limit OFFSET :offset",
+        ("status", "asc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY status asc, ingestion_run_id asc LIMIT :limit OFFSET :offset",
+        ("status", "desc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY status desc, ingestion_run_id desc LIMIT :limit OFFSET :offset",
+        ("duration_ms", "asc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY duration_ms asc, ingestion_run_id asc LIMIT :limit OFFSET :offset",
+        ("duration_ms", "desc"): _INGESTION_RUN_LIST_SELECT_COLUMNS
+        + "ORDER BY duration_ms desc, ingestion_run_id desc LIMIT :limit OFFSET :offset",
+    }
 
     def __init__(self, engine: Engine):
         """Initialize ingestion run persistence service.
@@ -258,21 +283,12 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         if normalized_sort_dir not in self._INGESTION_RUN_ALLOWED_SORT_DIRECTIONS:
             raise ValueError(f"unsupported sort_dir={normalized_sort_dir}")
 
-        order_by_field = self._INGESTION_RUN_ALLOWED_SORT_FIELDS[normalized_sort_by]
-        order_by_clause = f"{order_by_field} {normalized_sort_dir}, ingestion_run_id {normalized_sort_dir}"
+        query_template = self._INGESTION_RUN_LIST_QUERY_BY_SORT[(normalized_sort_by, normalized_sort_dir)]
 
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT "
-                        "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
-                        "report_date_local, started_at_utc, ended_at_utc, duration_ms, "
-                        "error_code, error_message, diagnostics, created_at_utc "
-                        "FROM ingestion_run "
-                        f"ORDER BY {order_by_clause} "
-                        "LIMIT :limit OFFSET :offset"
-                    ),
+                    text(query_template),
                     {"limit": limit, "offset": offset},
                 ).mappings().all()
 
