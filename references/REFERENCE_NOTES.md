@@ -1,6 +1,6 @@
 # Reference Repositories Notes
 
-Date: 2026-02-14
+Date: 2026-02-20
 Purpose: Local study notes for reuse decisions in this project.
 
 ## Mandatory boundary
@@ -14,9 +14,11 @@ All code in `references/` is for reference only.
 ## Cloned repositories
 
 - csingley/ibflex
+- robcohen/ibflex2
 - cubinet-code/flexquery
 - alexpung/IB_Flex
 - westonplatter/finx-reports-ib
+- westonplatter/ngv_reports_ibkr
 - Marfusios/premium-tracker
 
 ## What to reuse (patterns, not copy-paste)
@@ -25,6 +27,11 @@ All code in `references/` is for reference only.
 - Reuse parser boundary design: keep Flex parsing isolated from accounting logic.
 - Reuse typed parsing ideas for dates, decimals, enums, and section-aware object mapping.
 - Reuse Flex client flow concept: request report, poll status, download payload.
+
+### ibflex2
+- Reuse maintained-parser compatibility patterns for modern IBKR Flex XML variations.
+- Reuse strict parser constraints around report configuration (date formats and unsupported summary modes).
+- Reuse the low-dependency parser + optional client split as a reference for adapter boundaries.
 
 ### flexquery
 - Reuse small CLI ingestion flow and retries for polling report readiness.
@@ -38,6 +45,10 @@ All code in `references/` is for reference only.
 ### finx-reports-ib
 - Reuse Flex configuration checklist (required sections and settings) as validation baseline.
 - Reuse idea of strict setup docs for reliable ingestion operations.
+
+### ngv_reports_ibkr
+- Reuse robust operational patterns around documentation, CI checks, and typed report-processing boundaries.
+- Reuse Flex configuration guidance as a secondary cross-check for section-coverage validation.
 
 ### premium-tracker
 - Reuse UI ideas only at high level (dashboard composition, drilldown narratives).
@@ -54,9 +65,11 @@ All code in `references/` is for reference only.
 ## License notes before borrowing code
 
 - ibflex: MIT (per LICENSE.txt)
+- ibflex2: MIT (per LICENSE.txt)
 - flexquery: MIT (per LICENSE)
 - IB_Flex: BSD-3-Clause (per LICENSE)
 - finx-reports-ib: MIT (per LICENSE)
+- ngv_reports_ibkr: BSD-3-Clause (per LICENSE)
 
 Rule: if any snippet is adapted, preserve required attribution and keep adaptation minimal and traceable.
 
