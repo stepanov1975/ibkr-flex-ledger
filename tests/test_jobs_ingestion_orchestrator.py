@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from app.adapters import AdapterFetchResult
+from app.adapters import AdapterFetchResult, FlexTokenInvalidError
 from app.db.interfaces import (
     IngestionRunRecord,
     IngestionRunReference,
@@ -360,6 +360,44 @@ def test_jobs_ingestion_orchestrator_returns_failed_result_on_adapter_timeout() 
     assert isinstance(diagnostics, list)
     failed_run_events = [event for event in diagnostics if event.get("stage") == "run" and event.get("status") == "failed"]
     assert len(failed_run_events) == 1
+
+
+def test_jobs_ingestion_orchestrator_maps_typed_token_error_to_deterministic_code() -> None:
+    """Map typed token-lifecycle adapter errors to dedicated ingestion error code.
+
+    Returns:
+        None: Assertions validate deterministic error-code mapping.
+
+    Raises:
+        AssertionError: Raised when typed token failure is not mapped correctly.
+    """
+
+    complete_payload = (
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+
+    class _TokenInvalidAdapterStub(_AdapterStub):
+        def adapter_fetch_report(self, query_id: str) -> AdapterFetchResult:
+            _ = query_id
+            raise FlexTokenInvalidError("invalid token", error_code="1015")
+
+    repository_stub = _RepositoryStub()
+    adapter_stub = _TokenInvalidAdapterStub(payload_bytes=complete_payload)
+    raw_persistence_stub = _RawPersistenceStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=raw_persistence_stub,
+        flex_adapter=adapter_stub,
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "failed"
+    assert repository_stub.finalize_calls[0]["error_code"] == "INGESTION_TOKEN_INVALID_ERROR"
 
 
 def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_details() -> None:

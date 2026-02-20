@@ -231,6 +231,7 @@ Included behavior:
 
 - Single active ingestion run lock with rejection response `409` and message `run already active`
 - Deterministic ingestion stages (`request` -> `poll` -> `download` -> `persist`)
+- Typed Flex adapter failure classification with deterministic ingestion error codes for token/request/statement failures
 - Required Flex section preflight with deterministic diagnostic code `MISSING_REQUIRED_SECTION`
 - Structured stage timeline persisted in `ingestion_run.diagnostics` as a JSON array
 - Trigger surfaces for both API and CLI

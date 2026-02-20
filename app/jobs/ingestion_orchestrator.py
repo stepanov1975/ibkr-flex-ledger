@@ -7,7 +7,15 @@ from datetime import datetime, timezone
 import hashlib
 import traceback
 
-from app.adapters import FlexAdapterPort
+from app.adapters import (
+    FlexAdapterConnectionError,
+    FlexAdapterPort,
+    FlexAdapterTimeoutError,
+    FlexRequestError,
+    FlexStatementError,
+    FlexTokenExpiredError,
+    FlexTokenInvalidError,
+)
 from app.db import (
     CanonicalPersistenceRepositoryPort,
     IngestionRunRepositoryPort,
@@ -343,6 +351,18 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             RuntimeError: This helper does not raise runtime errors.
         """
 
+        if isinstance(error, FlexTokenExpiredError):
+            return "INGESTION_TOKEN_EXPIRED_ERROR"
+        if isinstance(error, FlexTokenInvalidError):
+            return "INGESTION_TOKEN_INVALID_ERROR"
+        if isinstance(error, FlexRequestError):
+            return "INGESTION_REQUEST_ERROR"
+        if isinstance(error, FlexStatementError):
+            return "INGESTION_STATEMENT_ERROR"
+        if isinstance(error, FlexAdapterTimeoutError):
+            return "INGESTION_TIMEOUT_ERROR"
+        if isinstance(error, FlexAdapterConnectionError):
+            return "INGESTION_CONNECTION_ERROR"
         if isinstance(error, TimeoutError):
             return "INGESTION_TIMEOUT_ERROR"
         if isinstance(error, ConnectionError):

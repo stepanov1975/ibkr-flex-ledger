@@ -14,6 +14,15 @@ import xml.etree.ElementTree as element_tree
 
 from app.domain import domain_build_stage_event
 
+from .flex_errors import (
+    FlexAdapterConnectionError,
+    FlexAdapterTimeoutError,
+    FlexRequestError,
+    FlexRetryableStatementError,
+    FlexStatementError,
+    FlexTokenExpiredError,
+    FlexTokenInvalidError,
+)
 from .interfaces import AdapterFetchResult, FlexAdapterPort
 
 
@@ -108,6 +117,8 @@ class FlexWebServiceAdapter(FlexAdapterPort):
     _SERVER_BUSY_ERROR_CODE: Final[str] = "1009"
     _NOT_READY_ERROR_CODE: Final[str] = "1019"
     _THROTTLED_ERROR_CODE: Final[str] = "1018"
+    _TOKEN_EXPIRED_ERROR_CODE: Final[str] = "1012"
+    _TOKEN_INVALID_ERROR_CODE: Final[str] = "1015"
     _RETRYABLE_POLL_ERROR_CODES: Final[frozenset[str]] = frozenset(
         {_SERVER_BUSY_ERROR_CODE, _NOT_READY_ERROR_CODE, _THROTTLED_ERROR_CODE}
     )
@@ -211,10 +222,10 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             AdapterFetchResult: Upstream reference code and immutable payload bytes.
 
         Raises:
-            ConnectionError: Raised for network/HTTP transport failures.
-            TimeoutError: Raised when report generation did not become ready in time.
-            ValueError: Raised when upstream rejects request or response contract is invalid.
-            RuntimeError: Raised on unexpected parse/runtime failures.
+            FlexAdapterConnectionError: Raised for network/HTTP transport failures.
+            FlexAdapterTimeoutError: Raised when report generation did not become ready in time.
+            FlexRequestError: Raised for request-phase contract failures.
+            FlexStatementError: Raised on statement-phase failures.
         """
 
         normalized_query_id = query_id.strip()
@@ -235,12 +246,12 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 response_root,
                 fallback_message="request rejected by upstream",
             )
-            raise ValueError(f"Flex request rejected: code={error_code}, message={error_message}")
+            self._adapter_raise_request_error(error_code=error_code, error_message=error_message)
 
         reference_code = (response_root.findtext("ReferenceCode") or "").strip()
         statement_url = (response_root.findtext("Url") or "").strip()
         if not reference_code:
-            raise ValueError("Flex request response missing ReferenceCode")
+            raise FlexRequestError("Flex request response missing ReferenceCode")
         if not statement_url:
             statement_url = f"{self._base_url}/GetStatement"
         self._adapter_record_stage_event(
@@ -279,9 +290,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             bytes: Downloaded report payload.
 
         Raises:
-            ConnectionError: Raised for transport failures.
-            TimeoutError: Raised when report was not ready after all retries.
-            RuntimeError: Raised for unexpected upstream response states.
+            FlexAdapterConnectionError: Raised for transport failures.
+            FlexAdapterTimeoutError: Raised when report was not ready after all retries.
+            FlexStatementError: Raised for unexpected upstream response states.
         """
 
         query_parameters = {"q": reference_code, "t": self._token, "v": self._api_version}
@@ -321,6 +332,14 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             error_code, error_message = self._adapter_extract_response_error(poll_root)
             if error_code in self._RETRYABLE_POLL_ERROR_CODES:
                 pending_retry_delay_seconds = self._adapter_retry_delay_seconds_for_error(error_code)
+                retryable_error = FlexRetryableStatementError(
+                    message=(
+                        "Flex statement polling retryable: "
+                        f"code={error_code or 'UNKNOWN'}, message={error_message}"
+                    ),
+                    error_code=error_code,
+                    retry_after_seconds=float(pending_retry_delay_seconds),
+                )
                 self._adapter_record_stage_event(
                     stage_timeline=stage_timeline,
                     stage="download",
@@ -330,13 +349,17 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                         "error_code": error_code,
                         "error_message": error_message,
                         "retry_after_seconds": pending_retry_delay_seconds,
+                        "error_type": type(retryable_error).__name__,
                     },
                 )
                 continue
 
-            raise RuntimeError(f"Flex statement polling failed: code={error_code or 'UNKNOWN'}, message={error_message}")
+            raise FlexStatementError(
+                f"Flex statement polling failed: code={error_code or 'UNKNOWN'}, message={error_message}",
+                error_code=error_code,
+            )
 
-        raise TimeoutError("Flex statement polling timed out after all retries")
+        raise FlexAdapterTimeoutError("Flex statement polling timed out after all retries")
 
     def _adapter_http_get(self, url: str, query_parameters: dict[str, str]) -> bytes:
         """Execute one HTTP GET and return response payload bytes.
@@ -349,8 +372,8 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             bytes: HTTP response payload.
 
         Raises:
-            ConnectionError: Raised for network and non-success HTTP status.
-            RuntimeError: Raised for unexpected client errors.
+            FlexAdapterConnectionError: Raised for network and non-success HTTP status.
+            FlexAdapterTimeoutError: Raised for timeout conditions.
         """
 
         full_url = f"{url}?{urlencode(query_parameters)}"
@@ -360,16 +383,16 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 status_code = int(response.getcode() or 200)
                 payload = response.read()
         except TimeoutError as error:
-            raise TimeoutError("Flex transport request timed out") from error
+            raise FlexAdapterTimeoutError("Flex transport request timed out") from error
         except HTTPError as error:
-            raise ConnectionError(f"Flex upstream returned HTTP {error.code}") from error
+            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.code}") from error
         except URLError as error:
             if isinstance(error.reason, (TimeoutError, socket.timeout)):
-                raise TimeoutError("Flex transport request timed out") from error
-            raise ConnectionError("Flex transport request failed") from error
+                raise FlexAdapterTimeoutError("Flex transport request timed out") from error
+            raise FlexAdapterConnectionError("Flex transport request failed") from error
 
         if status_code >= 400:
-            raise ConnectionError(f"Flex upstream returned HTTP {status_code}")
+            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {status_code}")
 
         return bytes(payload)
 
@@ -446,6 +469,22 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             RuntimeError: Raised when jitter provider returns out-of-range value.
         """
 
+        return self.adapter_calculate_retry_wait_seconds(retry_index=retry_index)
+
+    def adapter_calculate_retry_wait_seconds(self, retry_index: int) -> float:
+        """Calculate exponential retry wait with cap and jitter.
+
+        Args:
+            retry_index: Zero-based retry attempt index.
+
+        Returns:
+            float: Computed wait seconds for the poll attempt.
+
+        Raises:
+            ValueError: Raised when retry index is negative.
+            RuntimeError: Raised when jitter provider returns out-of-range value.
+        """
+
         if retry_index < 0:
             raise ValueError("retry_index must be >= 0")
 
@@ -474,13 +513,39 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             xml.etree.ElementTree.Element: Parsed root node.
 
         Raises:
-            RuntimeError: Raised when payload is not valid XML.
+            FlexRequestError: Raised when request payload is not valid XML.
+            FlexStatementError: Raised when statement payload is not valid XML.
         """
 
         try:
             return element_tree.fromstring(payload)
         except element_tree.ParseError as error:
-            raise RuntimeError(f"Flex XML parse failed for context={context_label}") from error
+            if context_label == "send_request":
+                raise FlexRequestError(f"Flex XML parse failed for context={context_label}") from error
+            raise FlexStatementError(f"Flex XML parse failed for context={context_label}") from error
+
+    def _adapter_raise_request_error(self, error_code: str, error_message: str) -> None:
+        """Raise typed request-phase exception from parsed upstream error payload.
+
+        Args:
+            error_code: Upstream Flex error code.
+            error_message: Normalized upstream error message.
+
+        Returns:
+            None: Always raises a typed exception.
+
+        Raises:
+            FlexTokenExpiredError: Raised for `1012` expired token responses.
+            FlexTokenInvalidError: Raised for `1015` invalid token responses.
+            FlexRequestError: Raised for all other request-phase upstream rejections.
+        """
+
+        message = f"Flex request rejected: code={error_code}, message={error_message}"
+        if error_code == self._TOKEN_EXPIRED_ERROR_CODE:
+            raise FlexTokenExpiredError(message, error_code=error_code)
+        if error_code == self._TOKEN_INVALID_ERROR_CODE:
+            raise FlexTokenInvalidError(message, error_code=error_code)
+        raise FlexRequestError(message, error_code=error_code)
 
     def _adapter_try_parse_xml(self, payload: bytes) -> element_tree.Element | None:
         """Best-effort XML parse helper for polling responses.

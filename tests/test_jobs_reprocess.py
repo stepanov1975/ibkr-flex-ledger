@@ -10,6 +10,7 @@ from app.jobs.reprocess_orchestrator import (
     CanonicalReprocessOrchestrator,
     CanonicalReprocessOrchestratorConfig,
 )
+from app.adapters import FlexStatementError
 from app.mapping.service import RawRecordForMapping
 
 
@@ -440,3 +441,40 @@ def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query(
 
     assert execution_result.status == "success"
     assert raw_read_repository.captured_scope == ("U_TEST", "2026-02-12", "query-override")
+
+def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code() -> None:
+    """Map typed statement-phase failures to deterministic reprocess error code.
+
+    Returns:
+        None: Assertions validate reprocess error classification.
+
+    Raises:
+        AssertionError: Raised when typed statement failures are not mapped correctly.
+    """
+
+    raw_read_repository = _RawReadRepositoryStub(rows=[])
+
+    def _raise_typed_statement_error(account_id: str, period_key: str, flex_query_id: str):
+        _ = (account_id, period_key, flex_query_id)
+        raise FlexStatementError("statement failed", error_code="1017")
+
+    raw_read_repository.db_raw_record_list_for_period = _raise_typed_statement_error
+    canonical_repository = _CanonicalPersistRepositoryStub()
+    ingestion_repository = _IngestionRepositoryStub()
+
+    orchestrator = CanonicalReprocessOrchestrator(
+        raw_read_repository=raw_read_repository,
+        canonical_persistence_repository=canonical_repository,
+        config=CanonicalReprocessOrchestratorConfig(
+            account_id="U_TEST",
+            period_key="2026-02-14",
+            flex_query_id="query",
+            functional_currency="USD",
+        ),
+        ingestion_repository=ingestion_repository,
+    )
+
+    result = orchestrator.job_execute(job_name="reprocess_run")
+
+    assert result.status == "failed"
+    assert ingestion_repository.finalize_calls[0]["error_code"] == "REPROCESS_STATEMENT_ERROR"

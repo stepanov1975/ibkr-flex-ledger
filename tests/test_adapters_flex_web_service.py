@@ -6,6 +6,12 @@ from urllib.error import URLError
 
 import pytest
 
+from app.adapters import (
+    FlexAdapterTimeoutError,
+    FlexRequestError,
+    FlexStatementError,
+    FlexTokenExpiredError,
+)
 from app.adapters.flex_web_service import FlexWebServiceAdapter
 import app.adapters.flex_web_service as flex_module
 
@@ -31,7 +37,7 @@ def test_adapters_flex_http_timeout_reason_raises_timeout_error(monkeypatch: pyt
 
     monkeypatch.setattr(flex_module, "urlopen", _raise_timeout)
 
-    with pytest.raises(TimeoutError, match="timed out"):
+    with pytest.raises(FlexAdapterTimeoutError, match="timed out"):
         adapter.adapter_fetch_report(query_id="query-id")
 
 
@@ -162,7 +168,78 @@ def test_adapters_flex_request_known_error_code_uses_fallback_message(monkeypatc
 
     monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
 
-    with pytest.raises(ValueError, match=r"code=1012, message=Token has expired\."):
+    with pytest.raises(FlexTokenExpiredError, match=r"code=1012, message=Token has expired\."):
+        adapter.adapter_fetch_report(query_id="query-id")
+
+
+def test_adapters_flex_request_unknown_failure_raises_typed_request_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise typed request error for non-token SendRequest rejection.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions validate typed request exception behavior.
+
+    Raises:
+        AssertionError: Raised when request rejection is not mapped to typed request error.
+    """
+
+    adapter = FlexWebServiceAdapter(token="token")
+    request_failed_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1014</ErrorCode>"
+        b"<ErrorMessage>Query invalid</ErrorMessage></FlexStatementResponse>"
+    )
+
+    def _fake_http_get(url: str, query_parameters: dict[str, str]) -> bytes:
+        _ = (url, query_parameters)
+        return request_failed_payload
+
+    monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
+
+    with pytest.raises(FlexRequestError, match=r"code=1014, message=Query invalid"):
+        adapter.adapter_fetch_report(query_id="query-id")
+
+
+def test_adapters_flex_poll_non_retryable_error_raises_typed_statement_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise typed statement error when polling returns non-retryable failure code.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions validate typed statement exception behavior.
+
+    Raises:
+        AssertionError: Raised when non-retryable poll failures are not typed.
+    """
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=0,
+        retry_attempts=1,
+        retry_backoff_base_seconds=0,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
+    )
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    poll_failed_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1014</ErrorCode>"
+        b"<ErrorMessage>Invalid query</ErrorMessage></FlexStatementResponse>"
+    )
+    payload_sequence = [request_success_payload, poll_failed_payload]
+
+    def _fake_http_get(url: str, query_parameters: dict[str, str]) -> bytes:
+        _ = (url, query_parameters)
+        return payload_sequence.pop(0)
+
+    monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
+
+    with pytest.raises(FlexStatementError, match=r"code=1014, message=Invalid query"):
         adapter.adapter_fetch_report(query_id="query-id")
 
 
@@ -189,9 +266,9 @@ def test_adapters_flex_retry_wait_uses_exponential_backoff_with_cap_and_jitter()
         random_unit_interval_provider=lambda: 0.0,
     )
 
-    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(4.0)
-    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=1) == pytest.approx(8.0)
-    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=2) == pytest.approx(10.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(4.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=1) == pytest.approx(8.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=2) == pytest.approx(10.0)
 
 
 def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
@@ -217,4 +294,4 @@ def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
         random_unit_interval_provider=lambda: 0.0,
     )
 
-    assert adapter._adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)

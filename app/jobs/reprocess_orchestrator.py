@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import traceback
 
+from app.adapters import FlexAdapterConnectionError, FlexAdapterTimeoutError, FlexRequestError, FlexStatementError
 from app.db import CanonicalPersistenceRepositoryPort, IngestionRunRepositoryPort, RawRecordReadRepositoryPort
 from app.domain import domain_build_stage_event
 
@@ -210,7 +211,15 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
         except (TimeoutError, ConnectionError, ValueError, RuntimeError) as error:
             error_code = "REPROCESS_UNEXPECTED_ERROR"
-            if isinstance(error, TimeoutError):
+            if isinstance(error, FlexRequestError):
+                error_code = "REPROCESS_REQUEST_ERROR"
+            elif isinstance(error, FlexStatementError):
+                error_code = "REPROCESS_STATEMENT_ERROR"
+            elif isinstance(error, FlexAdapterTimeoutError):
+                error_code = "REPROCESS_TIMEOUT_ERROR"
+            elif isinstance(error, FlexAdapterConnectionError):
+                error_code = "REPROCESS_CONNECTION_ERROR"
+            elif isinstance(error, TimeoutError):
                 error_code = "REPROCESS_TIMEOUT_ERROR"
             elif isinstance(error, ConnectionError):
                 error_code = "REPROCESS_CONNECTION_ERROR"
