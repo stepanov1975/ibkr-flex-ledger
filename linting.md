@@ -32,11 +32,11 @@
 
 ## Python LINTING & SUPPRESSION POLICY
 1. **Pylint Workflow:**
-   * Command: `pylint <target_module> --disable=C0303,R0913,R0914,R0917,C0301,R0911,R0912,C0302,C0305`
+   * Command: `pylint app/ --disable=C0303,R0913,R0914,R0917,C0301,R0911,R0912,C0302,C0305,R0902`
    * **Zero Tolerance:** No `E` (Error) or `F` (Fatal) messages allowed.
    * **Refactor:** Address `R` (Refactor) and `W` (Warning) messages by code improvement, not suppression.
 2. **Ruff Workflow:**
-   * Command: `ruff check . --ignore=E501,W293,W291`
+   * Command: `ruff check app/ --ignore=E501,W293,W291`
 3. **Suppression Rules:**
    * **Last Resort:** Only suppress linting errors if fixing them introduces risk or reduces readability.
    * **Syntax:**

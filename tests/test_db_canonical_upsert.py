@@ -18,6 +18,9 @@ from app.db.canonical_persistence import (
     CanonicalTradeFillUpsertRequest,
     SQLAlchemyCanonicalPersistenceService,
 )
+from app.config import config_load_settings
+from app.db.raw_persistence import SQLAlchemyRawPersistenceService
+from app.db.interfaces import RawArtifactPersistRequest, RawArtifactReference, RawRecordPersistRequest
 
 
 def _upsert_build_database_url(base_url: str, database_name: str) -> str:
@@ -310,6 +313,85 @@ def test_db_canonical_trade_fill_upsert_preserves_origin_run() -> None:
         else:
             os.environ["DATABASE_URL"] = previous_database_url
         _upsert_drop_database(admin_url=admin_url, database_name=database_name)
+
+
+def test_db_raw_record_insert_many_returns_correct_counts() -> None:
+    """Persist raw rows in batch and report inserted versus deduplicated counts.
+
+    Returns:
+        None: Assertions validate raw row batch persistence contract.
+
+    Raises:
+        AssertionError: Raised when insert or dedupe counters are incorrect.
+    """
+
+    settings = config_load_settings()
+    engine = db_create_engine(database_url=settings.database_url)
+    raw_persistence_service = SQLAlchemyRawPersistenceService(engine=engine)
+    ingestion_run_id = str(uuid.uuid4())
+    account_id = f"U_TEST_{uuid.uuid4().hex[:8]}"
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run ("
+                    "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                    "started_at_utc, ended_at_utc"
+                    ") VALUES ("
+                    ":run_id, :account_id, 'manual', 'success', '2026-02-20', 'query', now(), now()"
+                    ")"
+                ),
+                {"run_id": ingestion_run_id, "account_id": account_id},
+            )
+
+        artifact_result = raw_persistence_service.db_raw_artifact_upsert(
+            RawArtifactPersistRequest(
+                ingestion_run_id=ingestion_run_id,
+                reference=RawArtifactReference(
+                    account_id=account_id,
+                    period_key="2026-02-20",
+                    flex_query_id="query",
+                    payload_sha256=f"sha256-{uuid.uuid4().hex}",
+                    report_date_local=None,
+                ),
+                source_payload=b"payload",
+            )
+        )
+
+        insert_requests = [
+            RawRecordPersistRequest(
+                ingestion_run_id=ingestion_run_id,
+                raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                artifact_reference=artifact_result.artifact.reference,
+                report_date_local=None,
+                section_name="Trades",
+                source_row_ref="Trades:Trade:transactionID=1",
+                source_payload={"transactionID": "1"},
+            ),
+            RawRecordPersistRequest(
+                ingestion_run_id=ingestion_run_id,
+                raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                artifact_reference=artifact_result.artifact.reference,
+                report_date_local=None,
+                section_name="Trades",
+                source_row_ref="Trades:Trade:transactionID=2",
+                source_payload={"transactionID": "2"},
+            ),
+        ]
+
+        first_insert_result = raw_persistence_service.db_raw_record_insert_many(insert_requests)
+        second_insert_result = raw_persistence_service.db_raw_record_insert_many(insert_requests)
+
+        assert first_insert_result.inserted_count == 2
+        assert first_insert_result.deduplicated_count == 0
+        assert second_insert_result.inserted_count == 0
+        assert second_insert_result.deduplicated_count == 2
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM raw_record WHERE ingestion_run_id = :run_id"), {"run_id": ingestion_run_id})
+            connection.execute(text("DELETE FROM raw_artifact WHERE ingestion_run_id = :run_id"), {"run_id": ingestion_run_id})
+            connection.execute(text("DELETE FROM ingestion_run WHERE ingestion_run_id = :run_id"), {"run_id": ingestion_run_id})
 
 
 def test_db_canonical_cashflow_upsert_marks_correction_on_changed_amount() -> None:

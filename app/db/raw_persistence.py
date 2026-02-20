@@ -133,7 +133,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
 
         try:
             with self._engine.begin() as connection:
-                inserted_rows = connection.execute(
+                insert_result = connection.execute(
                     text(
                         "INSERT INTO raw_record ("
                         "raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, "
@@ -141,13 +141,12 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                         ") VALUES ("
                         ":raw_artifact_id, :ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, "
                         ":report_date_local, :section_name, :source_row_ref, CAST(:source_payload AS jsonb)"
-                        ") ON CONFLICT ON CONSTRAINT uq_raw_record_artifact_section_source_ref DO NOTHING "
-                        "RETURNING raw_record_id"
+                        ") ON CONFLICT ON CONSTRAINT uq_raw_record_artifact_section_source_ref DO NOTHING"
                     ),
                     parameter_rows,
-                ).mappings().all()
+                )
 
-                inserted_count = len(inserted_rows)
+                inserted_count = max(insert_result.rowcount, 0)
                 deduplicated_count = len(parameter_rows) - inserted_count
                 return RawRecordPersistResult(inserted_count=inserted_count, deduplicated_count=deduplicated_count)
         except SQLAlchemyError as error:
