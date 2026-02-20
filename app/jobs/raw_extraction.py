@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 import xml.etree.ElementTree as element_tree
+
+from app.domain.flex_parsing import domain_flex_parse_local_date
 
 from .flex_payload_validation import job_flex_parse_payload_with_statements
 
@@ -183,24 +185,7 @@ def _job_raw_try_parse_local_date(value: str) -> date | None:
     Raises:
         RuntimeError: This helper does not raise runtime errors.
     """
-
-    normalized_value = value.strip()
-    if not normalized_value:
-        return None
-
-    candidate_values = [normalized_value]
-    for separator in (";", "T", " "):
-        if separator in normalized_value:
-            candidate_values.append(normalized_value.split(separator, maxsplit=1)[0])
-
-    for candidate_value in candidate_values:
-        supported_formats = ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d")
-        for date_format in supported_formats:
-            try:
-                return datetime.strptime(candidate_value, date_format).date()
-            except ValueError:
-                continue
-    return None
+    return domain_flex_parse_local_date(value)
 
 
 def _job_raw_build_source_row_ref(

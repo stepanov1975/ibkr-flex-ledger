@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from datetime import date, datetime, timezone
+from datetime import date
 
+from app.domain.flex_parsing import domain_flex_parse_local_date, domain_flex_parse_timestamp_to_utc_iso
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
     CanonicalCorpActionUpsertRequest,
@@ -487,61 +488,7 @@ class CanonicalMappingService:
         Raises:
             RuntimeError: This helper does not raise runtime errors.
         """
-
-        normalized_value = value.strip()
-        if not normalized_value:
-            return None
-
-        candidate_values: list[str] = [normalized_value]
-        if normalized_value.endswith("Z"):
-            candidate_values.append(f"{normalized_value[:-1]}+00:00")
-        if ";" in normalized_value:
-            date_part, time_part = normalized_value.split(";", maxsplit=1)
-            candidate_values.append(f"{date_part}T{time_part}")
-        if "," in normalized_value:
-            date_part, time_part = normalized_value.split(",", maxsplit=1)
-            candidate_values.append(f"{date_part}T{time_part.strip()}")
-
-        seen_values: set[str] = set()
-        unique_candidates: list[str] = []
-        for candidate in candidate_values:
-            if candidate in seen_values:
-                continue
-            seen_values.add(candidate)
-            unique_candidates.append(candidate)
-
-        for candidate in unique_candidates:
-            try:
-                parsed_value = datetime.fromisoformat(candidate)
-            except ValueError:
-                continue
-            return self._mapping_normalize_timestamp_to_utc_iso(parsed_value)
-
-        for supported_format in ("%Y%m%d;%H%M%S", "%Y-%m-%d,%H:%M:%S"):
-            try:
-                parsed_value = datetime.strptime(normalized_value, supported_format)
-            except ValueError:
-                continue
-            return self._mapping_normalize_timestamp_to_utc_iso(parsed_value)
-
-        return None
-
-    def _mapping_normalize_timestamp_to_utc_iso(self, value: datetime) -> str:
-        """Normalize datetime value to deterministic UTC ISO-8601 string.
-
-        Args:
-            value: Parsed timestamp value.
-
-        Returns:
-            str: UTC timestamp in ISO-8601 format.
-
-        Raises:
-            RuntimeError: This helper does not raise runtime errors.
-        """
-
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc).isoformat()
-        return value.astimezone(timezone.utc).isoformat()
+        return domain_flex_parse_timestamp_to_utc_iso(value)
 
     def _mapping_resolve_report_date(self, raw_record: RawRecordForMapping, payload: dict[str, object]) -> str:
         """Resolve report date in deterministic YYYY-MM-DD format.
@@ -586,42 +533,7 @@ class CanonicalMappingService:
         Raises:
             RuntimeError: This helper does not raise runtime errors.
         """
-
-        normalized_value = value.strip()
-        if not normalized_value:
-            return None
-
-        candidate_values: list[str] = [normalized_value]
-        for separator in (";", "T", " "):
-            if separator in normalized_value:
-                candidate_values.append(normalized_value.split(separator, maxsplit=1)[0])
-
-        seen_values: set[str] = set()
-        unique_candidates: list[str] = []
-        for candidate in candidate_values:
-            if candidate in seen_values:
-                continue
-            seen_values.add(candidate)
-            unique_candidates.append(candidate)
-
-        for candidate in unique_candidates:
-            try:
-                return date.fromisoformat(candidate)
-            except ValueError:
-                pass
-
-            try:
-                return datetime.fromisoformat(candidate).date()
-            except ValueError:
-                pass
-
-            for supported_format in ("%Y/%m/%d", "%Y-%m-%d", "%Y%m%d"):
-                try:
-                    return datetime.strptime(candidate, supported_format).date()
-                except ValueError:
-                    continue
-
-        return None
+        return domain_flex_parse_local_date(value)
 
     def _mapping_required_value(self, payload: dict[str, object], key: str, raw_record: RawRecordForMapping) -> str:
         """Extract required string value from source payload.
