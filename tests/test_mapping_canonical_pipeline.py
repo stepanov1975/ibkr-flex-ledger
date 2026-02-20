@@ -359,3 +359,194 @@ def test_mapping_build_canonical_batch_fails_when_trade_timestamp_missing() -> N
             functional_currency="USD",
             raw_records=raw_records,
         )
+
+
+def test_mapping_build_canonical_batch_fails_when_required_trade_numeric_invalid() -> None:
+    """Fail fast when required trade numeric field contains non-decimal text.
+
+    Returns:
+        None: Assertions validate deterministic numeric contract errors.
+
+    Raises:
+        AssertionError: Raised when invalid numeric value is accepted.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1005",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1005",
+                "transactionID": "1005",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "N/A",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+                "dateTime": "2026-02-14T10:00:00+00:00",
+            },
+        )
+    ]
+
+    with pytest.raises(MappingContractViolationError, match="invalid decimal field quantity"):
+        mapping_build_canonical_batch(
+            account_id="U_TEST",
+            functional_currency="USD",
+            raw_records=raw_records,
+        )
+
+
+def test_mapping_build_canonical_batch_fails_when_trade_timestamp_invalid() -> None:
+    """Fail fast when trade timestamp uses unsupported datetime format.
+
+    Returns:
+        None: Assertions validate deterministic timestamp contract errors.
+
+    Raises:
+        AssertionError: Raised when malformed timestamp value is accepted.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1006",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1006",
+                "transactionID": "1006",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+                "dateTime": "14-02-2026 10:00:00",
+            },
+        )
+    ]
+
+    with pytest.raises(MappingContractViolationError, match="invalid timestamp field dateTime"):
+        mapping_build_canonical_batch(
+            account_id="U_TEST",
+            functional_currency="USD",
+            raw_records=raw_records,
+        )
+
+
+def test_mapping_build_canonical_batch_normalizes_trade_timestamp_to_utc() -> None:
+    """Normalize trade timestamp with non-UTC offset into UTC ISO-8601.
+
+    Returns:
+        None: Assertions validate deterministic UTC timestamp normalization.
+
+    Raises:
+        AssertionError: Raised when timestamp is not normalized to UTC.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="Trades",
+            source_row_ref="Trades:Trade:transactionID=1007",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "ibExecID": "EXEC-1007",
+                "transactionID": "1007",
+                "conid": "265598",
+                "buySell": "BUY",
+                "quantity": "1",
+                "tradePrice": "101.00",
+                "currency": "USD",
+                "reportDate": "2026-02-14",
+                "dateTime": "2026-02-14T12:00:00+02:00",
+            },
+        )
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert len(mapped_batch.trade_fill_requests) == 1
+    assert mapped_batch.trade_fill_requests[0].trade_timestamp_utc == "2026-02-14T10:00:00+00:00"
+
+
+def test_mapping_build_canonical_batch_fails_when_optional_cashflow_numeric_invalid() -> None:
+    """Fail fast when optional cashflow numeric field is present but malformed.
+
+    Returns:
+        None: Assertions validate deterministic numeric contract errors.
+
+    Raises:
+        AssertionError: Raised when malformed optional numeric is accepted.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2004",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2004",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "withholdingTax": "invalid",
+                "reportDate": "2026-02-14",
+            },
+        )
+    ]
+
+    with pytest.raises(MappingContractViolationError, match="invalid decimal field withholdingTax"):
+        mapping_build_canonical_batch(
+            account_id="U_TEST",
+            functional_currency="USD",
+            raw_records=raw_records,
+        )
+
+
+def test_mapping_build_canonical_batch_fails_when_optional_cashflow_timestamp_invalid() -> None:
+    """Fail fast when optional cashflow timestamp is present but malformed.
+
+    Returns:
+        None: Assertions validate deterministic timestamp contract errors.
+
+    Raises:
+        AssertionError: Raised when malformed optional timestamp is accepted.
+    """
+
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=uuid4(),
+            section_name="CashTransactions",
+            source_row_ref="CashTransactions:CashTransaction:transactionID=2005",
+            report_date_local=date(2026, 2, 14),
+            source_payload={
+                "transactionID": "2005",
+                "type": "DIV",
+                "currency": "USD",
+                "amount": "3.50",
+                "reportDate": "2026-02-14",
+                "dateTime": "2026/02/14 10:00:00",
+            },
+        )
+    ]
+
+    with pytest.raises(MappingContractViolationError, match="invalid timestamp field dateTime"):
+        mapping_build_canonical_batch(
+            account_id="U_TEST",
+            functional_currency="USD",
+            raw_records=raw_records,
+        )

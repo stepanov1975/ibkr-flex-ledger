@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timezone
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -200,8 +201,8 @@ class CanonicalMappingService:
         ib_exec_id = self._mapping_required_value(payload, "ibExecID", raw_record)
         conid = self._mapping_required_value(payload, "conid", raw_record)
         side = self._mapping_required_value(payload, "buySell", raw_record).upper()
-        quantity = self._mapping_required_value(payload, "quantity", raw_record)
-        price = self._mapping_required_value(payload, "tradePrice", raw_record)
+        quantity = self._mapping_required_decimal_value(payload, "quantity", raw_record)
+        price = self._mapping_required_decimal_value(payload, "tradePrice", raw_record)
         currency = self._mapping_required_value(payload, "currency", raw_record)
         trade_timestamp_utc = self._mapping_resolve_trade_timestamp(raw_record)
         report_date_local = self._mapping_resolve_report_date(raw_record, payload)
@@ -231,13 +232,13 @@ class CanonicalMappingService:
             side=side,
             quantity=quantity,
             price=price,
-            cost=self._mapping_optional_value(payload, "cost"),
-            commission=self._mapping_optional_value(payload, "ibCommission"),
-            fees=self._mapping_optional_value(payload, "fees"),
-            realized_pnl=self._mapping_optional_value(payload, "fifoPnlRealized"),
-            net_cash=self._mapping_optional_value(payload, "netCash"),
-            net_cash_in_base=self._mapping_optional_value(payload, "netCashInBase"),
-            fx_rate_to_base=self._mapping_optional_value(payload, "fxRateToBase"),
+            cost=self._mapping_optional_decimal_value(payload, "cost", raw_record),
+            commission=self._mapping_optional_decimal_value(payload, "ibCommission", raw_record),
+            fees=self._mapping_optional_decimal_value(payload, "fees", raw_record),
+            realized_pnl=self._mapping_optional_decimal_value(payload, "fifoPnlRealized", raw_record),
+            net_cash=self._mapping_optional_decimal_value(payload, "netCash", raw_record),
+            net_cash_in_base=self._mapping_optional_decimal_value(payload, "netCashInBase", raw_record),
+            fx_rate_to_base=self._mapping_optional_decimal_value(payload, "fxRateToBase", raw_record),
             currency=currency,
             functional_currency=functional_currency,
         )
@@ -266,7 +267,7 @@ class CanonicalMappingService:
         payload = raw_record.source_payload
         transaction_id = self._mapping_required_value(payload, "transactionID", raw_record)
         cash_action = self._mapping_required_value(payload, "type", raw_record)
-        amount = self._mapping_required_value(payload, "amount", raw_record)
+        amount = self._mapping_required_decimal_value(payload, "amount", raw_record)
         currency = self._mapping_required_value(payload, "currency", raw_record)
 
         conid = self._mapping_optional_value(payload, "conid")
@@ -293,13 +294,13 @@ class CanonicalMappingService:
             transaction_id=transaction_id,
             cash_action=cash_action,
             report_date_local=self._mapping_resolve_report_date(raw_record, payload),
-            effective_at_utc=self._mapping_optional_value(payload, "dateTime"),
+            effective_at_utc=self._mapping_optional_timestamp_value(payload, "dateTime", raw_record),
             amount=amount,
-            amount_in_base=self._mapping_optional_value(payload, "amountInBase"),
+            amount_in_base=self._mapping_optional_decimal_value(payload, "amountInBase", raw_record),
             currency=currency,
             functional_currency=functional_currency,
-            withholding_tax=self._mapping_optional_value(payload, "withholdingTax"),
-            fees=self._mapping_optional_value(payload, "fees"),
+            withholding_tax=self._mapping_optional_decimal_value(payload, "withholdingTax", raw_record),
+            fees=self._mapping_optional_decimal_value(payload, "fees", raw_record),
         )
         return instrument_request, cashflow_request
 
@@ -327,7 +328,7 @@ class CanonicalMappingService:
         currency = self._mapping_required_value(payload, "fromCurrency", raw_record)
         report_date_local = self._mapping_resolve_report_date(raw_record, payload)
         transaction_id = self._mapping_optional_value(payload, "transactionID") or raw_record.source_row_ref
-        fx_rate = self._mapping_optional_value(payload, "rate")
+        fx_rate = self._mapping_optional_decimal_value(payload, "rate", raw_record)
 
         return CanonicalFxUpsertRequest(
             account_id=account_id,
@@ -411,7 +412,136 @@ class CanonicalMappingService:
         """
 
         payload = raw_record.source_payload
-        return self._mapping_required_value(payload, "dateTime", raw_record)
+        return self._mapping_required_timestamp_value(payload, "dateTime", raw_record)
+
+    def _mapping_required_timestamp_value(
+        self,
+        payload: dict[str, object],
+        key: str,
+        raw_record: RawRecordForMapping,
+    ) -> str:
+        """Extract required timestamp value and normalize to UTC ISO-8601.
+
+        Args:
+            payload: Source payload object.
+            key: Required key in source payload.
+            raw_record: Raw row metadata for diagnostics.
+
+        Returns:
+            str: Normalized timestamp value in UTC ISO-8601 format.
+
+        Raises:
+            MappingContractViolationError: Raised when timestamp is missing or invalid.
+        """
+
+        value = self._mapping_required_value(payload, key, raw_record)
+        parsed_timestamp = self._mapping_try_parse_timestamp_to_utc(value)
+        if parsed_timestamp is None:
+            raise MappingContractViolationError(
+                "mapping contract violation: invalid timestamp field "
+                f"{key} for {raw_record.section_name} at {raw_record.source_row_ref}: {value}"
+            )
+        return parsed_timestamp
+
+    def _mapping_optional_timestamp_value(
+        self,
+        payload: dict[str, object],
+        key: str,
+        raw_record: RawRecordForMapping,
+    ) -> str | None:
+        """Extract optional timestamp value and normalize to UTC ISO-8601.
+
+        Args:
+            payload: Source payload object.
+            key: Optional key in source payload.
+            raw_record: Raw row metadata for diagnostics.
+
+        Returns:
+            str | None: Normalized timestamp value or None when missing.
+
+        Raises:
+            MappingContractViolationError: Raised when provided timestamp is invalid.
+        """
+
+        value = self._mapping_optional_value(payload, key)
+        if value is None:
+            return None
+
+        parsed_timestamp = self._mapping_try_parse_timestamp_to_utc(value)
+        if parsed_timestamp is None:
+            raise MappingContractViolationError(
+                "mapping contract violation: invalid timestamp field "
+                f"{key} for {raw_record.section_name} at {raw_record.source_row_ref}: {value}"
+            )
+        return parsed_timestamp
+
+    def _mapping_try_parse_timestamp_to_utc(self, value: str) -> str | None:
+        """Try parse known Flex timestamp formats and normalize to UTC ISO-8601.
+
+        Args:
+            value: Candidate timestamp value.
+
+        Returns:
+            str | None: Normalized UTC timestamp when supported, else None.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            return None
+
+        candidate_values: list[str] = [normalized_value]
+        if normalized_value.endswith("Z"):
+            candidate_values.append(f"{normalized_value[:-1]}+00:00")
+        if ";" in normalized_value:
+            date_part, time_part = normalized_value.split(";", maxsplit=1)
+            candidate_values.append(f"{date_part}T{time_part}")
+        if "," in normalized_value:
+            date_part, time_part = normalized_value.split(",", maxsplit=1)
+            candidate_values.append(f"{date_part}T{time_part.strip()}")
+
+        seen_values: set[str] = set()
+        unique_candidates: list[str] = []
+        for candidate in candidate_values:
+            if candidate in seen_values:
+                continue
+            seen_values.add(candidate)
+            unique_candidates.append(candidate)
+
+        for candidate in unique_candidates:
+            try:
+                parsed_value = datetime.fromisoformat(candidate)
+            except ValueError:
+                continue
+            return self._mapping_normalize_timestamp_to_utc_iso(parsed_value)
+
+        for supported_format in ("%Y%m%d;%H%M%S", "%Y-%m-%d,%H:%M:%S"):
+            try:
+                parsed_value = datetime.strptime(normalized_value, supported_format)
+            except ValueError:
+                continue
+            return self._mapping_normalize_timestamp_to_utc_iso(parsed_value)
+
+        return None
+
+    def _mapping_normalize_timestamp_to_utc_iso(self, value: datetime) -> str:
+        """Normalize datetime value to deterministic UTC ISO-8601 string.
+
+        Args:
+            value: Parsed timestamp value.
+
+        Returns:
+            str: UTC timestamp in ISO-8601 format.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).isoformat()
+        return value.astimezone(timezone.utc).isoformat()
 
     def _mapping_resolve_report_date(self, raw_record: RawRecordForMapping, payload: dict[str, object]) -> str:
         """Resolve report date in deterministic YYYY-MM-DD format.
@@ -536,6 +666,85 @@ class CanonicalMappingService:
         if not normalized_value:
             return None
         return normalized_value
+
+    def _mapping_required_decimal_value(
+        self,
+        payload: dict[str, object],
+        key: str,
+        raw_record: RawRecordForMapping,
+    ) -> str:
+        """Extract required decimal-like text value from source payload.
+
+        Args:
+            payload: Source payload object.
+            key: Required key in source payload.
+            raw_record: Raw row metadata for diagnostics.
+
+        Returns:
+            str: Normalized decimal-like text value.
+
+        Raises:
+            MappingContractViolationError: Raised when key is missing or not decimal-like.
+        """
+
+        value = self._mapping_required_value(payload, key, raw_record)
+        self._mapping_validate_decimal_value(value=value, key=key, raw_record=raw_record)
+        return value
+
+    def _mapping_optional_decimal_value(
+        self,
+        payload: dict[str, object],
+        key: str,
+        raw_record: RawRecordForMapping,
+    ) -> str | None:
+        """Extract optional decimal-like text value from source payload.
+
+        Args:
+            payload: Source payload object.
+            key: Optional key in source payload.
+            raw_record: Raw row metadata for diagnostics.
+
+        Returns:
+            str | None: Normalized decimal-like text value or None.
+
+        Raises:
+            MappingContractViolationError: Raised when provided value is not decimal-like.
+        """
+
+        value = self._mapping_optional_value(payload, key)
+        if value is None:
+            return None
+        self._mapping_validate_decimal_value(value=value, key=key, raw_record=raw_record)
+        return value
+
+    def _mapping_validate_decimal_value(self, value: str, key: str, raw_record: RawRecordForMapping) -> None:
+        """Validate that a text value is finite decimal content.
+
+        Args:
+            value: Candidate decimal text value.
+            key: Source payload field key.
+            raw_record: Raw row metadata for diagnostics.
+
+        Returns:
+            None: Validation result is communicated via exceptions.
+
+        Raises:
+            MappingContractViolationError: Raised when decimal value is invalid.
+        """
+
+        try:
+            parsed_value = Decimal(value)
+        except (InvalidOperation, ValueError) as error:
+            raise MappingContractViolationError(
+                "mapping contract violation: invalid decimal field "
+                f"{key} for {raw_record.section_name} at {raw_record.source_row_ref}: {value}"
+            ) from error
+
+        if not parsed_value.is_finite():
+            raise MappingContractViolationError(
+                "mapping contract violation: invalid decimal field "
+                f"{key} for {raw_record.section_name} at {raw_record.source_row_ref}: {value}"
+            )
 
     def _mapping_validate_non_empty_text(self, value: str, field_name: str) -> str:
         """Validate top-level non-empty text values.
