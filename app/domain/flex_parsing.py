@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+_DOMAIN_FLEX_TIMESTAMP_TZ_ABBREVIATION_TO_OFFSET = {
+    "EST": "-0500",
+    "EDT": "-0400",
+}
+
 
 def domain_flex_parse_local_date(value: str) -> date | None:
     """Parse one Flex local date value into `date`.
@@ -78,7 +83,38 @@ def domain_flex_parse_timestamp_to_utc_iso(value: str) -> str | None:
             continue
         return _domain_flex_normalize_timestamp_to_utc_iso(parsed_value)
 
+    timestamp_with_numeric_offset = _domain_flex_replace_ibkr_timezone_abbreviation_with_offset(normalized_value)
+    if timestamp_with_numeric_offset is not None:
+        try:
+            parsed_value = datetime.strptime(timestamp_with_numeric_offset, "%d %B, %Y %I:%M %p %z")
+        except ValueError:
+            return None
+        return _domain_flex_normalize_timestamp_to_utc_iso(parsed_value)
+
     return None
+
+
+def _domain_flex_replace_ibkr_timezone_abbreviation_with_offset(normalized_value: str) -> str | None:
+    """Replace known IBKR timezone abbreviations with numeric UTC offset.
+
+    Args:
+        normalized_value: Timestamp candidate value.
+
+    Returns:
+        str | None: Value with numeric offset when supported, else None.
+
+    Raises:
+        RuntimeError: This helper does not raise runtime errors.
+    """
+
+    if len(normalized_value) < 3:
+        return None
+
+    timezone_abbreviation = normalized_value[-3:]
+    timezone_offset = _DOMAIN_FLEX_TIMESTAMP_TZ_ABBREVIATION_TO_OFFSET.get(timezone_abbreviation)
+    if timezone_offset is None:
+        return None
+    return f"{normalized_value[:-3]}{timezone_offset}"
 
 
 def _domain_flex_build_date_candidates(normalized_value: str) -> list[str]:

@@ -389,3 +389,45 @@ def test_adapters_flex_transport_client_reused_across_request_and_poll(monkeypat
     assert result.payload_bytes == success_payload
     assert client_creation_count == 1
     assert fake_client.get.call_count == 2
+
+
+def test_adapters_flex_request_stage_persists_normalized_send_request_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist normalized broker request timestamp in request-stage timeline details.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions verify request timestamp metadata persistence behavior.
+
+    Raises:
+        AssertionError: Raised when normalized broker request timestamp is missing.
+    """
+
+    request_success_payload = (
+        b"<FlexStatementResponse timestamp=\"20 February, 2026 02:15 PM EST\">"
+        b"<Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    success_payload = b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement /></FlexStatements></FlexQueryResponse>"
+    payload_sequence = [request_success_payload, success_payload]
+
+    def _fake_http_get(url: str, query_parameters: dict[str, str]) -> bytes:
+        _ = (url, query_parameters)
+        return payload_sequence.pop(0)
+
+    adapter = FlexWebServiceAdapter(token="token", initial_wait_seconds=0, retry_attempts=1)
+    monkeypatch.setattr(adapter, "_adapter_http_get", _fake_http_get)
+
+    result = adapter.adapter_fetch_report(query_id="query-id")
+
+    request_completed_event = next(
+        event
+        for event in result.stage_timeline
+        if event.get("stage") == "request" and event.get("status") == "completed"
+    )
+    details = request_completed_event.get("details")
+    assert isinstance(details, dict)
+    assert details["broker_request_at_utc"] == "2026-02-20T19:15:00+00:00"

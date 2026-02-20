@@ -12,6 +12,7 @@ import xml.etree.ElementTree as element_tree
 import httpx
 
 from app.domain import domain_build_stage_event
+from app.domain.flex_parsing import domain_flex_parse_timestamp_to_utc_iso
 
 from .flex_error_codes import (
     FLEX_RETRYABLE_POLL_CODES,
@@ -273,15 +274,19 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         reference_code = (response_root.findtext("ReferenceCode") or "").strip()
         statement_url = (response_root.findtext("Url") or "").strip()
+        broker_request_at_utc = self._adapter_extract_send_request_timestamp_utc(response_root)
         if not reference_code:
             raise FlexRequestError("Flex request response missing ReferenceCode")
         if not statement_url:
             statement_url = f"{self._base_url}/GetStatement"
+        request_details: dict[str, object] = {"run_reference": reference_code}
+        if broker_request_at_utc is not None:
+            request_details["broker_request_at_utc"] = broker_request_at_utc
         self._adapter_record_stage_event(
             stage_timeline=stage_timeline,
             stage="request",
             status="completed",
-            details={"run_reference": reference_code},
+            details=request_details,
         )
 
         self._adapter_record_stage_event(stage_timeline=stage_timeline, stage="poll", status="started")
@@ -590,3 +595,21 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             RuntimeError: This helper does not raise runtime errors.
         """
         stage_timeline.append(domain_build_stage_event(stage=stage, status=status, details=details))
+
+    def _adapter_extract_send_request_timestamp_utc(self, response_root: element_tree.Element) -> str | None:
+        """Extract and normalize `SendRequest` timestamp metadata to UTC ISO-8601.
+
+        Args:
+            response_root: Parsed `SendRequest` response root node.
+
+        Returns:
+            str | None: Normalized broker request timestamp or None when unavailable/unsupported.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        raw_timestamp = (response_root.attrib.get("timestamp") or "").strip()
+        if not raw_timestamp:
+            return None
+        return domain_flex_parse_timestamp_to_utc_iso(raw_timestamp)

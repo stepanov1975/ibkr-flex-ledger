@@ -48,6 +48,8 @@ def test_domain_flex_parse_timestamp_to_utc_iso_normalizes_supported_variants() 
     assert domain_flex_parse_timestamp_to_utc_iso("2026-02-14T12:00:00+02:00") == "2026-02-14T10:00:00+00:00"
     assert domain_flex_parse_timestamp_to_utc_iso("2026-02-14T10:00:00Z") == "2026-02-14T10:00:00+00:00"
     assert domain_flex_parse_timestamp_to_utc_iso("20260214;101500") == "2026-02-14T10:15:00+00:00"
+    assert domain_flex_parse_timestamp_to_utc_iso("20 February, 2026 02:15 PM EST") == "2026-02-20T19:15:00+00:00"
+    assert domain_flex_parse_timestamp_to_utc_iso("20 February, 2026 02:15 PM EDT") == "2026-02-20T18:15:00+00:00"
 
 
 def test_domain_flex_parse_timestamp_to_utc_iso_returns_none_for_invalid_values() -> None:
