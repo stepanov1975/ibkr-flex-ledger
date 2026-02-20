@@ -43,6 +43,54 @@ def test_adapters_flex_http_timeout_reason_raises_timeout_error(monkeypatch: pyt
         adapter.adapter_fetch_report(query_id="query-id")
 
 
+def test_adapters_flex_transport_timeout_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry timeout-only transport failures and succeed when a later attempt returns payload.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None: Assertions validate timeout retry behavior at transport layer.
+
+    Raises:
+        AssertionError: Raised when timeout retries are not executed as expected.
+    """
+
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    success_payload = b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement /></FlexStatements></FlexQueryResponse>"
+
+    request_response = Mock()
+    request_response.raise_for_status.return_value = None
+    request_response.content = request_success_payload
+
+    poll_response = Mock()
+    poll_response.raise_for_status.return_value = None
+    poll_response.content = success_payload
+
+    timeout_error = httpx.TimeoutException("timed out")
+    transport_calls: list[str] = []
+
+    def _fake_get(_self: object, url: str, params: dict[str, str]) -> Mock:
+        _ = params
+        transport_calls.append(url)
+        if len(transport_calls) <= 2:
+            raise timeout_error
+        if len(transport_calls) == 3:
+            return request_response
+        return poll_response
+
+    monkeypatch.setattr(flex_module.httpx.Client, "get", _fake_get)
+
+    adapter = FlexWebServiceAdapter(token="token", initial_wait_seconds=0, retry_attempts=1)
+    result = adapter.adapter_fetch_report(query_id="query-id")
+
+    assert result.payload_bytes == success_payload
+    assert len(transport_calls) == 4
+
+
 def test_adapters_flex_poll_retries_on_throttled_error_code_1018(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retry polling when upstream returns throttled code 1018.
 

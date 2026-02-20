@@ -98,6 +98,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
     """Adapter implementation for IBKR Flex `SendRequest` and `GetStatement` flow."""
 
     _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/httpx)"
+    _TRANSPORT_TIMEOUT_RETRY_ATTEMPTS: Final[int] = 3
 
     def __init__(
         self,
@@ -398,20 +399,25 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             FlexAdapterTimeoutError: Raised for timeout conditions.
         """
 
-        try:
-            response = self._http_client.get(url, params=query_parameters)
-            response.raise_for_status()
-            payload = response.content
-        except httpx.TimeoutException as error:
-            raise FlexAdapterTimeoutError("Flex transport request timed out") from error
-        except httpx.HTTPStatusError as error:
-            raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from error
-        except httpx.RequestError as error:
-            if isinstance(error.__cause__, (TimeoutError, socket.timeout)):
+        for timeout_retry_index in range(self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS):
+            try:
+                response = self._http_client.get(url, params=query_parameters)
+                response.raise_for_status()
+                return bytes(response.content)
+            except httpx.TimeoutException as error:
+                if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
+                    continue
                 raise FlexAdapterTimeoutError("Flex transport request timed out") from error
-            raise FlexAdapterConnectionError("Flex transport request failed") from error
+            except httpx.HTTPStatusError as error:
+                raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from error
+            except httpx.RequestError as error:
+                if isinstance(error.__cause__, (TimeoutError, socket.timeout)):
+                    if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
+                        continue
+                    raise FlexAdapterTimeoutError("Flex transport request timed out") from error
+                raise FlexAdapterConnectionError("Flex transport request failed") from error
 
-        return bytes(payload)
+        raise FlexAdapterTimeoutError("Flex transport request timed out")
 
     def _adapter_poll_payload_is_statement_xml(self, poll_root: element_tree.Element) -> bool:
         """Return whether poll response root contains a Flex statement payload.
