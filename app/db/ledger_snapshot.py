@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
+    LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
     LedgerTradeFillRecord,
     PnlSnapshotDailyRecord,
@@ -209,6 +210,78 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 withholding_tax=None if row["withholding_tax"] is None else str(row["withholding_tax"]),
                 fees=None if row["fees"] is None else str(row["fees"]),
                 functional_currency=row["functional_currency"],
+            )
+            for row in rows
+        ]
+
+    def db_ledger_open_position_valuation_list_for_run(
+        self,
+        account_id: str,
+        ingestion_run_id: str,
+    ) -> list[LedgerOpenPositionValuationRecord]:
+        """List broker OpenPositions valuation rows for one ingestion run.
+
+        Args:
+            account_id: Internal account identifier.
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[LedgerOpenPositionValuationRecord]: Broker valuation rows keyed by instrument.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when database read fails.
+        """
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        normalized_ingestion_run_id = self._db_ledger_validate_uuid_text(ingestion_run_id, "ingestion_run_id")
+
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "WITH parsed AS ("
+                        "SELECT i.instrument_id, rr.raw_record_id, "
+                        "CAST(rr.source_payload->>'position' AS numeric) AS position_qty, "
+                        "CAST(rr.source_payload->>'markPrice' AS numeric) AS mark_price, "
+                        "CAST(rr.source_payload->>'fifoPnlUnrealized' AS numeric) AS broker_unrealized_pnl, "
+                        "CASE "
+                        "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
+                        "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
+                        "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
+                        "END AS report_date_local "
+                        "FROM raw_record rr "
+                        "JOIN instrument i ON i.account_id = rr.account_id AND i.conid = rr.source_payload->>'conid' "
+                        "WHERE rr.account_id = :account_id "
+                        "AND rr.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
+                        "AND rr.section_name = 'OpenPositions' "
+                        "AND COALESCE(rr.source_payload->>'assetCategory', '') = 'STK' "
+                        "AND rr.source_payload ? 'position' "
+                        "AND rr.source_payload ? 'markPrice' "
+                        "AND rr.source_payload ? 'fifoPnlUnrealized'"
+                        "), ranked AS ("
+                        "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local, "
+                        "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
+                        "FROM parsed"
+                        ") "
+                        "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local "
+                        "FROM ranked WHERE row_rank = 1"
+                    ),
+                    {
+                        "account_id": normalized_account_id,
+                        "ingestion_run_id": normalized_ingestion_run_id,
+                    },
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger OpenPositions valuation read failed") from error
+
+        return [
+            LedgerOpenPositionValuationRecord(
+                instrument_id=row["instrument_id"],
+                position_qty=str(row["position_qty"]),
+                mark_price=str(row["mark_price"]),
+                broker_unrealized_pnl=str(row["broker_unrealized_pnl"]),
+                report_date_local=row["report_date_local"],
             )
             for row in rows
         ]

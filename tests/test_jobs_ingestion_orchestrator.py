@@ -256,7 +256,7 @@ class _RawPersistenceStub:
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
 
-class _SnapshotServiceStub:
+class _SnapshotServiceStub:  # pylint: disable=too-few-public-methods
     """Snapshot service stub capturing automatic snapshot execution calls."""
 
     def __init__(self):
@@ -305,6 +305,7 @@ class _SnapshotServiceStub:
                 "report_date_local": "2026-02-20",
                 "snapshot_row_count": 1,
                 "position_lot_row_count": 1,
+                "missing_solid_valuation_count": 0,
             },
         )()
 

@@ -737,6 +737,25 @@ class LedgerCashflowRecord:
 
 
 @dataclass(frozen=True)
+class LedgerOpenPositionValuationRecord:
+    """Typed OpenPositions valuation row used for strict snapshot valuation.
+
+    Attributes:
+        instrument_id: Canonical instrument identifier.
+        position_qty: Broker-reported open position quantity.
+        mark_price: Broker-reported mark price.
+        broker_unrealized_pnl: Broker-reported unrealized PnL.
+        report_date_local: Optional broker report date.
+    """
+
+    instrument_id: UUID
+    position_qty: str
+    mark_price: str
+    broker_unrealized_pnl: str
+    report_date_local: date | None
+
+
+@dataclass(frozen=True)
 class PositionLotUpsertRequest:
     """Input contract for deterministic position-lot persistence.
 
@@ -886,6 +905,25 @@ class LedgerSnapshotRepositoryPort(Protocol):
 
         Returns:
             list[LedgerCashflowRecord]: Deterministically ordered cashflows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when database read fails.
+        """
+
+    def db_ledger_open_position_valuation_list_for_run(
+        self,
+        account_id: str,
+        ingestion_run_id: str,
+    ) -> list[LedgerOpenPositionValuationRecord]:
+        """List broker OpenPositions valuation rows for one ingestion run.
+
+        Args:
+            account_id: Internal account identifier.
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[LedgerOpenPositionValuationRecord]: Broker valuation rows keyed by instrument.
 
         Raises:
             ValueError: Raised when input values are invalid.

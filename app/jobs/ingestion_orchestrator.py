@@ -423,6 +423,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     "report_date_local": snapshot_result.report_date_local,
                     "snapshot_row_count": snapshot_result.snapshot_row_count,
                     "position_lot_row_count": snapshot_result.position_lot_row_count,
+                    "missing_solid_valuation_count": snapshot_result.missing_solid_valuation_count,
                     "snapshot_duration_ms": snapshot_duration_ms,
                 },
             )

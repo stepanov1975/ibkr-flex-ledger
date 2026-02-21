@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from app.db import (
     LedgerCashflowRecord,
+    LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
     LedgerTradeFillRecord,
     PnlSnapshotDailyUpsertRequest,
@@ -28,11 +29,13 @@ class SnapshotBuildResult:
         report_date_local: Local report date used for snapshot rows.
         snapshot_row_count: Number of daily snapshot rows persisted.
         position_lot_row_count: Number of position-lot rows persisted.
+        missing_solid_valuation_count: Number of rows marked missing due absent solid valuation.
     """
 
     report_date_local: str
     snapshot_row_count: int
     position_lot_row_count: int
+    missing_solid_valuation_count: int
 
 
 class StockLedgerSnapshotService:
@@ -90,12 +93,21 @@ class StockLedgerSnapshotService:
             account_id=normalized_account_id,
             through_report_date_local=report_date_local,
         )
+        open_position_valuation_map = self._build_open_position_valuation_map(
+            self._repository.db_ledger_open_position_valuation_list_for_run(
+                account_id=normalized_account_id,
+                ingestion_run_id=ingestion_run_id or "00000000-0000-0000-0000-000000000000",
+            )
+            if ingestion_run_id is not None
+            else []
+        )
 
         trades_by_instrument = self._group_trades_by_instrument(trade_rows)
         cashflows_by_instrument = self._group_cashflows_by_instrument(cashflow_rows)
 
         snapshot_requests: list[PnlSnapshotDailyUpsertRequest] = []
         position_lot_requests: list[PositionLotUpsertRequest] = []
+        missing_solid_valuation_count = 0
 
         for instrument_id, instrument_trades in trades_by_instrument.items():
             last_trade_price = Decimal(instrument_trades[-1].price)
@@ -130,7 +142,26 @@ class StockLedgerSnapshotService:
             trade_fee_total = sum((self._trade_fee_total(trade) for trade in instrument_trades), Decimal("0"))
             total_fee_impact = trade_fee_total + cashflow_fees_total
             realized_pnl = fifo_result.realized_pnl - cashflow_fees_total - withholding_tax_total
-            unrealized_pnl = fifo_result.unrealized_pnl
+            valuation_record = open_position_valuation_map.get(instrument_id)
+            has_open_position = fifo_result.position_quantity != Decimal("0")
+            missing_solid_valuation = False
+            valuation_source = "solid_no_open_position"
+
+            if has_open_position:
+                if valuation_record is None:
+                    missing_solid_valuation = True
+                    valuation_source = "missing_solid_broker_openpositions"
+                    unrealized_pnl = Decimal("0")
+                elif Decimal(valuation_record.position_qty) != fifo_result.position_quantity:
+                    missing_solid_valuation = True
+                    valuation_source = "missing_solid_position_mismatch"
+                    unrealized_pnl = Decimal("0")
+                else:
+                    valuation_source = "openpositions_fifo_unrealized"
+                    unrealized_pnl = Decimal(valuation_record.broker_unrealized_pnl)
+            else:
+                unrealized_pnl = Decimal("0")
+
             total_pnl = realized_pnl + unrealized_pnl
 
             snapshot_requests.append(
@@ -146,12 +177,15 @@ class StockLedgerSnapshotService:
                     fees=str(total_fee_impact),
                     withholding_tax=str(withholding_tax_total),
                     currency=instrument_trades[-1].functional_currency,
-                    provisional=False,
-                    valuation_source="trade_price_fallback",
+                    provisional=missing_solid_valuation,
+                    valuation_source=valuation_source,
                     fx_source="event_fx_fallback",
                     ingestion_run_id=ingestion_run_id,
                 )
             )
+
+            if missing_solid_valuation:
+                missing_solid_valuation_count += 1
 
             for open_lot in fifo_result.open_lots:
                 position_lot_requests.append(
@@ -182,7 +216,26 @@ class StockLedgerSnapshotService:
             report_date_local=report_date_local,
             snapshot_row_count=len(snapshot_requests),
             position_lot_row_count=len(position_lot_requests),
+            missing_solid_valuation_count=missing_solid_valuation_count,
         )
+
+    def _build_open_position_valuation_map(
+        self,
+        rows: list[LedgerOpenPositionValuationRecord],
+    ) -> dict[str, LedgerOpenPositionValuationRecord]:
+        """Build instrument-keyed map for broker OpenPositions valuation rows.
+
+        Args:
+            rows: Broker OpenPositions valuation rows.
+
+        Returns:
+            dict[str, LedgerOpenPositionValuationRecord]: Valuation rows keyed by instrument id.
+
+        Raises:
+            RuntimeError: This helper does not raise runtime errors.
+        """
+
+        return {str(row.instrument_id): row for row in rows}
 
     def _group_trades_by_instrument(self, trade_rows: list[LedgerTradeFillRecord]) -> dict[str, list[LedgerTradeFillRecord]]:
         """Group trade-fill rows by instrument identifier.
