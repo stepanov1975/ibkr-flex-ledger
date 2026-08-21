@@ -119,6 +119,7 @@ class _ReplayReadConnection:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
         self.executed_queries: list[str] = []
+        self.executed_parameters: list[object] = []
 
     def __enter__(self) -> _ReplayReadConnection:
         return self
@@ -133,8 +134,8 @@ class _ReplayReadConnection:
         return False
 
     def execute(self, statement: object, parameters: object) -> _ReplayReadResult:
-        _ = parameters
         self.executed_queries.append(str(statement))
+        self.executed_parameters.append(parameters)
         return _ReplayReadResult(self._rows)
 
 
@@ -223,10 +224,18 @@ def test_replay_candidate_query_returns_successful_artifacts_in_source_order() -
         ),
     ]
     query = connection.executed_queries[0]
-    assert "completed_ingestion_run_id" in query
-    assert "completion.status = 'success'" in query
-    assert "owner.status = 'success'" in query
-    assert "section_name = 'OpenPositions'" in query
+    assert "JOIN ingestion_run owner ON owner.ingestion_run_id = artifact.ingestion_run_id" in query
+    assert "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id = artifact.completed_ingestion_run_id" in query
+    assert "artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success'" in query
+    assert "artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success'" in query
+    assert "position_row.raw_artifact_id = artifact.raw_artifact_id" in query
+    assert "position_row.section_name = 'OpenPositions'" in query
+    assert "ORDER BY artifact.report_date_local ASC, artifact.created_at_utc ASC, artifact.raw_artifact_id ASC" in query
+    assert connection.executed_parameters == [{
+        "account_id": "U1",
+        "period_key": "2026-02-20",
+        "flex_query_id": "query",
+    }]
 
 
 def test_batch_instrument_upsert_preserves_optional_metadata_when_later_request_omits_it() -> None:

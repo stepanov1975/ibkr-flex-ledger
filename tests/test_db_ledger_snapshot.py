@@ -59,6 +59,25 @@ class _EngineStub:
         return self.connection
 
 
+def _assert_unsupported_snapshot_scope(query: str, parameters: object) -> None:
+    """Assert the account/period/query cleanup boundary passed to SQL."""
+
+    assert "WITH scoped_owner_runs AS (" in query
+    assert "SELECT DISTINCT artifact.ingestion_run_id FROM raw_artifact artifact" in query
+    assert "artifact.account_id = :account_id" in query
+    assert "artifact.period_key = :period_key" in query
+    assert "artifact.flex_query_id = :flex_query_id" in query
+    assert "snapshot.account_id = :account_id" in query
+    assert "snapshot.ingestion_run_id IN (SELECT ingestion_run_id FROM scoped_owner_runs)" in query
+    assert "NOT (snapshot.report_date_local = ANY(CAST(:supported_report_dates AS date[])))" in query
+    assert parameters == {
+        "account_id": "U1",
+        "period_key": "2026-02-20",
+        "flex_query_id": "query",
+        "supported_report_dates": ["2026-02-19"],
+    }
+
+
 def test_unsupported_snapshot_cleanup_is_account_period_query_scoped() -> None:
     """Discover only unsupported snapshots owned by the requested replay scope."""
 
@@ -76,12 +95,10 @@ def test_unsupported_snapshot_cleanup_is_account_period_query_scoped() -> None:
     )
 
     assert candidates == [SnapshotCleanupCandidate(date(2026, 2, 21), 44)]
-    query = connection.executed_queries[0]
-    assert "raw_artifact" in query
-    assert "account_id = :account_id" in query
-    assert "period_key = :period_key" in query
-    assert "flex_query_id = :flex_query_id" in query
-    assert "supported_report_dates" in query
+    _assert_unsupported_snapshot_scope(
+        connection.executed_queries[0],
+        connection.executed_parameters[0],
+    )
 
 
 def test_unsupported_snapshot_delete_returns_scoped_row_count() -> None:
@@ -98,21 +115,29 @@ def test_unsupported_snapshot_delete_returns_scoped_row_count() -> None:
     )
 
     assert deleted == 44
-    assert "DELETE FROM pnl_snapshot_daily" in connection.executed_queries[0]
+    query = connection.executed_queries[0]
+    assert "DELETE FROM pnl_snapshot_daily snapshot" in query
+    _assert_unsupported_snapshot_scope(query, connection.executed_parameters[0])
 
 
-def test_unsupported_snapshot_cleanup_rejects_empty_supported_dates() -> None:
+@pytest.mark.parametrize("method_name", [
+    "db_pnl_snapshot_daily_unsupported_list",
+    "db_pnl_snapshot_daily_unsupported_delete",
+])
+def test_unsupported_snapshot_cleanup_rejects_empty_supported_dates(method_name: str) -> None:
     """Prevent an upstream selection bug from deleting an entire replay scope."""
 
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(_ConnectionStub()))
+    connection = _ConnectionStub()
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
 
     with pytest.raises(ValueError, match="^supported_report_dates must not be empty$"):
-        repository.db_pnl_snapshot_daily_unsupported_delete(
+        getattr(repository, method_name)(
             account_id="U1",
             period_key="2026-02-20",
             flex_query_id="query",
             supported_report_dates=(),
         )
+    assert connection.executed_queries == []
 
 
 def test_scope_lookup_uses_conid_currency_union_and_normalizes_ids() -> None:
