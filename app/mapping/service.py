@@ -127,20 +127,28 @@ class CanonicalMappingService:
             if section_name == "Trades":
                 if not self._mapping_row_matches_tag(raw_record, expected_row_tag="Trade"):
                     continue
-                payload = raw_record.source_payload
-                # FSN[2026-02-14]: ALWAYS skip Trades rows missing ibExecID before strict trade validation.
-                # Context: IBKR live exports can include non-execution Trades rows that still carry transaction fields. | Symptom: fail-fast blocks full run on missing ibExecID.
-                # Guard: only map trade when ibExecID exists and is non-empty. | Test: test_mapping_build_canonical_batch_skips_trade_rows_without_ib_exec_id
-                ib_exec_id = payload.get("ibExecID")
-                if not isinstance(ib_exec_id, str) or not ib_exec_id.strip():
+                trade_identity = self._mapping_resolve_trade_identity(raw_record)
+                if trade_identity is None:
                     continue
                 instrument_request, trade_request = self._mapping_map_trade_record(
                     account_id=normalized_account_id,
                     functional_currency=normalized_functional_currency,
                     raw_record=raw_record,
+                    trade_identity=trade_identity,
                 )
                 instrument_requests.append(instrument_request)
                 trade_requests.append(trade_request)
+                continue
+
+            if section_name == "OpenPositions":
+                if not self._mapping_row_matches_tag(raw_record, expected_row_tag="OpenPosition"):
+                    continue
+                open_position_instrument_request = self._mapping_map_open_position_instrument(
+                    raw_record=raw_record,
+                    account_id=normalized_account_id,
+                )
+                if open_position_instrument_request is not None:
+                    instrument_requests.append(open_position_instrument_request)
                 continue
 
             if section_name == "CashTransactions":
@@ -236,6 +244,7 @@ class CanonicalMappingService:
         account_id: str,
         functional_currency: str,
         raw_record: RawRecordForMapping,
+        trade_identity: str,
     ) -> tuple[CanonicalInstrumentUpsertRequest, CanonicalTradeFillUpsertRequest]:
         """Map one Trades raw row into instrument and trade requests.
 
@@ -243,6 +252,7 @@ class CanonicalMappingService:
             account_id: Internal account identifier.
             functional_currency: Functional/base currency code.
             raw_record: Raw row payload.
+            trade_identity: Canonical execution identity for the trade.
 
         Returns:
             tuple[CanonicalInstrumentUpsertRequest, CanonicalTradeFillUpsertRequest]: Instrument and event requests.
@@ -252,7 +262,6 @@ class CanonicalMappingService:
         """
 
         payload = raw_record.source_payload
-        ib_exec_id = self._mapping_required_value(payload, "ibExecID", raw_record)
         conid = self._mapping_required_value(payload, "conid", raw_record)
         side = self._mapping_required_value(payload, "buySell", raw_record).upper()
         quantity = self._mapping_required_decimal_value(payload, "quantity", raw_record)
@@ -279,7 +288,7 @@ class CanonicalMappingService:
             instrument_id="00000000-0000-0000-0000-000000000000",
             ingestion_run_id=str(raw_record.ingestion_run_id),
             source_raw_record_id=str(raw_record.raw_record_id),
-            ib_exec_id=ib_exec_id,
+            ib_exec_id=trade_identity,
             transaction_id=self._mapping_optional_value(payload, "transactionID"),
             trade_timestamp_utc=trade_timestamp_utc,
             report_date_local=report_date_local,
@@ -297,6 +306,97 @@ class CanonicalMappingService:
             functional_currency=functional_currency,
         )
         return instrument_request, trade_request
+
+    def _mapping_resolve_trade_identity(
+        self,
+        raw_record: RawRecordForMapping,
+    ) -> str | None:
+        """Resolve one canonical identity for a trade row.
+
+        Args:
+            raw_record: Raw trade row payload.
+
+        Returns:
+            str | None: Execution identity, or None for non-execution rows.
+
+        Raises:
+            MappingContractViolationError: Raised when an execution row lacks identity.
+        """
+
+        payload = raw_record.source_payload
+        ib_exec_id = payload.get("ibExecID")
+        if isinstance(ib_exec_id, str) and ib_exec_id.strip():
+            return ib_exec_id
+        level_of_detail = self._mapping_optional_value(payload, "levelOfDetail")
+        if level_of_detail is None or level_of_detail.upper() != "EXECUTION":
+            return None
+        transaction_id = self._mapping_optional_value(payload, "transactionID")
+        if transaction_id is not None:
+            return f"FLEX_TXN:{transaction_id}"
+        trade_id = self._mapping_optional_value(payload, "tradeID")
+        if trade_id is not None:
+            return f"FLEX_TRADE:{trade_id}"
+        raise MappingContractViolationError(
+            "mapping contract violation: execution row missing stable execution identity "
+            f"source_row_ref={raw_record.source_row_ref}"
+        )
+
+    def _mapping_map_open_position_instrument(
+        self,
+        raw_record: RawRecordForMapping,
+        account_id: str,
+    ) -> CanonicalInstrumentUpsertRequest | None:
+        """Map one OpenPositions raw row into an optional instrument request.
+
+        Args:
+            raw_record: Raw OpenPositions row payload.
+            account_id: Internal account identifier.
+
+        Returns:
+            CanonicalInstrumentUpsertRequest | None: Instrument request, excluding CASH and FX.
+
+        Raises:
+            MappingContractViolationError: Raised when required values are invalid.
+        """
+
+        payload = raw_record.source_payload
+        asset_category = self._mapping_required_value(
+            payload, "assetCategory", raw_record
+        ).upper()
+        if asset_category in {"CASH", "FX"}:
+            return None
+        conid = self._mapping_required_value(payload, "conid", raw_record)
+        currency = self._mapping_required_value(payload, "currency", raw_record).upper()
+        self._mapping_required_decimal_value(payload, "position", raw_record)
+        for optional_key in (
+            "markPrice",
+            "costBasisMoney",
+            "fifoPnlUnrealized",
+            "fxRateToBase",
+            "multiplier",
+        ):
+            self._mapping_optional_decimal_value(payload, optional_key, raw_record)
+        for positive_key in ("fxRateToBase", "multiplier"):
+            parsed_value = self._mapping_optional_decimal_value(
+                payload, positive_key, raw_record
+            )
+            if parsed_value is not None and Decimal(parsed_value) <= Decimal("0"):
+                raise MappingContractViolationError(
+                    f"mapping contract violation: {positive_key} must be positive "
+                    f"source_row_ref={raw_record.source_row_ref}"
+                )
+        return CanonicalInstrumentUpsertRequest(
+            account_id=account_id,
+            conid=conid,
+            symbol=self._mapping_optional_value(payload, "symbol") or conid,
+            local_symbol=self._mapping_optional_value(payload, "localSymbol"),
+            isin=self._mapping_optional_value(payload, "isin"),
+            cusip=self._mapping_optional_value(payload, "cusip"),
+            figi=self._mapping_optional_value(payload, "figi"),
+            asset_category=asset_category,
+            currency=currency,
+            description=self._mapping_optional_value(payload, "description"),
+        )
 
     def _mapping_map_cashflow_record(
         self,

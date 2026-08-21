@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from uuid import uuid4
 
@@ -12,6 +13,55 @@ from app.mapping.service import (
     RawRecordForMapping,
     mapping_build_canonical_batch,
 )
+
+
+def _execution_trade(**overrides: object) -> RawRecordForMapping:
+    payload: dict[str, object] = {
+        "levelOfDetail": "EXECUTION",
+        "transactionID": "37400900364",
+        "tradeID": "9921",
+        "conid": "265598",
+        "buySell": "BUY",
+        "quantity": "10",
+        "tradePrice": "101.00",
+        "currency": "USD",
+        "reportDate": "2026-02-14",
+        "dateTime": "2026-02-14T10:00:00+00:00",
+    }
+    payload.update(overrides)
+    return RawRecordForMapping(
+        raw_record_id=uuid4(),
+        ingestion_run_id=uuid4(),
+        section_name="Trades",
+        source_row_ref="Trades:Trade:transactionID=37400900364",
+        report_date_local=date(2026, 2, 14),
+        source_payload=payload,
+    )
+
+
+def _open_position(**overrides: object) -> RawRecordForMapping:
+    payload: dict[str, object] = {
+        "conid": "815232555",
+        "symbol": "ALEX  260821P00010000",
+        "assetCategory": "OPT",
+        "currency": "USD",
+        "position": "-2",
+        "markPrice": "0.05",
+        "costBasisMoney": "-120",
+        "fifoPnlUnrealized": "110",
+        "fxRateToBase": "1",
+        "multiplier": "100",
+        "reportDate": "20260820",
+    }
+    payload.update(overrides)
+    return RawRecordForMapping(
+        raw_record_id=uuid4(),
+        ingestion_run_id=uuid4(),
+        section_name="OpenPositions",
+        source_row_ref="OpenPositions:OpenPosition:idx=1",
+        report_date_local=date(2026, 8, 20),
+        source_payload=payload,
+    )
 
 
 def test_mapping_build_canonical_batch_maps_all_supported_event_types() -> None:
@@ -170,43 +220,111 @@ def test_mapping_build_canonical_batch_fails_fast_on_contract_violation() -> Non
         )
 
 
-def test_mapping_build_canonical_batch_skips_trade_rows_without_ib_exec_id() -> None:
-    """Skip non-execution trade rows that do not include IB execution identity.
+def test_mapping_uses_transaction_id_for_execution_without_ib_exec_id() -> None:
+    batch = mapping_build_canonical_batch("U_TEST", "USD", [_execution_trade()])
 
-    Returns:
-        None: Assertions validate skip behavior for non-execution trade rows.
+    assert batch.trade_fill_requests[0].ib_exec_id == "FLEX_TXN:37400900364"
 
-    Raises:
-        AssertionError: Raised when non-execution rows are treated as contract violations.
-    """
 
-    raw_records = [
-        RawRecordForMapping(
-            raw_record_id=uuid4(),
-            ingestion_run_id=uuid4(),
-            section_name="Trades",
-            source_row_ref="Trades:Trade:transactionID=37400900364",
-            report_date_local=date(2026, 2, 14),
-            source_payload={
-                "transactionID": "37400900364",
-                "conid": "265598",
-                "buySell": "BUY",
-                "quantity": "10",
-                "tradePrice": "101.00",
-                "currency": "USD",
-                "reportDate": "2026-02-14",
-            },
-        )
-    ]
-
-    mapped_batch = mapping_build_canonical_batch(
-        account_id="U_TEST",
-        functional_currency="USD",
-        raw_records=raw_records,
+def test_mapping_uses_trade_id_when_execution_transaction_id_is_blank() -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST", "USD", [_execution_trade(transactionID="")]
     )
 
-    assert len(mapped_batch.instrument_upsert_requests) == 0
-    assert len(mapped_batch.trade_fill_requests) == 0
+    assert batch.trade_fill_requests[0].ib_exec_id == "FLEX_TRADE:9921"
+
+
+def test_mapping_preserves_nonblank_ib_exec_id_exactly_as_supplied() -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST", "USD", [_execution_trade(ibExecID=" EXEC-9921 ")]
+    )
+
+    assert batch.trade_fill_requests[0].ib_exec_id == " EXEC-9921 "
+
+
+def test_mapping_rejects_execution_without_any_stable_identity() -> None:
+    with pytest.raises(MappingContractViolationError, match="stable execution identity"):
+        mapping_build_canonical_batch(
+            "U_TEST", "USD", [_execution_trade(transactionID="", tradeID="")]
+        )
+
+
+@pytest.mark.parametrize("row_tag", ["Order", "Lot", "SymbolSummary"])
+def test_mapping_excludes_non_trade_rows_even_with_execution_fields(row_tag: str) -> None:
+    row = replace(
+        _execution_trade(),
+        source_row_ref=f"Trades:{row_tag}:transactionID=37400900364",
+    )
+
+    batch = mapping_build_canonical_batch("U_TEST", "USD", [row])
+
+    assert batch.trade_fill_requests == ()
+
+
+def test_mapping_skips_non_execution_trade_without_ib_exec_id() -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST", "USD", [_execution_trade(levelOfDetail="", transactionID="")]
+    )
+
+    assert batch.instrument_upsert_requests == ()
+    assert batch.trade_fill_requests == ()
+
+
+def test_mapping_open_position_upserts_option_instrument() -> None:
+    batch = mapping_build_canonical_batch("U_TEST", "USD", [_open_position()])
+
+    assert len(batch.instrument_upsert_requests) == 1
+    assert batch.instrument_upsert_requests[0].conid == "815232555"
+    assert batch.instrument_upsert_requests[0].asset_category == "OPT"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("position", ""),
+        ("position", "invalid"),
+        ("markPrice", "invalid"),
+        ("costBasisMoney", "invalid"),
+        ("fifoPnlUnrealized", "invalid"),
+        ("fxRateToBase", "invalid"),
+        ("multiplier", "invalid"),
+    ],
+)
+def test_mapping_open_position_rejects_invalid_numeric_contract(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(MappingContractViolationError):
+        mapping_build_canonical_batch(
+            "U_TEST", "USD", [_open_position(**{field: value})]
+        )
+
+
+def test_mapping_open_position_allows_blank_optional_values() -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST",
+        "USD",
+        [
+            _open_position(
+                markPrice="",
+                costBasisMoney="",
+                fifoPnlUnrealized="",
+                fxRateToBase="",
+                multiplier="",
+            )
+        ],
+    )
+
+    assert len(batch.instrument_upsert_requests) == 1
+
+
+@pytest.mark.parametrize("asset_category", ["CASH", "FX"])
+def test_mapping_excludes_cash_and_fx_open_positions(asset_category: str) -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST", "USD", [_open_position(assetCategory=asset_category)]
+    )
+
+    assert batch.instrument_upsert_requests == ()
 
 
 def test_mapping_build_canonical_batch_skips_section_only_corp_action_rows() -> None:
