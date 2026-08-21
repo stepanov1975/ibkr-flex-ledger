@@ -600,6 +600,23 @@ class RawRecordReadRepositoryPort(Protocol):
 class CanonicalPersistenceRepositoryPort(Protocol):
     """Port definition for canonical event and instrument UPSERT operations."""
 
+    def db_canonical_instrument_upsert_many(
+        self,
+        requests: list[CanonicalInstrumentUpsertRequest],
+    ) -> list[CanonicalInstrumentRecord]:
+        """Persist canonical instruments by conid-first identity in one batch.
+
+        Args:
+            requests: Instrument upsert requests.
+
+        Returns:
+            list[CanonicalInstrumentRecord]: Persisted canonical instrument records.
+
+        Raises:
+            ValueError: Raised when request values are invalid.
+            RuntimeError: Raised when persistence operation fails.
+        """
+
     def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
         """Persist or reuse canonical instrument by conid-first identity.
 

@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from app.adapters import AdapterFetchResult, FlexTokenInvalidError
 from app.db.interfaces import (
+    CanonicalInstrumentRecord,
+    CanonicalInstrumentUpsertRequest,
     IngestionRunRecord,
     IngestionRunReference,
     IngestionRunState,
@@ -626,20 +628,29 @@ class _CanonicalRepositoryStub:
             )()
         ]
 
-    def db_canonical_instrument_upsert(self, request):
-        """Return deterministic instrument record.
+    def db_canonical_instrument_upsert_many(
+        self, requests: list[CanonicalInstrumentUpsertRequest]
+    ) -> list[CanonicalInstrumentRecord]:
+        """Return deterministic instrument records.
 
         Args:
-            request: Canonical instrument upsert request.
+            requests: Canonical instrument upsert requests.
 
         Returns:
-            object: Minimal instrument identity.
+            list[CanonicalInstrumentRecord]: Canonical instrument identities.
 
         Raises:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        return type("InstrumentRecord", (), {"instrument_id": uuid4(), "account_id": request.account_id, "conid": request.conid})()
+        return [
+            CanonicalInstrumentRecord(
+                instrument_id=uuid4(),
+                account_id=request.account_id,
+                conid=request.conid,
+            )
+            for request in requests
+        ]
 
     def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
         """Accept bulk canonical requests without side effects.

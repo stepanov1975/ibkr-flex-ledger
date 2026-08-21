@@ -15,12 +15,51 @@ from alembic.config import Config
 from app.db import db_create_engine
 from app.db.canonical_persistence import (
     CanonicalCashflowUpsertRequest,
+    CanonicalInstrumentUpsertRequest,
     CanonicalTradeFillUpsertRequest,
     SQLAlchemyCanonicalPersistenceService,
 )
 from app.config import config_load_settings
 from app.db.raw_persistence import SQLAlchemyRawPersistenceService
 from app.db.interfaces import RawArtifactPersistRequest, RawArtifactReference, RawRecordPersistRequest
+
+
+def test_batch_instrument_upsert_returns_records_by_conid() -> None:
+    """Persist every batch instrument and return its canonical identity."""
+
+    engine = db_create_engine(config_load_settings().database_url)
+    account_id = f"U_BATCH_{uuid.uuid4().hex[:8]}"
+    repository = SQLAlchemyCanonicalPersistenceService(engine)
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        engine.dispose()
+        pytest.skip("PostgreSQL is not reachable for batch instrument integration test")
+
+    def request(conid: str, symbol: str) -> CanonicalInstrumentUpsertRequest:
+        return CanonicalInstrumentUpsertRequest(
+            account_id=account_id,
+            conid=conid,
+            symbol=symbol,
+            local_symbol=symbol,
+            isin=None,
+            cusip=None,
+            figi=None,
+            asset_category="STK",
+            currency="USD",
+            description=None,
+        )
+
+    try:
+        records = repository.db_canonical_instrument_upsert_many([
+            request("100", "AAA"), request("200", "BBB")
+        ])
+        assert {record.conid for record in records} == {"100", "200"}
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM instrument WHERE account_id=:account_id"), {"account_id": account_id})
+        engine.dispose()
 
 
 def _upsert_build_database_url(base_url: str, database_name: str) -> str:

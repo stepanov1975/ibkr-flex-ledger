@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
-from app.db.interfaces import RawRecordForCanonicalMapping
+from app.db.interfaces import CanonicalInstrumentRecord, CanonicalInstrumentUpsertRequest, RawRecordForCanonicalMapping
 from app.jobs.canonical_pipeline import job_canonical_map_and_persist
 
 
@@ -22,28 +22,35 @@ class _CanonicalPipelineRepositoryStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        self.instrument_upsert_calls = 0
+        self.instrument_batch_calls = 0
+        self.instrument_requests: list[CanonicalInstrumentUpsertRequest] = []
         self.bulk_upsert_calls = 0
 
-    def db_canonical_instrument_upsert(self, request):
-        """Capture instrument upsert invocation and return deterministic identity.
+    def db_canonical_instrument_upsert_many(
+        self, requests: list[CanonicalInstrumentUpsertRequest]
+    ) -> list[CanonicalInstrumentRecord]:
+        """Capture a batch instrument upsert and return deterministic identities.
 
         Args:
-            request: Canonical instrument upsert request.
+            requests: Canonical instrument upsert requests.
 
         Returns:
-            object: Minimal instrument record object.
+            list[CanonicalInstrumentRecord]: Persisted instrument identities.
 
         Raises:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        self.instrument_upsert_calls += 1
-        return type(
-            "InstrumentRecord",
-            (),
-            {"instrument_id": uuid4(), "account_id": request.account_id, "conid": request.conid},
-        )()
+        self.instrument_batch_calls += 1
+        self.instrument_requests = list(requests)
+        return [
+            CanonicalInstrumentRecord(
+                instrument_id=uuid4(),
+                account_id=request.account_id,
+                conid=request.conid,
+            )
+            for request in requests
+        ]
 
     def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
         """Capture bulk upsert invocation.
@@ -65,7 +72,7 @@ class _CanonicalPipelineRepositoryStub:
         self.bulk_upsert_calls += 1
 
 
-def test_jobs_canonical_pipeline_reports_unique_instrument_upsert_count() -> None:
+def test_jobs_canonical_pipeline_deduplicated_instruments_use_one_batch_call() -> None:
     """Report instrument upsert count as unique conid writes, not raw request volume.
 
     Returns:
@@ -130,6 +137,7 @@ def test_jobs_canonical_pipeline_reports_unique_instrument_upsert_count() -> Non
     )
 
     assert repository_stub.bulk_upsert_calls == 1
-    assert repository_stub.instrument_upsert_calls == 1
+    assert repository_stub.instrument_batch_calls == 1
+    assert [request.conid for request in repository_stub.instrument_requests] == ["265598"]
     assert result_counts["instrument_upsert_count"] == 1
     assert result_counts["trade_fill_count"] == 2

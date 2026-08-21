@@ -138,15 +138,14 @@ def _job_canonical_upsert_instruments(
         RuntimeError: Raised when persistence operation fails.
     """
 
-    records_by_conid: dict[str, CanonicalInstrumentRecord] = {}
-    unique_requests: dict[str, CanonicalInstrumentUpsertRequest] = {}
+    requests_by_conid: dict[str, CanonicalInstrumentUpsertRequest] = {}
     for request in mapped_batch.instrument_upsert_requests:
-        unique_requests[request.conid] = request
+        requests_by_conid[request.conid] = request
 
-    for conid, request in unique_requests.items():
-        records_by_conid[conid] = canonical_persistence_repository.db_canonical_instrument_upsert(request)
-
-    return records_by_conid
+    records = canonical_persistence_repository.db_canonical_instrument_upsert_many(
+        [requests_by_conid[conid] for conid in sorted(requests_by_conid)]
+    )
+    return {record.conid: record for record in records}
 
 
 def _job_canonical_build_conid_index(raw_records: list[RawRecordForCanonicalMapping]) -> dict[str, str]:

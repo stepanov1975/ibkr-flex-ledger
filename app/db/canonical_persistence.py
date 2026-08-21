@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -160,63 +161,84 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             parameters={"ingestion_run_id": str(ingestion_run_id)},
         )
 
-    def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
-        """Persist or reuse canonical instrument by conid-first identity.
+    def db_canonical_instrument_upsert_many(
+        self,
+        requests: list[CanonicalInstrumentUpsertRequest],
+    ) -> list[CanonicalInstrumentRecord]:
+        """Persist canonical instruments by conid-first identity in one statement.
 
         Args:
-            request: Instrument upsert request.
+            requests: Instrument upsert requests.
 
         Returns:
-            CanonicalInstrumentRecord: Persisted canonical instrument record.
+            list[CanonicalInstrumentRecord]: Persisted canonical instrument records.
 
         Raises:
             ValueError: Raised when request values are invalid.
             RuntimeError: Raised when persistence operation fails.
         """
 
-        normalized_request = self._db_canonical_validate_instrument_request(request)
+        normalized_requests = [self._db_canonical_validate_instrument_request(request) for request in requests]
+        requests_json = json.dumps(
+            [
+                {
+                    "account_id": request.account_id,
+                    "conid": request.conid,
+                    "symbol": request.symbol,
+                    "local_symbol": request.local_symbol,
+                    "isin": request.isin,
+                    "cusip": request.cusip,
+                    "figi": request.figi,
+                    "asset_category": request.asset_category,
+                    "currency": request.currency,
+                    "description": request.description,
+                }
+                for request in normalized_requests
+            ]
+        )
 
         try:
             with self._engine.begin() as connection:
-                row = connection.execute(
+                rows = connection.execute(
                     text(
+                        "WITH input AS ("
+                        "SELECT * FROM jsonb_to_recordset(CAST(:requests_json AS jsonb)) AS value("
+                        "account_id text, conid text, symbol text, local_symbol text, "
+                        "isin text, cusip text, figi text, asset_category text, "
+                        "currency text, description text"
+                        ")"
+                        "), upserted AS ("
                         "INSERT INTO instrument ("
-                        "account_id, conid, symbol, local_symbol, isin, cusip, figi, asset_category, currency, description"
-                        ") VALUES ("
-                        ":account_id, :conid, :symbol, :local_symbol, :isin, :cusip, :figi, :asset_category, :currency, :description"
-                        ") ON CONFLICT (account_id, conid) DO UPDATE SET "
-                        "symbol = EXCLUDED.symbol, "
-                        "local_symbol = COALESCE(EXCLUDED.local_symbol, instrument.local_symbol), "
-                        "isin = COALESCE(EXCLUDED.isin, instrument.isin), "
-                        "cusip = COALESCE(EXCLUDED.cusip, instrument.cusip), "
-                        "figi = COALESCE(EXCLUDED.figi, instrument.figi), "
-                        "asset_category = EXCLUDED.asset_category, "
-                        "currency = EXCLUDED.currency, "
-                        "description = COALESCE(EXCLUDED.description, instrument.description), "
-                        "updated_at_utc = now() "
+                        "account_id, conid, symbol, local_symbol, isin, cusip, figi, "
+                        "asset_category, currency, description"
+                        ") SELECT account_id, conid, symbol, local_symbol, isin, cusip, figi, "
+                        "asset_category, currency, description FROM input "
+                        "ON CONFLICT (account_id, conid) DO UPDATE SET "
+                        "symbol = EXCLUDED.symbol, local_symbol = EXCLUDED.local_symbol, "
+                        "isin = EXCLUDED.isin, cusip = EXCLUDED.cusip, figi = EXCLUDED.figi, "
+                        "asset_category = EXCLUDED.asset_category, currency = EXCLUDED.currency, "
+                        "description = EXCLUDED.description "
                         "RETURNING instrument_id, account_id, conid"
+                        ") SELECT * FROM upserted ORDER BY conid"
                     ),
-                    {
-                        "account_id": normalized_request.account_id,
-                        "conid": normalized_request.conid,
-                        "symbol": normalized_request.symbol,
-                        "local_symbol": normalized_request.local_symbol,
-                        "isin": normalized_request.isin,
-                        "cusip": normalized_request.cusip,
-                        "figi": normalized_request.figi,
-                        "asset_category": normalized_request.asset_category,
-                        "currency": normalized_request.currency,
-                        "description": normalized_request.description,
-                    },
-                ).mappings().one()
+                    {"requests_json": requests_json},
+                ).mappings().all()
         except SQLAlchemyError as error:
-            raise RuntimeError("canonical instrument upsert failed") from error
+            raise RuntimeError("canonical instrument batch upsert failed") from error
 
-        return CanonicalInstrumentRecord(
-            instrument_id=row["instrument_id"],
-            account_id=row["account_id"],
-            conid=row["conid"],
-        )
+        return [
+            CanonicalInstrumentRecord(
+                instrument_id=row["instrument_id"],
+                account_id=row["account_id"],
+                conid=row["conid"],
+            )
+            for row in rows
+        ]
+
+    def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
+        """Persist or reuse one canonical instrument by conid-first identity."""
+
+        return self.db_canonical_instrument_upsert_many([request])[0]
 
     def db_canonical_trade_fill_upsert(self, request: CanonicalTradeFillUpsertRequest) -> None:
         """UPSERT one canonical trade-fill event by frozen natural key.

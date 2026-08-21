@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
-from app.db.interfaces import IngestionRunRecord, IngestionRunReference, IngestionRunState
+from app.db.interfaces import (
+    CanonicalInstrumentRecord,
+    CanonicalInstrumentUpsertRequest,
+    IngestionRunRecord,
+    IngestionRunReference,
+    IngestionRunState,
+)
 from app.jobs.reprocess_orchestrator import (
     CanonicalReprocessOrchestrator,
     CanonicalReprocessOrchestratorConfig,
@@ -79,20 +85,29 @@ class _CanonicalPersistRepositoryStub:
         self.upserted_trade_exec_ids: list[str] = []
         self.trade_instrument_ids: list[str] = []
 
-    def db_canonical_instrument_upsert(self, request):
-        """Return deterministic instrument record for each upsert request.
+    def db_canonical_instrument_upsert_many(
+        self, requests: list[CanonicalInstrumentUpsertRequest]
+    ) -> list[CanonicalInstrumentRecord]:
+        """Return deterministic instrument records for each batch request.
 
         Args:
-            request: Canonical instrument upsert request.
+            requests: Canonical instrument upsert requests.
 
         Returns:
-            object: Lightweight instrument record object.
+            list[CanonicalInstrumentRecord]: Canonical instrument identity records.
 
         Raises:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        return type("InstrumentRecord", (), {"instrument_id": uuid4(), "account_id": request.account_id, "conid": request.conid})()
+        return [
+            CanonicalInstrumentRecord(
+                instrument_id=uuid4(),
+                account_id=request.account_id,
+                conid=request.conid,
+            )
+            for request in requests
+        ]
 
     def db_canonical_trade_fill_upsert(self, request) -> None:
         """Capture upserted trade execution ids.
