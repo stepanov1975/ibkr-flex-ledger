@@ -178,6 +178,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             RuntimeError: Raised when persistence operation fails.
         """
 
+        if requests is None:
+            raise ValueError("requests must not be None")
+        if len(requests) == 0:
+            return []
+
         normalized_requests = [self._db_canonical_validate_instrument_request(request) for request in requests]
         requests_json = json.dumps(
             [
@@ -214,10 +219,15 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         ") SELECT account_id, conid, symbol, local_symbol, isin, cusip, figi, "
                         "asset_category, currency, description FROM input "
                         "ON CONFLICT (account_id, conid) DO UPDATE SET "
-                        "symbol = EXCLUDED.symbol, local_symbol = EXCLUDED.local_symbol, "
-                        "isin = EXCLUDED.isin, cusip = EXCLUDED.cusip, figi = EXCLUDED.figi, "
-                        "asset_category = EXCLUDED.asset_category, currency = EXCLUDED.currency, "
-                        "description = EXCLUDED.description "
+                        "symbol = EXCLUDED.symbol, "
+                        "local_symbol = COALESCE(EXCLUDED.local_symbol, instrument.local_symbol), "
+                        "isin = COALESCE(EXCLUDED.isin, instrument.isin), "
+                        "cusip = COALESCE(EXCLUDED.cusip, instrument.cusip), "
+                        "figi = COALESCE(EXCLUDED.figi, instrument.figi), "
+                        "asset_category = EXCLUDED.asset_category, "
+                        "currency = EXCLUDED.currency, "
+                        "description = COALESCE(EXCLUDED.description, instrument.description), "
+                        "updated_at_utc = now() "
                         "RETURNING instrument_id, account_id, conid"
                         ") SELECT * FROM upserted ORDER BY conid"
                     ),
@@ -238,7 +248,10 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_instrument_upsert(self, request: CanonicalInstrumentUpsertRequest) -> CanonicalInstrumentRecord:
         """Persist or reuse one canonical instrument by conid-first identity."""
 
-        return self.db_canonical_instrument_upsert_many([request])[0]
+        try:
+            return self.db_canonical_instrument_upsert_many([request])[0]
+        except RuntimeError as error:
+            raise RuntimeError("canonical instrument upsert failed") from error
 
     def db_canonical_trade_fill_upsert(self, request: CanonicalTradeFillUpsertRequest) -> None:
         """UPSERT one canonical trade-fill event by frozen natural key.

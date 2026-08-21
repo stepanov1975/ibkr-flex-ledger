@@ -24,6 +24,201 @@ from app.db.raw_persistence import SQLAlchemyRawPersistenceService
 from app.db.interfaces import RawArtifactPersistRequest, RawArtifactReference, RawRecordPersistRequest
 
 
+class _InstrumentBatchResultSpy:
+    """Minimal SQLAlchemy result chain for instrument batch execution tests."""
+
+    def mappings(self) -> _InstrumentBatchResultSpy:
+        """Return this result as a mapping result."""
+
+        return self
+
+    def all(self) -> list[dict]:
+        """Return no rows for the execution-count test."""
+
+        return []
+
+
+class _InstrumentBatchConnectionSpy:
+    """Capture instrument batch statement executions."""
+
+    def __init__(self, error: SQLAlchemyError | None = None) -> None:
+        """Initialize statement capture and an optional database error."""
+
+        self.executions: list[tuple[object, dict]] = []
+        self._error = error
+
+    def __enter__(self) -> _InstrumentBatchConnectionSpy:
+        """Enter the transaction context."""
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        """Propagate transaction errors."""
+
+        _ = (exc_type, exc_value, traceback)
+        return False
+
+    def execute(self, statement, parameters: dict) -> _InstrumentBatchResultSpy:
+        """Capture one statement execution or raise the configured error."""
+
+        self.executions.append((statement, parameters))
+        if self._error is not None:
+            raise self._error
+        return _InstrumentBatchResultSpy()
+
+
+class _InstrumentBatchEngineSpy:
+    """Capture transaction creation for instrument batch execution tests."""
+
+    def __init__(self, connection: _InstrumentBatchConnectionSpy) -> None:
+        """Initialize with the connection returned for each transaction."""
+
+        self.begin_calls = 0
+        self._connection = connection
+
+    def begin(self) -> _InstrumentBatchConnectionSpy:
+        """Record and return the batch transaction connection."""
+
+        self.begin_calls += 1
+        return self._connection
+
+
+def _instrument_upsert_request(
+    account_id: str,
+    conid: str,
+    symbol: str,
+    *,
+    local_symbol: str | None = None,
+    isin: str | None = None,
+    cusip: str | None = None,
+    figi: str | None = None,
+    description: str | None = None,
+) -> CanonicalInstrumentUpsertRequest:
+    """Build one canonical instrument request with fixed required metadata."""
+
+    return CanonicalInstrumentUpsertRequest(
+        account_id=account_id,
+        conid=conid,
+        symbol=symbol,
+        local_symbol=local_symbol,
+        isin=isin,
+        cusip=cusip,
+        figi=figi,
+        asset_category="STK",
+        currency="USD",
+        description=description,
+    )
+
+
+def test_batch_instrument_upsert_preserves_optional_metadata_when_later_request_omits_it() -> None:
+    """Keep existing optional instrument metadata when a later source row omits it."""
+
+    engine = db_create_engine(config_load_settings().database_url)
+    account_id = f"U_BATCH_METADATA_{uuid.uuid4().hex[:8]}"
+    repository = SQLAlchemyCanonicalPersistenceService(engine)
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        engine.dispose()
+        pytest.skip("PostgreSQL is not reachable for batch instrument integration test")
+
+    try:
+        initial_record = repository.db_canonical_instrument_upsert_many([
+            _instrument_upsert_request(
+                account_id,
+                "100",
+                "AAA",
+                local_symbol="AAA.LOCAL",
+                isin="US0000000001",
+                cusip="000000001",
+                figi="BBG000000001",
+                description="Initial description",
+            )
+        ])[0]
+        later_record = repository.db_canonical_instrument_upsert_many([
+            _instrument_upsert_request(
+                account_id,
+                "100",
+                "AAA-UPDATED",
+                local_symbol=" ",
+                description=" ",
+            )
+        ])[0]
+
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT symbol, local_symbol, isin, cusip, figi, description "
+                    "FROM instrument WHERE account_id = :account_id AND conid = '100'"
+                ),
+                {"account_id": account_id},
+            ).mappings().one()
+
+        assert later_record.instrument_id == initial_record.instrument_id
+        assert dict(row) == {
+            "symbol": "AAA-UPDATED",
+            "local_symbol": "AAA.LOCAL",
+            "isin": "US0000000001",
+            "cusip": "000000001",
+            "figi": "BBG000000001",
+            "description": "Initial description",
+        }
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM instrument WHERE account_id=:account_id"), {"account_id": account_id})
+        engine.dispose()
+
+
+def test_batch_instrument_upsert_executes_one_statement_for_many_requests() -> None:
+    """Use one transaction and statement for every non-empty instrument batch."""
+
+    connection = _InstrumentBatchConnectionSpy()
+    engine = _InstrumentBatchEngineSpy(connection)
+    repository = SQLAlchemyCanonicalPersistenceService(engine)
+
+    records = repository.db_canonical_instrument_upsert_many([
+        _instrument_upsert_request("U_SPY", "100", "AAA"),
+        _instrument_upsert_request("U_SPY", "200", "BBB"),
+    ])
+
+    assert records == []
+    assert engine.begin_calls == 1
+    assert len(connection.executions) == 1
+
+
+def test_batch_instrument_upsert_skips_transaction_for_empty_requests() -> None:
+    """Avoid a database round trip when there are no instruments to persist."""
+
+    connection = _InstrumentBatchConnectionSpy()
+    engine = _InstrumentBatchEngineSpy(connection)
+    repository = SQLAlchemyCanonicalPersistenceService(engine)
+
+    assert repository.db_canonical_instrument_upsert_many([]) == []
+    assert engine.begin_calls == 0
+    assert connection.executions == []
+
+
+def test_batch_instrument_upsert_rejects_none_request_list() -> None:
+    """Raise the documented validation error when the request list is missing."""
+
+    repository = SQLAlchemyCanonicalPersistenceService(_InstrumentBatchEngineSpy(_InstrumentBatchConnectionSpy()))
+
+    with pytest.raises(ValueError, match="^requests must not be None$"):
+        repository.db_canonical_instrument_upsert_many(None)
+
+
+def test_single_instrument_upsert_preserves_established_database_error_message() -> None:
+    """Keep the single-instrument persistence error contract for compatibility callers."""
+
+    repository = SQLAlchemyCanonicalPersistenceService(
+        _InstrumentBatchEngineSpy(_InstrumentBatchConnectionSpy(SQLAlchemyError("database unavailable")))
+    )
+
+    with pytest.raises(RuntimeError, match="^canonical instrument upsert failed$"):
+        repository.db_canonical_instrument_upsert(_instrument_upsert_request("U_SPY", "100", "AAA"))
+
+
 def test_batch_instrument_upsert_returns_records_by_conid() -> None:
     """Persist every batch instrument and return its canonical identity."""
 
