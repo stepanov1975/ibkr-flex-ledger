@@ -327,6 +327,20 @@ Ingestion diagnostics timeline additions:
 - Poll retry events can include `download` stage entries with `status=retrying` and retry metadata (`poll_attempt`, `error_code`, `error_message`, `retry_after_seconds`).
 - Timeout failures are surfaced through run failure diagnostics with `error_type=TimeoutError` and the propagated error message.
 
+### Incremental ingestion diagnostics
+
+Normal ingestion keeps every distinct Flex artifact and its raw rows. An exact
+duplicate artifact completes successfully while skipping raw-row insertion,
+canonical mapping, and snapshot rebuilding. A distinct artifact canonicalizes
+only rows changed from their immediately preceding source version and rebuilds
+snapshots only for affected instruments and FX source currencies. Explicit
+reprocess commands remain full replays.
+
+Run-detail diagnostics include request transport, polling, cumulative poll wait,
+preflight, XML extraction, artifact persistence, raw persistence, canonical raw
+read, canonical mapping/persistence, snapshot, and total run durations in integer
+milliseconds. Skipped and full-fallback stages include their reason.
+
 CLI trigger command additions:
 
 ```bash

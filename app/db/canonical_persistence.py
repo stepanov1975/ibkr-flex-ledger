@@ -394,6 +394,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
                             "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
+                            "price = EXCLUDED.price, "
                             "commission = EXCLUDED.commission, "
                             "realized_pnl = EXCLUDED.realized_pnl, "
                             "net_cash = EXCLUDED.net_cash, "

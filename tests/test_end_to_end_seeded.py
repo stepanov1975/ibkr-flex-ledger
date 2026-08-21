@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Mapping
+from decimal import Decimal
+from typing import cast
 
 from alembic import command
 from alembic.config import Config
@@ -50,6 +53,9 @@ _SEEDED_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
 
 
 class _SeededAdapter:
+    def __init__(self, payload_bytes: bytes = _SEEDED_PAYLOAD) -> None:
+        self.payload_bytes = payload_bytes
+
     def adapter_source_name(self) -> str:
         return "seeded-test"
 
@@ -57,14 +63,14 @@ class _SeededAdapter:
         assert query_id == "seeded-query"
         return AdapterFetchResult(
             run_reference="seeded-report",
-            payload_bytes=_SEEDED_PAYLOAD,
+            payload_bytes=self.payload_bytes,
             stage_timeline=[{"stage": "request", "status": "completed"}],
         )
 
 
 def _database_url(base_url: str, database_name: str) -> str:
     parsed_url: URL = make_url(base_url)
-    return parsed_url.set(database=database_name).render_as_string(hide_password=False)
+    return str(parsed_url.set(database=database_name).render_as_string(hide_password=False))
 
 
 def _reachable_database_url() -> str:
@@ -117,8 +123,22 @@ def _drop_database(admin_url: str, database_name: str) -> None:
         engine.dispose()
 
 
-def test_seeded_ingestion_reaches_reports_reconciliation_and_provenance() -> None:
-    """Prove one immutable Flex payload reaches snapshots and all reporting surfaces."""
+def _completed_details(run: Mapping[str, object], stage: str) -> dict[str, object]:
+    diagnostics = run["diagnostics"]
+    assert isinstance(diagnostics, list)
+    details = next(
+        event["details"]
+        for event in diagnostics
+        if isinstance(event, dict)
+        and event.get("stage") == stage
+        and event.get("status") == "completed"
+    )
+    assert isinstance(details, dict)
+    return cast(dict[str, object], details)
+
+
+def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_incremental() -> None:
+    """Prove duplicate and corrected Flex payloads retain auditable incremental results."""
 
     base_url = _reachable_database_url()
     database_name = f"test_seeded_e2e_{uuid.uuid4().hex[:10]}"
@@ -137,10 +157,11 @@ def test_seeded_ingestion_reaches_reports_reconciliation_and_provenance() -> Non
         canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
         snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
         portfolio_repository = SQLAlchemyPortfolioService(engine)
+        seeded_adapter = _SeededAdapter()
         orchestrator = IngestionJobOrchestrator(
             ingestion_repository=ingestion_repository,
             raw_persistence_repository=raw_repository,
-            flex_adapter=_SeededAdapter(),
+            flex_adapter=seeded_adapter,
             config=IngestionOrchestratorConfig(
                 account_id="SEEDED_ACCOUNT",
                 flex_query_id="seeded-query",
@@ -151,9 +172,14 @@ def test_seeded_ingestion_reaches_reports_reconciliation_and_provenance() -> Non
         )
 
         first_result = orchestrator.job_execute("ingestion_run")
-        second_result = orchestrator.job_execute("ingestion_run")
-        assert first_result.status == "success"
-        assert second_result.status == "success"
+        duplicate_result = orchestrator.job_execute("ingestion_run")
+        seeded_adapter.payload_bytes = _SEEDED_PAYLOAD.replace(
+            b'tradePrice="100"', b'tradePrice="111"'
+        )
+        corrected_result = orchestrator.job_execute("ingestion_run")
+        assert [first_result.status, duplicate_result.status, corrected_result.status] == [
+            "success"
+        ] * 3
 
         settings = AppSettings(
             environment_name="test",
@@ -202,7 +228,38 @@ def test_seeded_ingestion_reaches_reports_reconciliation_and_provenance() -> Non
             assert all(item["source_raw_record_id"] for item in provenance_items)
 
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT count(*) FROM raw_artifact")).scalar_one() == 1
+            runs = connection.execute(
+                text(
+                    "SELECT ingestion_run_id, diagnostics FROM ingestion_run "
+                    "WHERE account_id='SEEDED_ACCOUNT' ORDER BY started_at_utc, ingestion_run_id"
+                )
+            ).mappings().all()
+            raw_counts = [
+                connection.execute(
+                    text("SELECT count(*) FROM raw_record WHERE ingestion_run_id=:run_id"),
+                    {"run_id": run["ingestion_run_id"]},
+                ).scalar_one()
+                for run in runs
+            ]
+            assert connection.execute(text("SELECT count(*) FROM raw_artifact")).scalar_one() == 2
+            assert raw_counts[0] > 0
+            assert raw_counts[1] == 0
+            assert raw_counts[2] == raw_counts[0]
+            corrected_price = connection.execute(
+                text(
+                    "SELECT price FROM event_trade_fill "
+                    "WHERE account_id='SEEDED_ACCOUNT' AND ib_exec_id='SEED-EXEC-1'"
+                )
+            ).scalar_one()
+            assert corrected_price == Decimal("111")
+            assert (
+                _completed_details(runs[1], "canonical_mapping")["canonical_skip_reason"]
+                == "exact_duplicate_artifact"
+            )
+            assert (
+                _completed_details(runs[2], "canonical_mapping")["canonical_input_row_count"] == 1
+            )
+            assert _completed_details(runs[2], "snapshot")["snapshot_scope_mode"] == "incremental"
             assert connection.execute(text("SELECT count(*) FROM pnl_snapshot_daily")).scalar_one() == 1
     finally:
         if engine is not None:

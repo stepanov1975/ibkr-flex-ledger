@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import uuid
+from types import TracebackType
+from typing import Literal
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from alembic import command
 from alembic.config import Config
@@ -32,7 +34,7 @@ class _InstrumentBatchResultSpy:
 
         return self
 
-    def all(self) -> list[dict]:
+    def all(self) -> list[dict[str, object]]:
         """Return no rows for the execution-count test."""
 
         return []
@@ -44,7 +46,7 @@ class _InstrumentBatchConnectionSpy:
     def __init__(self, error: SQLAlchemyError | None = None) -> None:
         """Initialize statement capture and an optional database error."""
 
-        self.executions: list[tuple[object, dict]] = []
+        self.executions: list[tuple[object, dict[str, object]]] = []
         self._error = error
 
     def __enter__(self) -> _InstrumentBatchConnectionSpy:
@@ -52,13 +54,22 @@ class _InstrumentBatchConnectionSpy:
 
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         """Propagate transaction errors."""
 
         _ = (exc_type, exc_value, traceback)
         return False
 
-    def execute(self, statement, parameters: dict) -> _InstrumentBatchResultSpy:
+    def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object],
+    ) -> _InstrumentBatchResultSpy:
         """Capture one statement execution or raise the configured error."""
 
         self.executions.append((statement, parameters))
@@ -272,7 +283,7 @@ def _upsert_build_database_url(base_url: str, database_name: str) -> str:
     """
 
     parsed_url: URL = make_url(base_url)
-    return parsed_url.set(database=database_name).render_as_string(hide_password=False)
+    return str(parsed_url.set(database=database_name).render_as_string(hide_password=False))
 
 
 def _upsert_resolve_reachable_base_url() -> str:
@@ -365,7 +376,7 @@ def _upsert_drop_database(admin_url: str, database_name: str) -> None:
 
 
 def _upsert_insert_delta_run_and_artifact(
-    connection,
+    connection: Connection,
     *,
     ingestion_run_id: str,
     raw_artifact_id: str,
@@ -410,7 +421,7 @@ def _upsert_insert_delta_run_and_artifact(
 
 
 def _upsert_insert_delta_raw_record(
-    connection,
+    connection: Connection,
     *,
     raw_record_id: str,
     raw_artifact_id: str,
@@ -446,7 +457,7 @@ def _upsert_insert_delta_raw_record(
     )
 
 
-def _upsert_seed_dependencies(engine) -> tuple[str, str, str, str, str]:
+def _upsert_seed_dependencies(engine: Engine) -> tuple[str, str, str, str, str]:
     """Insert required foreign-key dependencies for canonical event rows.
 
     Args:
@@ -600,7 +611,7 @@ def test_db_canonical_trade_fill_upsert_preserves_origin_run() -> None:
                 report_date_local="2026-02-14",
                 side="BUY",
                 quantity="10",
-                price="100",
+                price="111",
                 cost="1000",
                 commission="2.5",
                 fees="0",
@@ -616,7 +627,8 @@ def test_db_canonical_trade_fill_upsert_preserves_origin_run() -> None:
         with engine.connect() as connection:
             row = connection.execute(
                 text(
-                    "SELECT ingestion_run_id::text AS ingestion_run_id, commission::text AS commission "
+                    "SELECT ingestion_run_id::text AS ingestion_run_id, commission::text AS commission, "
+                    "price::text AS price "
                     "FROM event_trade_fill WHERE account_id = :account_id AND ib_exec_id = :ib_exec_id"
                 ),
                 {"account_id": account_id, "ib_exec_id": "EXEC-1"},
@@ -624,6 +636,7 @@ def test_db_canonical_trade_fill_upsert_preserves_origin_run() -> None:
 
         assert row["ingestion_run_id"] == run_id_1
         assert row["commission"] == "2.50000000"
+        assert row["price"] == "111.00000000"
     finally:
         if previous_database_url is None:
             del os.environ["DATABASE_URL"]
