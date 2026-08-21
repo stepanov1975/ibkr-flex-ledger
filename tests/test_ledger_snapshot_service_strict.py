@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from typing import Generic, TypeVar, cast
 from uuid import UUID, uuid4
 
 from app.db.interfaces import (
@@ -12,14 +13,20 @@ from app.db.interfaces import (
     LedgerCorporateActionRecord,
     LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
+    LedgerSnapshotRepositoryPort,
     LedgerTradeFillRecord,
+    PnlSnapshotDailyUpsertRequest,
+    PositionLotUpsertRequest,
 )
 from app.ledger.snapshot_service import StockLedgerSnapshotService
 
 
+_RequestT = TypeVar("_RequestT")
+
+
 @dataclass
-class _SnapshotCapture:
-    requests: list
+class _SnapshotCapture(Generic[_RequestT]):
+    requests: list[_RequestT]
 
 
 class _RepositoryStub:
@@ -42,24 +49,29 @@ class _RepositoryStub:
         self._corporate_actions = corporate_actions or []
         self._scope_ids = list(scope_ids or [])
         self._instrument_currencies = list(instrument_currencies or [])
-        self.position_requests = _SnapshotCapture(requests=[])
-        self.snapshot_requests = _SnapshotCapture(requests=[])
+        self.position_requests: _SnapshotCapture[PositionLotUpsertRequest] = _SnapshotCapture(requests=[])
+        self.snapshot_requests: _SnapshotCapture[PnlSnapshotDailyUpsertRequest] = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
-        self.trade_instrument_ids = None
-        self.cashflow_instrument_ids = None
-        self.corp_action_instrument_ids = None
-        self.open_position_instrument_ids = None
-        self.reconciled_instrument_ids = None
-        self.fx_currencies = None
+        self.trade_instrument_ids: tuple[str, ...] | None = None
+        self.cashflow_instrument_ids: tuple[str, ...] | None = None
+        self.corp_action_instrument_ids: tuple[str, ...] | None = None
+        self.open_position_instrument_ids: tuple[str, ...] | None = None
+        self.reconciled_instrument_ids: tuple[str, ...] | None = None
+        self.fx_currencies: tuple[str, ...] | None = None
         self.read_call_count = 0
 
-    def db_ledger_instrument_ids_for_scope(self, account_id: str, conids: tuple[str, ...], currencies: tuple[str, ...]):
+    def db_ledger_instrument_ids_for_scope(
+        self,
+        account_id: str,
+        conids: tuple[str, ...],
+        currencies: tuple[str, ...],
+    ) -> list[str]:
         """Return the configured deterministic instrument scope."""
         _ = (account_id, conids, currencies)
         self.read_call_count += 1
         return self._scope_ids
 
-    def db_ledger_instrument_currency_list(self, instrument_ids: tuple[str, ...]):
+    def db_ledger_instrument_currency_list(self, instrument_ids: tuple[str, ...]) -> list[str]:
         """Return currencies for the configured instrument scope."""
         _ = instrument_ids
         self.read_call_count += 1
@@ -70,7 +82,7 @@ class _RepositoryStub:
         account_id: str,
         through_report_date_local: str | None = None,
         instrument_ids: tuple[str, ...] | None = None,
-    ):
+    ) -> list[LedgerTradeFillRecord]:
         """Return deterministic trade rows for one account/date query."""
         _ = (account_id, through_report_date_local)
         self.read_call_count += 1
@@ -82,7 +94,7 @@ class _RepositoryStub:
         account_id: str,
         through_report_date_local: str | None = None,
         instrument_ids: tuple[str, ...] | None = None,
-    ):
+    ) -> list[LedgerCashflowRecord]:
         """Return deterministic cashflow rows for one account/date query."""
         _ = (account_id, through_report_date_local)
         self.read_call_count += 1
@@ -94,7 +106,7 @@ class _RepositoryStub:
         account_id: str,
         ingestion_run_id: str,
         instrument_ids: tuple[str, ...] | None = None,
-    ):
+    ) -> list[LedgerOpenPositionValuationRecord]:
         """Return deterministic OpenPositions valuation rows for one run."""
         _ = (account_id, ingestion_run_id)
         self.read_call_count += 1
@@ -106,7 +118,7 @@ class _RepositoryStub:
         account_id: str,
         through_report_date_local: str,
         currencies: tuple[str, ...] | None = None,
-    ):
+    ) -> list[LedgerFxRateRecord]:
         """Return no conversion rows for USD-only fixtures."""
         _ = (account_id, through_report_date_local)
         self.read_call_count += 1
@@ -118,14 +130,14 @@ class _RepositoryStub:
         account_id: str,
         through_report_date_local: str,
         instrument_ids: tuple[str, ...] | None = None,
-    ):
+    ) -> list[LedgerCorporateActionRecord]:
         """Return deterministic corporate-action adjustments."""
         _ = (account_id, through_report_date_local)
         self.read_call_count += 1
         self.corp_action_instrument_ids = instrument_ids
         return self._corporate_actions
 
-    def db_position_lot_upsert_many(self, requests):
+    def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """Capture position-lot upsert payload for assertions."""
         self.position_requests.requests = requests
 
@@ -133,18 +145,29 @@ class _RepositoryStub:
         self,
         account_id: str,
         closed_at_utc: datetime,
-        requests,
+        requests: list[PositionLotUpsertRequest],
         instrument_ids: tuple[str, ...] | None = None,
-    ):
+    ) -> None:
         """Capture the reconciled open-lot projection."""
         _ = (account_id, closed_at_utc)
         self.reconciled_instrument_ids = instrument_ids
         self.reconcile_call_count += 1
         self.position_requests.requests = requests
 
-    def db_pnl_snapshot_daily_upsert_many(self, requests):
+    def db_pnl_snapshot_daily_upsert_many(
+        self,
+        requests: list[PnlSnapshotDailyUpsertRequest],
+    ) -> None:
         """Capture snapshot upsert payload for assertions."""
         self.snapshot_requests.requests = requests
+
+
+def _snapshot_service(repository: _RepositoryStub) -> StockLedgerSnapshotService:
+    """Inject the deliberately partial repository stub at the test boundary."""
+
+    return StockLedgerSnapshotService(
+        repository=cast(LedgerSnapshotRepositoryPort, repository)
+    )
 
 
 def _trade(
@@ -217,7 +240,7 @@ def test_snapshot_uses_last_trade_fallback_without_completed_openpositions() -> 
         functional_currency="USD",
     )
     repository = _RepositoryStub(trades=[trade], valuations=[])
-    service = StockLedgerSnapshotService(repository=repository)
+    service = _snapshot_service(repository)
 
     result = service.ledger_snapshot_build_and_persist(
         account_id="U_TEST",
@@ -265,7 +288,7 @@ def test_snapshot_uses_openpositions_unrealized_when_position_matches() -> None:
         report_date_local=date(2026, 2, 20),
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation])
-    service = StockLedgerSnapshotService(repository=repository)
+    service = _snapshot_service(repository)
 
     result = service.ledger_snapshot_build_and_persist(
         account_id="U_TEST",
@@ -324,7 +347,7 @@ def test_snapshot_converts_foreign_trade_and_broker_unrealized_to_base_currency(
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation], fx_rates=[fx_rate])
 
-    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         account_id="U_TEST",
         ingestion_run_id=str(uuid4()),
         report_date_local="2026-02-20",
@@ -334,6 +357,8 @@ def test_snapshot_converts_foreign_trade_and_broker_unrealized_to_base_currency(
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.currency == "USD"
     assert snapshot.provisional is False
+    assert snapshot.cost_basis is not None
+    assert snapshot.fx_source is not None
     assert Decimal(snapshot.cost_basis) == Decimal("1201.2")
     assert Decimal(snapshot.unrealized_pnl) == Decimal("1198.8")
     assert "trade_fx_rate_to_base" in snapshot.fx_source
@@ -372,7 +397,7 @@ def test_snapshot_includes_base_cashflow_amount_in_realized_pnl() -> None:
     )
     repository = _RepositoryStub(trades=[trade], valuations=[], cashflows=[cashflow])
 
-    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         account_id="U_TEST",
         ingestion_run_id=str(uuid4()),
         report_date_local="2026-02-20",
@@ -405,7 +430,7 @@ def test_snapshot_restates_pre_split_lots_on_current_quantity_basis() -> None:
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation], corporate_actions=[action])
 
-    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         account_id="U_TEST",
         ingestion_run_id=str(uuid4()),
         report_date_local="2026-02-20",
@@ -414,6 +439,7 @@ def test_snapshot_restates_pre_split_lots_on_current_quantity_basis() -> None:
 
     snapshot = repository.snapshot_requests.requests[0]
     assert Decimal(snapshot.position_qty) == Decimal("20")
+    assert snapshot.cost_basis is not None
     assert Decimal(snapshot.cost_basis) == Decimal("1000")
     assert Decimal(snapshot.unrealized_pnl) == Decimal("200")
 
@@ -422,29 +448,39 @@ def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> Non
     """Reconcile stale persisted lots even when the recomputed position is fully closed."""
 
     instrument_id = uuid4()
-    common = {
-        "account_id": "U_TEST",
-        "instrument_id": instrument_id,
-        "report_date_local": date(2026, 2, 20),
-        "fees": "0",
-        "commission": "0",
-        "functional_currency": "USD",
-    }
     trades = [
         LedgerTradeFillRecord(
-            event_trade_fill_id=uuid4(), source_raw_record_id=uuid4(),
+            event_trade_fill_id=uuid4(),
+            account_id="U_TEST",
+            instrument_id=instrument_id,
+            source_raw_record_id=uuid4(),
             trade_timestamp_utc=datetime(2026, 2, 20, 10, 0, tzinfo=timezone.utc),
-            side="BUY", quantity="1", price="100", **common,
+            report_date_local=date(2026, 2, 20),
+            side="BUY",
+            quantity="1",
+            price="100",
+            fees="0",
+            commission="0",
+            functional_currency="USD",
         ),
         LedgerTradeFillRecord(
-            event_trade_fill_id=uuid4(), source_raw_record_id=uuid4(),
+            event_trade_fill_id=uuid4(),
+            account_id="U_TEST",
+            instrument_id=instrument_id,
+            source_raw_record_id=uuid4(),
             trade_timestamp_utc=datetime(2026, 2, 20, 11, 0, tzinfo=timezone.utc),
-            side="SELL", quantity="1", price="110", **common,
+            report_date_local=date(2026, 2, 20),
+            side="SELL",
+            quantity="1",
+            price="110",
+            fees="0",
+            commission="0",
+            functional_currency="USD",
         ),
     ]
     repository = _RepositoryStub(trades=trades, valuations=[])
 
-    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         account_id="U_TEST",
         ingestion_run_id=str(uuid4()),
         report_date_local="2026-02-20",
@@ -458,7 +494,7 @@ def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> Non
 def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     """Propagate one resolved instrument scope through every scoped read and write."""
 
-    instrument_id = "00000000-0000-0000-0000-000000000010"
+    instrument_id = UUID("00000000-0000-0000-0000-000000000010")
     trade = LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
         account_id="U1",
@@ -477,7 +513,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     unrelated_trade = LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
         account_id="U1",
-        instrument_id="00000000-0000-0000-0000-000000000099",
+        instrument_id=UUID("00000000-0000-0000-0000-000000000099"),
         source_raw_record_id=uuid4(),
         trade_timestamp_utc=datetime(2026, 8, 21, 13, 0, tzinfo=timezone.utc),
         report_date_local=date(2026, 8, 21),
@@ -504,11 +540,11 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
         trades=[trade, unrelated_trade],
         valuations=[],
         cashflows=[cashflow],
-        scope_ids=[instrument_id],
+        scope_ids=[str(instrument_id)],
         instrument_currencies=["GBP"],
     )
 
-    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         account_id="U1",
         ingestion_run_id="00000000-0000-0000-0000-000000000001",
         report_date_local="2026-08-21",
@@ -517,15 +553,15 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
         affected_currencies=frozenset({"AUD"}),
     )
 
-    expected = (instrument_id,)
+    expected = (str(instrument_id),)
     assert repository.trade_instrument_ids == expected
     assert repository.cashflow_instrument_ids == expected
     assert repository.corp_action_instrument_ids == expected
     assert repository.open_position_instrument_ids == expected
     assert repository.reconciled_instrument_ids == expected
     assert repository.fx_currencies == ("AUD", "CHF", "EUR", "GBP", "JPY", "USD")
-    assert [request.instrument_id for request in repository.position_requests.requests] == [instrument_id]
-    assert [request.instrument_id for request in repository.snapshot_requests.requests] == [instrument_id]
+    assert [request.instrument_id for request in repository.position_requests.requests] == [str(instrument_id)]
+    assert [request.instrument_id for request in repository.snapshot_requests.requests] == [str(instrument_id)]
 
 
 def test_snapshot_build_empty_scope_is_noop() -> None:
@@ -533,7 +569,7 @@ def test_snapshot_build_empty_scope_is_noop() -> None:
 
     repository = _RepositoryStub(trades=[], valuations=[])
 
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U1",
         "00000000-0000-0000-0000-000000000001",
         "2026-08-21",
@@ -553,7 +589,7 @@ def test_snapshot_build_none_scope_retains_full_reads() -> None:
 
     repository = _RepositoryStub(trades=[], valuations=[])
 
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U1",
         "00000000-0000-0000-0000-000000000001",
         "2026-08-21",
@@ -574,7 +610,7 @@ def test_snapshot_uses_broker_quantity_and_cost_when_fifo_mismatches() -> None:
         trades=[_trade(instrument_id, "SELL", "200", "11")],
         valuations=[_broker_position(instrument_id, "0", cost=None, unrealized="0")],
     )
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -594,7 +630,7 @@ def test_snapshot_mismatch_uses_broker_cost_and_preserves_realized_pnl() -> None
         ],
         valuations=[_broker_position(instrument_id, "5", cost="55", unrealized="5")],
     )
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -611,7 +647,7 @@ def test_snapshot_treats_broker_absence_as_zero_without_synthetic_lot() -> None:
         trades=[_trade(instrument_id, "SELL", "200", "11")],
         valuations=[],
     )
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     assert repository.snapshot_requests.requests[0].position_qty == "0"
@@ -634,7 +670,7 @@ def test_snapshot_creates_broker_only_option_with_contract_valuation() -> None:
             multiplier="100",
         )],
     )
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -655,7 +691,7 @@ def test_snapshot_exact_match_keeps_fifo_cost_and_uses_broker_unrealized() -> No
             instrument_id, "10", mark="12", cost="100", unrealized="200"
         )],
     )
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -674,7 +710,7 @@ def test_snapshot_preserves_missing_optional_broker_values() -> None:
             instrument_id, "5", mark=None, cost=None, unrealized=None
         )],
     )
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -697,7 +733,7 @@ def test_snapshot_converts_broker_cost_and_unrealized_to_functional_currency() -
             fx="1.2",
         )],
     )
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -720,7 +756,7 @@ def test_snapshot_includes_instrument_cashflow_without_trade_history() -> None:
         currency="USD",
     )
     repository = _RepositoryStub(trades=[], valuations=[], cashflows=[cashflow])
-    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     snapshot = repository.snapshot_requests.requests[0]
@@ -748,13 +784,14 @@ def test_snapshot_explicit_functional_currency_overrides_cashflow_base_currency(
     )
     repository = _RepositoryStub(trades=[], valuations=[], cashflows=[cashflow])
 
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
 
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.currency == "USD"
     assert snapshot.realized_pnl == "25"
+    assert snapshot.fx_source is not None
     assert "cashflow_amount_in_base" not in snapshot.fx_source
 
 
@@ -772,7 +809,7 @@ def test_snapshot_option_mark_fallback_applies_contract_multiplier() -> None:
             multiplier="100",
         )],
     )
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     assert repository.snapshot_requests.requests[0].unrealized_pnl == "-193.00"
@@ -784,7 +821,7 @@ def test_snapshot_exact_short_match_keeps_signed_fifo_cost() -> None:
         trades=[_trade(instrument_id, "SELL", "2", "11")],
         valuations=[_broker_position(instrument_id, "-2", cost="-20", unrealized="-2")],
     )
-    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     assert repository.snapshot_requests.requests[0].cost_basis == "-22"

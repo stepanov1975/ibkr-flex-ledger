@@ -421,6 +421,19 @@ Snapshot accounting follows the frozen deterministic hierarchies:
 - Base-currency events use `1.0`; missing non-base FX marks the snapshot provisional rather than labeling native amounts as USD
 - Flex statement `reportDate` drives the snapshot business date, including delayed imports
 
+Completed `OpenPositions` data is authoritative for daily snapshot quantity. Event-derived
+FIFO lots remain independently auditable and can temporarily disagree with the broker;
+quantity mismatches, broker-only positions, and missing valuation or FX inputs mark the
+affected snapshot row provisional. Execution-level assignment and exercise (BookTrade)
+rows without `ibExecID` use stable namespaced identities such as `FLEX_TXN:<transactionID>`
+or `FLEX_TRADE:<tradeID>`.
+
+An explicit scoped reprocess reads immutable artifacts, replays their actual report dates
+chronologically, rebuilds canonical events and snapshots, and removes only unsupported
+derived snapshot dates in that account/period/query scope. It does not request or download
+a new IBKR Flex statement. Back up and verify PostgreSQL before using cleanup-capable
+reprocess; see `docs/operations.md`.
+
 ## Stocks-first FIFO ledger and daily snapshots (Task 7)
 
 Task 7 adds the first project-native stocks FIFO ledger computation flow and persists daily snapshot outputs.

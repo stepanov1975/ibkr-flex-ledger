@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Mapping
+from datetime import date
 from decimal import Decimal
 from typing import cast
 
@@ -28,7 +29,12 @@ from app.db import (
     SQLAlchemyRawPersistenceService,
     db_create_engine,
 )
-from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
+from app.jobs import (
+    CanonicalReprocessOrchestrator,
+    CanonicalReprocessOrchestratorConfig,
+    IngestionJobOrchestrator,
+    IngestionOrchestratorConfig,
+)
 from app.ledger import StockLedgerSnapshotService
 
 
@@ -49,6 +55,76 @@ _SEEDED_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <AccountInformation />
   <MTMPerformanceSummaryInBase />
   <FIFOPerformanceSummaryInBase />
+</FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+_ALEX_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
+<FlexStatement reportDate="20260820">
+  <Trades>
+    <Trade levelOfDetail="EXECUTION" ibExecID="OPEN-OPT" transactionID="1"
+      conid="815232555" symbol="ALEX  260821P00010000" assetCategory="OPT"
+      currency="USD" buySell="SELL" quantity="-2" tradePrice="0.60"
+      reportDate="20260820" dateTime="20260820;100000" />
+    <Trade levelOfDetail="EXECUTION" transactionID="2" tradeID="2002"
+      conid="815232555" symbol="ALEX  260821P00010000" assetCategory="OPT"
+      currency="USD" buySell="BUY" quantity="2" tradePrice="0"
+      reportDate="20260820" dateTime="20260820;110000" />
+    <Trade levelOfDetail="EXECUTION" transactionID="3" tradeID="2003"
+      conid="108670127" symbol="ALEX" assetCategory="STK"
+      currency="USD" buySell="BUY" quantity="200" tradePrice="10"
+      reportDate="20260820" dateTime="20260820;110001" />
+    <Trade levelOfDetail="EXECUTION" ibExecID="CLOSE-STK" transactionID="4"
+      conid="108670127" symbol="ALEX" assetCategory="STK"
+      currency="USD" buySell="SELL" quantity="-200" tradePrice="11"
+      reportDate="20260820" dateTime="20260820;120000" />
+  </Trades>
+  <OpenPositions />
+  <CashTransactions />
+  <CorporateActions />
+  <ConversionRates />
+  <SecuritiesInfo />
+  <AccountInformation />
+</FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+_REPLAY_EARLY_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
+<FlexStatement reportDate="20260219">
+  <Trades><Trade levelOfDetail="EXECUTION" ibExecID="REPLAY-BUY" transactionID="101"
+    conid="700001" symbol="REPLAY" assetCategory="STK" currency="USD"
+    buySell="BUY" quantity="1" tradePrice="10" reportDate="20260219"
+    dateTime="20260219;100000" /></Trades>
+  <OpenPositions>
+    <OpenPosition conid="700001" symbol="REPLAY" assetCategory="STK" currency="USD"
+      reportDate="20260219" position="1" markPrice="10" costBasisMoney="10"
+      fifoPnlUnrealized="0" multiplier="1" />
+    <OpenPosition conid="799999" symbol="BROKER_ONLY" assetCategory="STK" currency="USD"
+      reportDate="20260219" position="5" markPrice="4" costBasisMoney="20"
+      fifoPnlUnrealized="0" multiplier="1" />
+  </OpenPositions>
+  <CashTransactions />
+  <CorporateActions />
+  <ConversionRates />
+  <SecuritiesInfo />
+  <AccountInformation />
+</FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+_REPLAY_LATE_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
+<FlexStatement reportDate="20260820">
+  <Trades><Trade levelOfDetail="EXECUTION" ibExecID="REPLAY-SELL" transactionID="102"
+    conid="700001" symbol="REPLAY" assetCategory="STK" currency="USD"
+    buySell="SELL" quantity="-1" tradePrice="11" reportDate="20260820"
+    dateTime="20260820;100000" /></Trades>
+  <OpenPositions>
+    <OpenPosition conid="700001" symbol="REPLAY" assetCategory="STK" currency="USD"
+      reportDate="20260820" position="0" markPrice="11" costBasisMoney="0"
+      fifoPnlUnrealized="0" multiplier="1" />
+    <OpenPosition conid="799999" symbol="BROKER_ONLY" assetCategory="STK" currency="USD"
+      reportDate="20260820" position="5" markPrice="4" costBasisMoney="20"
+      fifoPnlUnrealized="0" multiplier="1" />
+  </OpenPositions>
+  <CashTransactions />
+  <CorporateActions />
+  <ConversionRates />
+  <SecuritiesInfo />
+  <AccountInformation />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 
@@ -308,8 +384,8 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
                 "position_qty": Decimal("2"),
                 "cost_basis": Decimal("223"),
                 "realized_pnl": Decimal("0"),
-                "unrealized_pnl": Decimal("-3"),
-                "total_pnl": Decimal("-3"),
+                "unrealized_pnl": Decimal("20"),
+                "total_pnl": Decimal("20"),
                 "fees": Decimal("1"),
             }
             assert dict(corrected_snapshot) != initial_snapshot
@@ -341,6 +417,352 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
         _drop_database(admin_url, database_name)
 
 
+def test_postgresql_alex_assignment_rows_close_with_broker_authority() -> None:
+    """Map assignment identities and close ALEX lots against an empty broker snapshot."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_alex_e2e_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        ingestion_repository = SQLAlchemyIngestionRunService(engine)
+        raw_repository = SQLAlchemyRawPersistenceService(engine)
+        canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
+        snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
+        orchestrator = IngestionJobOrchestrator(
+            ingestion_repository=ingestion_repository,
+            raw_persistence_repository=raw_repository,
+            flex_adapter=_SeededAdapter(_ALEX_PAYLOAD),
+            config=IngestionOrchestratorConfig(
+                account_id="U_ALEX",
+                flex_query_id="seeded-query",
+            ),
+            canonical_repository=canonical_repository,
+            snapshot_service=StockLedgerSnapshotService(snapshot_repository),
+        )
+
+        assert orchestrator.job_execute("ingestion_run").status == "success"
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT count(*) FROM event_trade_fill WHERE account_id='U_ALEX'")
+            ).scalar_one() == 4
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM event_trade_fill WHERE account_id='U_ALEX' "
+                    "AND ib_exec_id IN ('FLEX_TXN:2', 'FLEX_TXN:3')"
+                )
+            ).scalar_one() == 2
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM position_lot "
+                    "WHERE account_id='U_ALEX' AND status='open'"
+                )
+            ).scalar_one() == 0
+            positions = connection.execute(
+                text(
+                    "SELECT i.conid, s.position_qty FROM pnl_snapshot_daily s "
+                    "JOIN instrument i USING (instrument_id) WHERE s.account_id='U_ALEX'"
+                )
+            ).all()
+            assert set(positions) == {
+                ("815232555", Decimal("0")),
+                ("108670127", Decimal("0")),
+            }
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_postgresql_deterministic_replay_cleanup_is_scoped_immutable_and_idempotent() -> None:
+    """Rebuild reversed-date artifacts without mutating raw or unrelated snapshots."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_replay_e2e_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        ingestion_repository = SQLAlchemyIngestionRunService(engine)
+        raw_repository = SQLAlchemyRawPersistenceService(engine)
+        canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
+        snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
+        seeded_adapter = _SeededAdapter(_REPLAY_LATE_PAYLOAD)
+        ingestion_orchestrator = IngestionJobOrchestrator(
+            ingestion_repository=ingestion_repository,
+            raw_persistence_repository=raw_repository,
+            flex_adapter=seeded_adapter,
+            config=IngestionOrchestratorConfig(
+                account_id="U_REPLAY",
+                flex_query_id="seeded-query",
+            ),
+            canonical_repository=canonical_repository,
+            snapshot_service=StockLedgerSnapshotService(snapshot_repository),
+        )
+
+        late_result = ingestion_orchestrator.job_execute("ingestion_run")
+        seeded_adapter.payload_bytes = _REPLAY_EARLY_PAYLOAD
+        early_result = ingestion_orchestrator.job_execute("ingestion_run")
+        assert [late_result.status, early_result.status] == ["success", "success"]
+
+        other_run_id = uuid.uuid4()
+        other_instrument_id = uuid.uuid4()
+        with engine.begin() as connection:
+            artifact_rows = connection.execute(
+                text(
+                    "SELECT ingestion_run_id, period_key, flex_query_id, report_date_local "
+                    "FROM raw_artifact WHERE account_id='U_REPLAY' "
+                    "ORDER BY report_date_local"
+                )
+            ).mappings().all()
+            assert [row["report_date_local"] for row in artifact_rows] == [
+                date(2026, 2, 19),
+                date(2026, 8, 20),
+            ]
+            assert {row["flex_query_id"] for row in artifact_rows} == {"seeded-query"}
+            period_keys = {row["period_key"] for row in artifact_rows}
+            assert len(period_keys) == 1
+            period_key = period_keys.pop()
+
+            raw_artifact_count_before = connection.execute(
+                text(
+                    "SELECT count(*) FROM raw_artifact WHERE account_id='U_REPLAY' "
+                    "AND period_key=:period_key AND flex_query_id='seeded-query'"
+                ),
+                {"period_key": period_key},
+            ).scalar_one()
+            raw_record_count_before = connection.execute(
+                text(
+                    "SELECT count(*) FROM raw_record WHERE account_id='U_REPLAY' "
+                    "AND period_key=:period_key AND flex_query_id='seeded-query'"
+                ),
+                {"period_key": period_key},
+            ).scalar_one()
+
+            replay_instrument_id = connection.execute(
+                text(
+                    "SELECT instrument_id FROM instrument "
+                    "WHERE account_id='U_REPLAY' AND conid='700001'"
+                )
+            ).scalar_one()
+            connection.execute(text("DELETE FROM position_lot WHERE account_id='U_REPLAY'"))
+            connection.execute(text("DELETE FROM pnl_snapshot_daily WHERE account_id='U_REPLAY'"))
+            connection.execute(text("DELETE FROM event_trade_fill WHERE account_id='U_REPLAY'"))
+            connection.execute(
+                text(
+                    "INSERT INTO pnl_snapshot_daily ("
+                    "account_id, report_date_local, instrument_id, position_qty, cost_basis, "
+                    "realized_pnl, unrealized_pnl, total_pnl, fees, withholding_tax, currency, "
+                    "provisional, valuation_source, fx_source, ingestion_run_id) VALUES ("
+                    "'U_REPLAY', DATE '2026-07-01', :instrument_id, 99, 99, 99, 99, 198, 0, 0, "
+                    "'USD', true, 'legacy', 'legacy', :ingestion_run_id)"
+                ),
+                {
+                    "instrument_id": replay_instrument_id,
+                    "ingestion_run_id": artifact_rows[0]["ingestion_run_id"],
+                },
+            )
+
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run ("
+                    "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                    "report_date_local, started_at_utc, ended_at_utc) VALUES ("
+                    ":run_id, 'U_OTHER', 'manual', 'success', :period_key, 'seeded-query', "
+                    "DATE '2026-07-01', TIMESTAMPTZ '2026-08-21 08:00:00+00', "
+                    "TIMESTAMPTZ '2026-08-21 08:01:00+00')"
+                ),
+                {"run_id": other_run_id, "period_key": period_key},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO instrument ("
+                    "instrument_id, account_id, conid, symbol, asset_category, currency) VALUES ("
+                    ":instrument_id, 'U_OTHER', '880001', 'OTHER', 'STK', 'USD')"
+                ),
+                {"instrument_id": other_instrument_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO pnl_snapshot_daily ("
+                    "account_id, report_date_local, instrument_id, position_qty, cost_basis, "
+                    "realized_pnl, unrealized_pnl, total_pnl, fees, withholding_tax, currency, "
+                    "provisional, valuation_source, fx_source, ingestion_run_id, created_at_utc) VALUES ("
+                    "'U_OTHER', DATE '2026-07-01', :instrument_id, 8, 80, 0, 8, 8, 0, 0, "
+                    "'USD', false, 'seeded', 'base_currency', :run_id, "
+                    "TIMESTAMPTZ '2026-08-21 09:00:00+00')"
+                ),
+                {"instrument_id": other_instrument_id, "run_id": other_run_id},
+            )
+            other_snapshot_before = dict(
+                connection.execute(
+                    text(
+                        "SELECT * FROM pnl_snapshot_daily "
+                        "WHERE account_id='U_OTHER' AND instrument_id=:instrument_id"
+                    ),
+                    {"instrument_id": other_instrument_id},
+                ).mappings().one()
+            )
+
+        reprocess_orchestrator = CanonicalReprocessOrchestrator(
+            raw_read_repository=canonical_repository,
+            canonical_persistence_repository=canonical_repository,
+            snapshot_service=StockLedgerSnapshotService(snapshot_repository),
+            snapshot_repository=snapshot_repository,
+            config=CanonicalReprocessOrchestratorConfig(
+                account_id="U_REPLAY",
+                period_key=period_key,
+                flex_query_id="seeded-query",
+            ),
+            ingestion_repository=ingestion_repository,
+        )
+
+        snapshot_query = text(
+            "SELECT s.pnl_snapshot_daily_id, s.report_date_local, i.conid, s.position_qty, "
+            "s.cost_basis, s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
+            "s.valuation_source, s.ingestion_run_id, s.created_at_utc "
+            "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
+            "WHERE s.account_id='U_REPLAY' ORDER BY s.report_date_local, i.conid"
+        )
+        raw_counts_after = []
+        canonical_trade_counts_after = []
+        snapshot_rows_after = []
+        unsupported_snapshot_counts_after = []
+        selected_snapshot_dates_after = []
+        other_snapshots_after = []
+
+        for _ in range(2):
+            result = reprocess_orchestrator.job_execute_reprocess_target(
+                period_key=period_key,
+                flex_query_id="seeded-query",
+            )
+            assert result.status == "success"
+
+            with engine.connect() as connection:
+                raw_counts_after.append(
+                    (
+                        connection.execute(
+                            text(
+                                "SELECT count(*) FROM raw_artifact WHERE account_id='U_REPLAY' "
+                                "AND period_key=:period_key AND flex_query_id='seeded-query'"
+                            ),
+                            {"period_key": period_key},
+                        ).scalar_one(),
+                        connection.execute(
+                            text(
+                                "SELECT count(*) FROM raw_record WHERE account_id='U_REPLAY' "
+                                "AND period_key=:period_key AND flex_query_id='seeded-query'"
+                            ),
+                            {"period_key": period_key},
+                        ).scalar_one(),
+                    )
+                )
+                canonical_trade_counts_after.append(
+                    connection.execute(
+                        text("SELECT count(*) FROM event_trade_fill WHERE account_id='U_REPLAY'")
+                    ).scalar_one()
+                )
+                snapshot_rows_after.append(
+                    [tuple(row) for row in connection.execute(snapshot_query).all()]
+                )
+                unsupported_snapshot_counts_after.append(
+                    connection.execute(
+                        text(
+                            "SELECT count(*) FROM pnl_snapshot_daily WHERE account_id='U_REPLAY' "
+                            "AND report_date_local NOT IN (DATE '2026-02-19', DATE '2026-08-20')"
+                        )
+                    ).scalar_one()
+                )
+                selected_snapshot_dates_after.append(
+                    set(
+                        connection.execute(
+                            text(
+                                "SELECT DISTINCT report_date_local FROM pnl_snapshot_daily "
+                                "WHERE account_id='U_REPLAY'"
+                            )
+                        ).scalars().all()
+                    )
+                )
+                other_snapshots_after.append(
+                    dict(
+                        connection.execute(
+                            text(
+                                "SELECT * FROM pnl_snapshot_daily "
+                                "WHERE account_id='U_OTHER' AND instrument_id=:instrument_id"
+                            ),
+                            {"instrument_id": other_instrument_id},
+                        ).mappings().one()
+                    )
+                )
+
+        with engine.connect() as connection:
+            chronological_close = dict(
+                connection.execute(
+                    text(
+                        "SELECT s.realized_pnl, s.provisional FROM pnl_snapshot_daily s "
+                        "JOIN instrument i USING (instrument_id) "
+                        "WHERE s.account_id='U_REPLAY' AND i.conid='700001' "
+                        "AND s.report_date_local=DATE '2026-08-20'"
+                    )
+                ).mappings().one()
+            )
+            broker_only_snapshots = connection.execute(
+                text(
+                    "SELECT s.report_date_local, s.position_qty, s.provisional "
+                    "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
+                    "WHERE s.account_id='U_REPLAY' AND i.conid='799999' "
+                    "ORDER BY s.report_date_local"
+                )
+            ).all()
+
+        assert raw_counts_after == [
+            (raw_artifact_count_before, raw_record_count_before),
+            (raw_artifact_count_before, raw_record_count_before),
+        ]
+        assert canonical_trade_counts_after == [2, 2]
+        assert snapshot_rows_after[1] == snapshot_rows_after[0]
+        assert unsupported_snapshot_counts_after == [0, 0]
+        assert selected_snapshot_dates_after == [
+            {date(2026, 2, 19), date(2026, 8, 20)},
+            {date(2026, 2, 19), date(2026, 8, 20)},
+        ]
+        assert other_snapshots_after == [other_snapshot_before, other_snapshot_before]
+        assert chronological_close == {
+            "realized_pnl": Decimal("1"),
+            "provisional": False,
+        }
+        assert broker_only_snapshots == [
+            (date(2026, 2, 19), Decimal("5"), True),
+            (date(2026, 8, 20), Decimal("5"), True),
+        ]
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
 def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state() -> None:
     """Rebuild an FX-affected instrument without touching unrelated lots or snapshots."""
 
@@ -362,6 +784,8 @@ def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state()
         gbp_trade_raw_id = uuid.uuid4()
         eur_fx_raw_id = uuid.uuid4()
         gbp_fx_raw_id = uuid.uuid4()
+        eur_position_raw_id = uuid.uuid4()
+        gbp_position_raw_id = uuid.uuid4()
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -474,6 +898,40 @@ def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state()
             )
             connection.execute(
                 text(
+                    "INSERT INTO raw_record ("
+                    "raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                    "payload_sha256, report_date_local, section_name, source_row_ref, source_payload) VALUES ("
+                    ":raw_record_id, :run_id, 'U_FX_SCOPE', '2026-08', 'query', :sha, "
+                    "DATE '2026-08-21', 'OpenPositions', :source_row_ref, "
+                    "jsonb_build_object("
+                    "'conid', CAST(:conid AS text), 'assetCategory', 'STK', "
+                    "'currency', CAST(:currency AS text), "
+                    "'position', '1', 'markPrice', CAST(:mark_price AS text), 'multiplier', '1', "
+                    "'reportDate', '20260821'))"
+                ),
+                [
+                    {
+                        "raw_record_id": eur_position_raw_id,
+                        "run_id": run_id,
+                        "sha": "eur-position",
+                        "source_row_ref": "OpenPositions:OpenPosition:idx=1",
+                        "conid": "100",
+                        "currency": "EUR",
+                        "mark_price": "12",
+                    },
+                    {
+                        "raw_record_id": gbp_position_raw_id,
+                        "run_id": run_id,
+                        "sha": "gbp-position",
+                        "source_row_ref": "OpenPositions:OpenPosition:idx=2",
+                        "conid": "200",
+                        "currency": "GBP",
+                        "mark_price": "25",
+                    },
+                ],
+            )
+            connection.execute(
+                text(
                     "INSERT INTO event_fx ("
                     "account_id, ingestion_run_id, source_raw_record_id, transaction_id, "
                     "report_date_local, currency, functional_currency, fx_rate, fx_source) VALUES ("
@@ -504,6 +962,7 @@ def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state()
             account_id="U_FX_SCOPE",
             ingestion_run_id=str(run_id),
             report_date_local="2026-08-21",
+            functional_currency="USD",
         )
         assert initial_result.snapshot_row_count == 2
         assert initial_result.position_lot_row_count == 2
@@ -540,6 +999,7 @@ def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state()
             account_id="U_FX_SCOPE",
             ingestion_run_id=str(run_id),
             report_date_local="2026-08-21",
+            functional_currency="USD",
             affected_conids=frozenset(),
             affected_currencies=frozenset({"EUR"}),
         )

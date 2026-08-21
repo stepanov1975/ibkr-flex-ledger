@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import TracebackType
+from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import Engine
 
 from app.db.interfaces import (
     LedgerOpenPositionValuationRecord,
@@ -17,32 +20,47 @@ from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
 class _ResultStub:
-    def __init__(self, rows: list[dict], rowcount: int = 0) -> None:
+    def __init__(self, rows: list[dict[str, object]], rowcount: int = 0) -> None:
         self._rows = rows
         self.rowcount = rowcount
 
     def mappings(self) -> _ResultStub:
         return self
 
-    def all(self) -> list[dict]:
+    def all(self) -> list[dict[str, object]]:
         return self._rows
 
 
 class _ConnectionStub:
-    def __init__(self, rows: list[dict] | None = None, rowcount: int = 0) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, object]] | None = None,
+        rowcount: int = 0,
+    ) -> None:
         self.rows = rows or []
         self.rowcount = rowcount
         self.executed_queries: list[str] = []
-        self.executed_parameters: list[object] = []
+        self.executed_parameters: list[
+            dict[str, object] | list[dict[str, object]] | None
+        ] = []
 
     def __enter__(self) -> _ConnectionStub:
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         _ = (exc_type, exc, traceback)
         return False
 
-    def execute(self, statement, parameters=None) -> _ResultStub:
+    def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object] | list[dict[str, object]] | None = None,
+    ) -> _ResultStub:
         self.executed_queries.append(str(statement))
         self.executed_parameters.append(parameters)
         return _ResultStub(self.rows, rowcount=self.rowcount)
@@ -57,6 +75,12 @@ class _EngineStub:
 
     def begin(self) -> _ConnectionStub:
         return self.connection
+
+
+def _repository(connection: _ConnectionStub) -> SQLAlchemyLedgerSnapshotService:
+    """Inject the deliberately narrow engine stub at the test boundary."""
+
+    return SQLAlchemyLedgerSnapshotService(cast(Engine, _EngineStub(connection)))
 
 
 def _assert_unsupported_snapshot_scope(query: str, parameters: object) -> None:
@@ -85,7 +109,7 @@ def test_unsupported_snapshot_cleanup_is_account_period_query_scoped() -> None:
         "report_date_local": date(2026, 2, 21),
         "row_count": 44,
     }])
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     candidates = repository.db_pnl_snapshot_daily_unsupported_list(
         account_id="U1",
@@ -105,7 +129,7 @@ def test_unsupported_snapshot_delete_returns_scoped_row_count() -> None:
     """Return the count deleted from the requested replay scope only."""
 
     connection = _ConnectionStub(rowcount=44)
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     deleted = repository.db_pnl_snapshot_daily_unsupported_delete(
         account_id="U1",
@@ -128,7 +152,7 @@ def test_unsupported_snapshot_cleanup_rejects_empty_supported_dates(method_name:
     """Prevent an upstream selection bug from deleting an entire replay scope."""
 
     connection = _ConnectionStub()
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     with pytest.raises(ValueError, match="^supported_report_dates must not be empty$"):
         getattr(repository, method_name)(
@@ -145,7 +169,7 @@ def test_scope_lookup_uses_conid_currency_union_and_normalizes_ids() -> None:
 
     instrument_id = uuid4()
     connection = _ConnectionStub(rows=[{"instrument_id": instrument_id}])
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     result = repository.db_ledger_instrument_ids_for_scope(
         account_id="U1",
@@ -168,7 +192,7 @@ def test_instrument_currency_list_is_scoped_to_selected_ids() -> None:
 
     instrument_id = str(uuid4())
     connection = _ConnectionStub(rows=[{"currency": "GBP"}, {"currency": "USD"}])
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     result = repository.db_ledger_instrument_currency_list((instrument_id,))
 
@@ -182,7 +206,7 @@ def test_scoped_ledger_reads_apply_instrument_and_currency_filters() -> None:
 
     instrument_id = str(uuid4())
     connection = _ConnectionStub()
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     repository.db_ledger_trade_fill_list_for_account("U1", "2026-08-21", (instrument_id,))
     repository.db_ledger_cashflow_list_for_account("U1", "2026-08-21", (instrument_id,))
@@ -195,8 +219,12 @@ def test_scoped_ledger_reads_apply_instrument_and_currency_filters() -> None:
     assert "event.instrument_id = ANY(CAST(:instrument_ids AS uuid[]))" in connection.executed_queries[2]
     assert "i.instrument_id = ANY(CAST(:instrument_ids AS uuid[]))" in connection.executed_queries[3]
     assert "currency = ANY(:currencies)" in connection.executed_queries[4]
-    assert connection.executed_parameters[0]["instrument_ids"] == [instrument_id]
-    assert connection.executed_parameters[4]["currencies"] == ["EUR", "USD"]
+    instrument_parameters = connection.executed_parameters[0]
+    currency_parameters = connection.executed_parameters[4]
+    assert isinstance(instrument_parameters, dict)
+    assert isinstance(currency_parameters, dict)
+    assert instrument_parameters["instrument_ids"] == [instrument_id]
+    assert currency_parameters["currencies"] == ["EUR", "USD"]
 
 
 def test_open_position_read_includes_option_cost_fx_and_multiplier() -> None:
@@ -213,7 +241,7 @@ def test_open_position_read_includes_option_cost_fx_and_multiplier() -> None:
         "multiplier": Decimal("100"),
         "report_date_local": date(2026, 8, 20),
     }])
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
 
     rows = repository.db_ledger_open_position_valuation_list_for_run(
         "U1", str(uuid4())
@@ -253,7 +281,7 @@ def test_open_position_read_preserves_blank_optional_values_as_none() -> None:
         "multiplier": None,
         "report_date_local": date(2026, 8, 20),
     }])
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
     row = repository.db_ledger_open_position_valuation_list_for_run(
         "U1", str(uuid4())
     )[0]
@@ -270,7 +298,7 @@ def test_scoped_lot_reconciliation_closes_and_replaces_only_selected_instruments
     selected_id = str(uuid4())
     unrelated_id = str(uuid4())
     connection = _ConnectionStub()
-    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    repository = _repository(connection)
     requests = [
         _position_lot_request(selected_id),
         _position_lot_request(unrelated_id),

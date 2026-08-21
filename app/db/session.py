@@ -5,7 +5,7 @@ boundary for all SQLAlchemy usage.
 """
 
 from sqlalchemy import Engine, create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 
 def db_create_engine(database_url: str) -> Engine:
@@ -31,7 +31,7 @@ def db_create_engine(database_url: str) -> Engine:
     )
 
 
-def db_create_session_factory(engine: Engine) -> sessionmaker:
+def db_create_session_factory(engine: Engine) -> sessionmaker[Session]:
     """Create a SQLAlchemy session factory bound to the given engine.
 
     Args:

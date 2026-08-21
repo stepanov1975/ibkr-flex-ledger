@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from typing import Any, NoReturn, TypedDict, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,12 +14,20 @@ from app import bootstrap as bootstrap_module
 from app import main as main_module
 from app.db import SnapshotCleanupCandidate
 from app.db.interfaces import (
+    CanonicalCashflowUpsertRequest,
+    CanonicalCorpActionUpsertRequest,
+    CanonicalFxUpsertRequest,
     CanonicalInstrumentRecord,
     CanonicalInstrumentUpsertRequest,
+    CanonicalPersistenceRepositoryPort,
+    CanonicalTradeFillUpsertRequest,
     IngestionRunRecord,
     IngestionRunReference,
+    IngestionRunRepositoryPort,
     IngestionRunState,
+    LedgerSnapshotRepositoryPort,
     RawArtifactReplayCandidate,
+    RawRecordReadRepositoryPort,
 )
 from app.jobs import reprocess_orchestrator as reprocess_module
 from app.jobs.reprocess_orchestrator import (
@@ -27,7 +36,7 @@ from app.jobs.reprocess_orchestrator import (
     job_select_replay_artifacts,
 )
 from app.adapters import FlexStatementError
-from app.ledger import SnapshotBuildResult
+from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService
 from app.mapping.service import RawRecordForMapping
 
 
@@ -104,7 +113,7 @@ class _ArtifactRawRepository:
 class _CanonicalPersistRepositoryStub:
     """Capture upserted canonical identifiers to assert determinism."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize capture container.
 
         Returns:
@@ -141,7 +150,10 @@ class _CanonicalPersistRepositoryStub:
             for request in requests
         ]
 
-    def db_canonical_trade_fill_upsert(self, request) -> None:
+    def db_canonical_trade_fill_upsert(
+        self,
+        request: CanonicalTradeFillUpsertRequest,
+    ) -> None:
         """Capture upserted trade execution ids.
 
         Args:
@@ -157,7 +169,10 @@ class _CanonicalPersistRepositoryStub:
         self.upserted_trade_exec_ids.append(request.ib_exec_id)
         self.trade_instrument_ids.append(request.instrument_id)
 
-    def db_canonical_cashflow_upsert(self, request) -> None:
+    def db_canonical_cashflow_upsert(
+        self,
+        request: CanonicalCashflowUpsertRequest,
+    ) -> None:
         """Capture cashflow upsert calls.
 
         Args:
@@ -172,7 +187,7 @@ class _CanonicalPersistRepositoryStub:
 
         _ = request
 
-    def db_canonical_fx_upsert(self, request) -> None:
+    def db_canonical_fx_upsert(self, request: CanonicalFxUpsertRequest) -> None:
         """Capture FX upsert calls.
 
         Args:
@@ -187,7 +202,10 @@ class _CanonicalPersistRepositoryStub:
 
         _ = request
 
-    def db_canonical_corp_action_upsert(self, request) -> None:
+    def db_canonical_corp_action_upsert(
+        self,
+        request: CanonicalCorpActionUpsertRequest,
+    ) -> None:
         """Capture corporate-action upsert calls.
 
         Args:
@@ -202,7 +220,13 @@ class _CanonicalPersistRepositoryStub:
 
         _ = request
 
-    def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
+    def db_canonical_bulk_upsert(
+        self,
+        trade_requests: list[CanonicalTradeFillUpsertRequest],
+        cashflow_requests: list[CanonicalCashflowUpsertRequest],
+        fx_requests: list[CanonicalFxUpsertRequest],
+        corp_action_requests: list[CanonicalCorpActionUpsertRequest],
+    ) -> None:
         """Capture canonical bulk upsert calls via per-request delegations.
 
         Args:
@@ -228,10 +252,18 @@ class _CanonicalPersistRepositoryStub:
             self.db_canonical_corp_action_upsert(corp_action_request)
 
 
+class _FinalizeCall(TypedDict):
+    ingestion_run_id: UUID
+    status: str
+    error_code: str | None
+    error_message: str | None
+    diagnostics: list[dict[str, Any]] | None
+
+
 class _IngestionRepositoryStub:
     """Capture reprocess run finalize diagnostics for assertions."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize deterministic run record and capture buffer.
 
         Returns:
@@ -242,9 +274,17 @@ class _IngestionRepositoryStub:
         """
 
         self._run_id = uuid4()
-        self.finalize_calls: list[dict[str, object]] = []
+        self._timestamp = datetime(2026, 2, 14, tzinfo=timezone.utc)
+        self.finalize_calls: list[_FinalizeCall] = []
 
-    def db_ingestion_run_create_started(self, account_id, run_type, period_key, flex_query_id, report_date_local):
+    def db_ingestion_run_create_started(
+        self,
+        account_id: str,
+        run_type: str,
+        period_key: str,
+        flex_query_id: str,
+        report_date_local: date | None,
+    ) -> IngestionRunRecord:
         """Return deterministic started run record.
 
         Args:
@@ -273,17 +313,24 @@ class _IngestionRepositoryStub:
             ),
             state=IngestionRunState(
                 status="started",
-                started_at_utc=None,
+                started_at_utc=self._timestamp,
                 ended_at_utc=None,
                 duration_ms=None,
                 error_code=None,
                 error_message=None,
                 diagnostics=None,
             ),
-            created_at_utc=None,
+            created_at_utc=self._timestamp,
         )
 
-    def db_ingestion_run_finalize(self, ingestion_run_id, status, error_code, error_message, diagnostics):
+    def db_ingestion_run_finalize(
+        self,
+        ingestion_run_id: UUID,
+        status: str,
+        error_code: str | None,
+        error_message: str | None,
+        diagnostics: list[dict[str, Any]] | None,
+    ) -> IngestionRunRecord:
         """Capture finalize call diagnostics.
 
         Args:
@@ -320,14 +367,14 @@ class _IngestionRepositoryStub:
             ),
             state=IngestionRunState(
                 status=status,
-                started_at_utc=None,
+                started_at_utc=self._timestamp,
                 ended_at_utc=None,
                 duration_ms=None,
                 error_code=error_code,
                 error_message=error_message,
                 diagnostics=diagnostics,
             ),
-            created_at_utc=None,
+            created_at_utc=self._timestamp,
         )
 
 
@@ -402,6 +449,37 @@ class _CleanupRepositoryStub:
         return 44
 
 
+def _reprocess_orchestrator(
+    *,
+    raw_read_repository: _ArtifactRawRepository,
+    canonical_persistence_repository: _CanonicalPersistRepositoryStub,
+    snapshot_service: _SnapshotServiceStub,
+    snapshot_repository: _CleanupRepositoryStub,
+    config: CanonicalReprocessOrchestratorConfig,
+    ingestion_repository: _IngestionRepositoryStub | None = None,
+) -> CanonicalReprocessOrchestrator:
+    """Inject deliberately partial test doubles at the production boundary."""
+
+    return CanonicalReprocessOrchestrator(
+        raw_read_repository=cast(RawRecordReadRepositoryPort, raw_read_repository),
+        canonical_persistence_repository=cast(
+            CanonicalPersistenceRepositoryPort,
+            canonical_persistence_repository,
+        ),
+        snapshot_service=cast(StockLedgerSnapshotService, snapshot_service),
+        snapshot_repository=cast(
+            LedgerSnapshotRepositoryPort,
+            snapshot_repository,
+        ),
+        config=config,
+        ingestion_repository=(
+            cast(IngestionRunRepositoryPort, ingestion_repository)
+            if ingestion_repository is not None
+            else None
+        ),
+    )
+
+
 class _CliReprocessOrchestratorStub:
     def __init__(self) -> None:
         self.default_calls: list[str] = []
@@ -466,7 +544,7 @@ def _build_reprocess_harness(
     )
     cleanup_repository = _CleanupRepositoryStub(operation_log)
     ingestion_repository = _IngestionRepositoryStub()
-    orchestrator = CanonicalReprocessOrchestrator(
+    orchestrator = _reprocess_orchestrator(
         raw_read_repository=raw_repository,
         canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
         snapshot_service=_SnapshotServiceStub(operation_log, fail_on_snapshot_call),
@@ -503,7 +581,7 @@ def test_reprocess_maps_and_snapshots_selected_artifacts_chronologically(
     )
     snapshot_service = _SnapshotServiceStub(operation_log)
     cleanup_repository = _CleanupRepositoryStub(operation_log)
-    orchestrator = CanonicalReprocessOrchestrator(
+    orchestrator = _reprocess_orchestrator(
         raw_read_repository=raw_repository,
         canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
         snapshot_service=snapshot_service,
@@ -551,6 +629,7 @@ def test_reprocess_records_cleanup_candidates_before_deleted_count() -> None:
     result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
     assert result.status == "success"
     diagnostics = harness.ingestion_repository.finalize_calls[0]["diagnostics"]
+    assert diagnostics is not None
     cleanup_events = [event for event in diagnostics if event["stage"] == "snapshot_cleanup"]
     assert cleanup_events[0]["details"]["candidates"] == [
         {"report_date_local": "2026-02-21", "row_count": 44}
@@ -568,7 +647,7 @@ def test_jobs_reprocess_is_deterministic_for_identical_raw_inputs() -> None:
     )
     canonical_repository = _CanonicalPersistRepositoryStub()
     cleanup_repository = _CleanupRepositoryStub(operation_log)
-    orchestrator = CanonicalReprocessOrchestrator(
+    orchestrator = _reprocess_orchestrator(
         raw_read_repository=raw_read_repository,
         canonical_persistence_repository=canonical_repository,
         snapshot_service=_SnapshotServiceStub(operation_log),
@@ -594,6 +673,7 @@ def test_jobs_reprocess_persists_canonical_duration_diagnostics() -> None:
 
     assert result.status == "success"
     diagnostics = harness.ingestion_repository.finalize_calls[0]["diagnostics"]
+    assert diagnostics is not None
     canonical_completed = [
         event
         for event in diagnostics
@@ -614,6 +694,7 @@ def test_jobs_reprocess_persists_snapshot_reconciliation_counts() -> None:
 
     assert result.status == "success"
     diagnostics = harness.ingestion_repository.finalize_calls[0]["diagnostics"]
+    assert diagnostics is not None
     snapshot_completed = [
         event
         for event in diagnostics
@@ -636,7 +717,7 @@ def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query(
         operation_log,
     )
     cleanup_repository = _CleanupRepositoryStub(operation_log)
-    orchestrator = CanonicalReprocessOrchestrator(
+    orchestrator = _reprocess_orchestrator(
         raw_read_repository=raw_repository,
         canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
         snapshot_service=_SnapshotServiceStub(operation_log),
@@ -653,18 +734,28 @@ def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query(
     assert raw_repository.captured_scope == ("U_TEST", "2026-02-12", "query-override")
 
 
-def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code() -> None:
+def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     operation_log: list[tuple[object, ...]] = []
     raw_read_repository = _ArtifactRawRepository([], {}, operation_log)
 
-    def _raise_typed_statement_error(account_id: str, period_key: str, flex_query_id: str):
+    def _raise_typed_statement_error(
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+    ) -> NoReturn:
         _ = (account_id, period_key, flex_query_id)
         raise FlexStatementError("statement failed", error_code="1017")
 
-    raw_read_repository.db_raw_artifact_replay_candidate_list = _raise_typed_statement_error
+    monkeypatch.setattr(
+        raw_read_repository,
+        "db_raw_artifact_replay_candidate_list",
+        _raise_typed_statement_error,
+    )
     ingestion_repository = _IngestionRepositoryStub()
 
-    orchestrator = CanonicalReprocessOrchestrator(
+    orchestrator = _reprocess_orchestrator(
         raw_read_repository=raw_read_repository,
         canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
         snapshot_service=_SnapshotServiceStub(operation_log),
