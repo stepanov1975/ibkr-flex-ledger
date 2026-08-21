@@ -6,6 +6,7 @@ import random
 import socket
 import time
 from dataclasses import dataclass
+from time import perf_counter_ns
 from typing import Callable, Final
 import xml.etree.ElementTree as element_tree
 
@@ -30,6 +31,12 @@ from .flex_errors import (
     FlexTokenInvalidError,
 )
 from .interfaces import AdapterFetchResult, FlexAdapterPort
+
+
+def _duration_ms(started_ns: int) -> int:
+    """Return elapsed monotonic time in whole milliseconds."""
+
+    return max(0, (perf_counter_ns() - started_ns) // 1_000_000)
 
 
 @dataclass(frozen=True)
@@ -71,11 +78,14 @@ class _AdapterRetryStrategy:
         if retry_index < 0:
             raise ValueError("retry_index must be >= 0")
 
-        backoff_seconds = self.backoff_base_seconds * (2**retry_index)
+        if retry_index == 0:
+            return float(self.initial_wait_seconds)
+
+        backoff_seconds = self.backoff_base_seconds * (2 ** (retry_index - 1))
         capped_backoff_seconds = min(backoff_seconds, self.max_backoff_seconds)
         jitter_multiplier = self.strategy_calculate_jitter_multiplier()
         jittered_backoff_seconds = capped_backoff_seconds * jitter_multiplier
-        return max(float(self.initial_wait_seconds), float(jittered_backoff_seconds))
+        return float(jittered_backoff_seconds)
 
     def strategy_calculate_jitter_multiplier(self) -> float:
         """Return jitter multiplier using configured min/max bounds.
@@ -261,7 +271,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         request_url = f"{self._base_url}/SendRequest"
         request_parameters = {"t": self._token, "q": normalized_query_id, "v": self._api_version}
         self._adapter_record_stage_event(stage_timeline=stage_timeline, stage="request", status="started")
+        request_transport_started_ns = perf_counter_ns()
         request_payload = self._adapter_http_get(url=request_url, query_parameters=request_parameters)
+        request_transport_duration_ms = _duration_ms(request_transport_started_ns)
         response_root = self._adapter_parse_xml(payload=request_payload, context_label="send_request")
 
         status_value = (response_root.findtext("Status") or "").strip()
@@ -279,7 +291,10 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             raise FlexRequestError("Flex request response missing ReferenceCode")
         if not statement_url:
             statement_url = f"{self._base_url}/GetStatement"
-        request_details: dict[str, object] = {"run_reference": reference_code}
+        request_details: dict[str, object] = {
+            "run_reference": reference_code,
+            "request_transport_duration_ms": request_transport_duration_ms,
+        }
         if broker_request_at_utc is not None:
             request_details["broker_request_at_utc"] = broker_request_at_utc
         self._adapter_record_stage_event(
@@ -290,12 +305,21 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         )
 
         self._adapter_record_stage_event(stage_timeline=stage_timeline, stage="poll", status="started")
-        report_payload = self._adapter_poll_statement(
+        statement_poll_started_ns = perf_counter_ns()
+        report_payload, statement_poll_wait_duration_seconds = self._adapter_poll_statement(
             statement_url=statement_url,
             reference_code=reference_code,
             stage_timeline=stage_timeline,
         )
-        self._adapter_record_stage_event(stage_timeline=stage_timeline, stage="poll", status="completed")
+        self._adapter_record_stage_event(
+            stage_timeline=stage_timeline,
+            stage="poll",
+            status="completed",
+            details={
+                "statement_polling_duration_ms": _duration_ms(statement_poll_started_ns),
+                "statement_poll_wait_duration_ms": int(statement_poll_wait_duration_seconds * 1_000),
+            },
+        )
         return AdapterFetchResult(
             run_reference=reference_code,
             payload_bytes=bytes(report_payload),
@@ -307,7 +331,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         statement_url: str,
         reference_code: str,
         stage_timeline: list[dict[str, object]],
-    ) -> bytes:
+    ) -> tuple[bytes, float]:
         """Poll statement endpoint until report payload is available.
 
         Args:
@@ -315,7 +339,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             reference_code: Upstream request reference code.
 
         Returns:
-            bytes: Downloaded report payload.
+            tuple[bytes, float]: Downloaded report payload and requested wait seconds.
 
         Raises:
             FlexAdapterConnectionError: Raised for transport failures.
@@ -325,6 +349,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
         query_parameters = {"q": reference_code, "t": self._token, "v": self._api_version}
         pending_retry_delay_seconds = 0
+        statement_poll_wait_duration_seconds = 0.0
 
         for retry_index in range(self._retry_strategy.retry_attempts):
             wait_seconds = max(
@@ -333,6 +358,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             )
             pending_retry_delay_seconds = 0
             if wait_seconds > 0:
+                statement_poll_wait_duration_seconds += wait_seconds
                 time.sleep(wait_seconds)
 
             poll_payload = self._adapter_http_get(url=statement_url, query_parameters=query_parameters)
@@ -346,7 +372,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                     status="completed",
                         details={"poll_attempt": retry_index + 1, "payload_format": "non_xml"},
                 )
-                return poll_payload
+                return poll_payload, statement_poll_wait_duration_seconds
 
             if self._adapter_poll_payload_is_statement_xml(poll_root):
                 self._adapter_record_stage_event(
@@ -355,7 +381,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                     status="completed",
                     details={"poll_attempt": retry_index + 1},
                 )
-                return poll_payload
+                return poll_payload, statement_poll_wait_duration_seconds
 
             error_code, error_message = self._adapter_extract_response_error(poll_root)
             if error_code in FLEX_RETRYABLE_POLL_CODES:

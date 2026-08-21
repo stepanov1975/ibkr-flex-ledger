@@ -293,8 +293,8 @@ def test_adapters_flex_poll_non_retryable_error_raises_typed_statement_error(mon
         adapter.adapter_fetch_report(query_id="query-id")
 
 
-def test_adapters_flex_retry_wait_uses_exponential_backoff_with_cap_and_jitter() -> None:
-    """Calculate exponential backoff wait with deterministic jitter and cap.
+def test_adapter_calculate_retry_wait_uses_fixed_initial_wait_then_backoff() -> None:
+    """Use a fixed first-poll delay and jittered exponential retry waits.
 
     Args:
         None: This test uses deterministic adapter configuration only.
@@ -308,17 +308,18 @@ def test_adapters_flex_retry_wait_uses_exponential_backoff_with_cap_and_jitter()
 
     adapter = FlexWebServiceAdapter(
         token="token",
-        initial_wait_seconds=0,
-        retry_backoff_base_seconds=4,
-        retry_max_backoff_seconds=10,
-        jitter_min_multiplier=1.0,
-        jitter_max_multiplier=1.0,
-        random_unit_interval_provider=lambda: 0.0,
+        initial_wait_seconds=5,
+        retry_backoff_base_seconds=10,
+        retry_max_backoff_seconds=60,
+        jitter_min_multiplier=0.5,
+        jitter_max_multiplier=1.5,
+        random_unit_interval_provider=lambda: 1.0,
     )
 
-    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(4.0)
-    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=1) == pytest.approx(8.0)
-    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=2) == pytest.approx(10.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(0) == 5.0
+    assert adapter.adapter_calculate_retry_wait_seconds(1) == 15.0
+    assert adapter.adapter_calculate_retry_wait_seconds(2) == 30.0
+    assert adapter.adapter_calculate_retry_wait_seconds(4) == 90.0
 
 
 def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
@@ -345,6 +346,36 @@ def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
     )
 
     assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)
+
+
+def test_adapter_poll_diagnostics_include_monotonic_durations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Include non-negative transport and polling durations in completed events."""
+
+    request_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    report_payload = b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement /></FlexStatements></FlexQueryResponse>'
+    payloads = [request_payload, report_payload]
+    waits: list[float] = []
+    adapter = FlexWebServiceAdapter(token="token", initial_wait_seconds=5, retry_attempts=1)
+    monkeypatch.setattr(adapter, "_adapter_http_get", lambda **_kwargs: payloads.pop(0))
+    monkeypatch.setattr(flex_module.time, "sleep", waits.append)
+
+    result = adapter.adapter_fetch_report(query_id="query")
+
+    request_details = next(
+        event["details"] for event in result.stage_timeline
+        if event["stage"] == "request" and event["status"] == "completed"
+    )
+    poll_details = next(
+        event["details"] for event in result.stage_timeline
+        if event["stage"] == "poll" and event["status"] == "completed"
+    )
+    assert request_details["request_transport_duration_ms"] >= 0
+    assert poll_details["statement_polling_duration_ms"] >= 0
+    assert poll_details["statement_poll_wait_duration_ms"] == 5_000
+    assert waits == [5.0]
 
 
 def test_adapters_flex_transport_client_reused_across_request_and_poll(monkeypatch: pytest.MonkeyPatch) -> None:
