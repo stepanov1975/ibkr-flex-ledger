@@ -1,6 +1,24 @@
 services:
   postgres:
     image: postgres:17
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /var/lib/postgresql/wal_archive /backups
+        chown -R postgres:postgres /var/lib/postgresql/wal_archive /backups
+        exec docker-entrypoint.sh "$$@"
+      - --
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f
+      - -c
+      - archive_timeout=300
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -15,6 +33,8 @@ services:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - postgres_wal_archive:/var/lib/postgresql/wal_archive
+      - postgres_backups:/backups
 
   app:
     build:
@@ -36,6 +56,8 @@ services:
       API_MAX_LIMIT: ${API_MAX_LIMIT}
     ports:
       - "${APPLICATION_PORT}:8000"
+    volumes:
+      - diagnostics_archive:/service/var/diagnostics-archive
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 10s
@@ -45,3 +67,6 @@ services:
 
 volumes:
   postgres_data:
+  postgres_wal_archive:
+  postgres_backups:
+  diagnostics_archive:

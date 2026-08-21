@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from app.db import (
     LedgerCashflowRecord,
+    LedgerCorporateActionRecord,
     LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
@@ -100,6 +101,15 @@ class StockLedgerSnapshotService:
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
         )
+        corporate_action_reader = getattr(self._repository, "db_ledger_corporate_action_list_for_account", None)
+        corporate_action_rows = (
+            corporate_action_reader(
+                account_id=normalized_account_id,
+                through_report_date_local=normalized_report_date,
+            )
+            if corporate_action_reader is not None
+            else []
+        )
         open_position_valuation_map = self._build_open_position_valuation_map(
             self._repository.db_ledger_open_position_valuation_list_for_run(
                 account_id=normalized_account_id,
@@ -111,6 +121,7 @@ class StockLedgerSnapshotService:
 
         trades_by_instrument = self._group_trades_by_instrument(trade_rows)
         cashflows_by_instrument = self._group_cashflows_by_instrument(cashflow_rows)
+        corporate_actions_by_instrument = self._group_corporate_actions_by_instrument(corporate_action_rows)
 
         snapshot_requests: list[PnlSnapshotDailyUpsertRequest] = []
         position_lot_requests: list[PositionLotUpsertRequest] = []
@@ -122,6 +133,10 @@ class StockLedgerSnapshotService:
             fx_sources: set[str] = set()
             missing_fx = False
             for trade in instrument_trades:
+                adjustment_factor = self._trade_adjustment_factor(
+                    trade,
+                    corporate_actions_by_instrument.get(instrument_id, []),
+                )
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
                     functional_currency=trade.functional_currency,
@@ -139,8 +154,8 @@ class StockLedgerSnapshotService:
                         source_raw_record_id=str(trade.source_raw_record_id),
                         trade_timestamp_utc=trade.trade_timestamp_utc.isoformat(),
                         side=trade.side,
-                        quantity=Decimal(trade.quantity),
-                        price=Decimal(trade.price) * trade_fx_rate,
+                        quantity=Decimal(trade.quantity) * adjustment_factor,
+                        price=Decimal(trade.price) * trade_fx_rate / adjustment_factor,
                         fees=self._trade_fee_total(trade) * trade_fx_rate,
                         withholding_tax=Decimal("0"),
                     )
@@ -429,6 +444,33 @@ class StockLedgerSnapshotService:
             instrument_key = str(cashflow_row.instrument_id)
             grouped_rows.setdefault(instrument_key, []).append(cashflow_row)
         return grouped_rows
+
+    def _group_corporate_actions_by_instrument(
+        self,
+        rows: list[LedgerCorporateActionRecord],
+    ) -> dict[str, list[LedgerCorporateActionRecord]]:
+        """Group deterministic quantity adjustments by instrument."""
+
+        grouped: dict[str, list[LedgerCorporateActionRecord]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.instrument_id), []).append(row)
+        return grouped
+
+    def _trade_adjustment_factor(
+        self,
+        trade: LedgerTradeFillRecord,
+        actions: list[LedgerCorporateActionRecord],
+    ) -> Decimal:
+        """Restate pre-action trades into the current post-action quantity basis."""
+
+        factor = Decimal("1")
+        for action in actions:
+            if trade.report_date_local < action.report_date_local:
+                action_factor = Decimal(action.adjustment_factor)
+                if action_factor <= Decimal("0"):
+                    raise ValueError("corporate-action adjustment_factor must be positive")
+                factor *= action_factor
+        return factor
 
     def _trade_fee_total(self, trade_row: LedgerTradeFillRecord) -> Decimal:
         """Build combined trade-fee impact from fees and commission fields.

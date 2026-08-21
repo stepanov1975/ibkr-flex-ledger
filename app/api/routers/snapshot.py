@@ -35,8 +35,8 @@ def api_create_snapshot_router(
 
     @router.get("/daily")
     def api_snapshot_daily_list(
-        limit: int = Query(default=settings.api_default_limit, ge=1),
-        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=settings.api_default_limit),
+        offset: int = Query(default=0),
         sort_by: str = Query(default="report_date_local"),
         sort_dir: str = Query(default="desc"),
         report_date_from: str | None = Query(default=None),
@@ -61,6 +61,11 @@ def api_create_snapshot_router(
 
         normalized_sort_by = sort_by.strip()
         normalized_sort_dir = sort_dir.strip().lower()
+        if limit < 1 or offset < 0:
+            return JSONResponse(
+                content={"status": "error", "code": "INVALID_PAGINATION", "message": "invalid limit or offset"},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         allowed_sort_by = {"report_date_local", "instrument_id", "total_pnl", "created_at_utc"}
         allowed_sort_dir = {"asc", "desc"}
         if normalized_sort_by not in allowed_sort_by:
@@ -88,6 +93,12 @@ def api_create_snapshot_router(
             report_date_from=report_date_from,
             report_date_to=report_date_to,
         )
+        count_rows = getattr(snapshot_repository, "db_pnl_snapshot_daily_count", None)
+        total = (
+            count_rows(settings.account_id, report_date_from, report_date_to)
+            if count_rows is not None
+            else offset + len(snapshot_rows)
+        )
 
         response_payload: dict[str, object] = {
             "items": [api_serialize_pnl_snapshot_daily_row(snapshot_row) for snapshot_row in snapshot_rows],
@@ -96,6 +107,8 @@ def api_create_snapshot_router(
                 "applied_limit": applied_limit,
                 "offset": offset,
                 "returned": len(snapshot_rows),
+                "total": total,
+                "has_more": offset + len(snapshot_rows) < total,
             },
             "sort": {
                 "sort_by": normalized_sort_by,

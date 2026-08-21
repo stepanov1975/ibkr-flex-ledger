@@ -28,7 +28,7 @@ def _migration_build_database_url(base_url: str, database_name: str) -> str:
     """
 
     parsed_url: URL = make_url(base_url)
-    return str(parsed_url.set(database=database_name))
+    return parsed_url.set(database=database_name).render_as_string(hide_password=False)
 
 
 def _migration_create_database(admin_url: str, database_name: str) -> None:

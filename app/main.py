@@ -4,6 +4,7 @@ This module validates startup configuration and launches the FastAPI service.
 """
 
 import argparse
+from pathlib import Path
 
 import uvicorn
 
@@ -13,8 +14,9 @@ from app.bootstrap import (
     bootstrap_create_reprocess_orchestrator,
 )
 from app.config import config_load_settings
-from app.db import SQLAlchemyIngestionRunService, db_create_engine
+from app.db import SQLAlchemyIngestionRunService, SQLAlchemyPortfolioService, db_create_engine
 from app.jobs import job_extract_missing_sections_from_diagnostics
+from app.operations import operations_archive_expired_diagnostics
 
 
 def main() -> None:
@@ -32,7 +34,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="api",
-        choices=("api", "ingestion-run", "reprocess-run"),
+        choices=("api", "ingestion-run", "reprocess-run", "diagnostics-retention"),
         help="Runtime command: `api` starts server, `ingestion-run` triggers one ingestion workflow, "
         "`reprocess-run` triggers one canonical reprocess workflow",
         type=str,
@@ -50,6 +52,14 @@ def main() -> None:
         help="Optional Flex query id override for `reprocess-run`",
     )
     parsed_arguments = argument_parser.parse_args()
+
+    if parsed_arguments.command == "diagnostics-retention":
+        settings = config_load_settings()
+        engine = db_create_engine(database_url=settings.database_url)
+        repository = SQLAlchemyPortfolioService(engine=engine)
+        result = operations_archive_expired_diagnostics(repository, Path(settings.diagnostics_archive_dir))
+        print(result)
+        return
 
     if parsed_arguments.command == "ingestion-run":
         ingestion_orchestrator = bootstrap_create_ingestion_orchestrator()

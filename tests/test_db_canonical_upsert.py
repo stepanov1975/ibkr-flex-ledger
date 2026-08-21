@@ -38,7 +38,7 @@ def _upsert_build_database_url(base_url: str, database_name: str) -> str:
     """
 
     parsed_url: URL = make_url(base_url)
-    return str(parsed_url.set(database=database_name))
+    return parsed_url.set(database=database_name).render_as_string(hide_password=False)
 
 
 def _upsert_resolve_reachable_base_url() -> str:
@@ -195,7 +195,7 @@ def _upsert_seed_dependencies(engine) -> tuple[str, str, str, str, str]:
                 "section_name, source_row_ref, source_payload"
                 ") VALUES ("
                 ":raw_record_id, :raw_artifact_id, :ingestion_run_id, :account_id, '2026-02-14', 'query', 'sha', "
-                "'Trades', 'Trades:Trade:transactionID=1', '{\"x\":1}'::jsonb"
+                "'Trades', 'Trades:Trade:transactionID=1', CAST(:source_record_payload AS jsonb)"
                 ")"
             ),
             {
@@ -203,6 +203,7 @@ def _upsert_seed_dependencies(engine) -> tuple[str, str, str, str, str]:
                 "raw_artifact_id": raw_artifact_id,
                 "ingestion_run_id": ingestion_run_1,
                 "account_id": account_id,
+                "source_record_payload": '{"x": 1}',
             },
         )
         connection.execute(

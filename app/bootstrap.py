@@ -12,6 +12,7 @@ from app.db import (
     SQLAlchemyDatabaseHealthService,
     SQLAlchemyIngestionRunService,
     SQLAlchemyLedgerSnapshotService,
+    SQLAlchemyPortfolioService,
     SQLAlchemyRawPersistenceService,
     db_create_engine,
 )
@@ -42,6 +43,7 @@ def bootstrap_create_application() -> FastAPI:
     raw_persistence_repository = SQLAlchemyRawPersistenceService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
     snapshot_repository = SQLAlchemyLedgerSnapshotService(engine=engine)
+    portfolio_repository = SQLAlchemyPortfolioService(engine=engine)
     snapshot_service = StockLedgerSnapshotService(repository=snapshot_repository)
     flex_adapter = FlexWebServiceAdapter(
         token=settings.ibkr_flex_token,
@@ -84,6 +86,7 @@ def bootstrap_create_application() -> FastAPI:
         ingestion_orchestrator=ingestion_orchestrator,
         reprocess_orchestrator=reprocess_orchestrator,
         snapshot_repository=snapshot_repository,
+        portfolio_repository=portfolio_repository,
     )
 
 

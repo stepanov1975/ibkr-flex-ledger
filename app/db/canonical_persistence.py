@@ -414,6 +414,26 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         ),
                         corp_action_requests_with_action_id,
                     )
+
+                if normalized_corp_action_requests:
+                    connection.execute(
+                        text(
+                            "INSERT INTO corporate_action_manual_case ("
+                            "event_corp_action_id, action_type, instrument_id) "
+                            "SELECT event_corp_action_id, reorg_code, instrument_id "
+                            "FROM event_corp_action "
+                            "WHERE requires_manual = true AND instrument_id IS NOT NULL "
+                            "ON CONFLICT ON CONSTRAINT uq_corporate_action_manual_case_event DO NOTHING"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "UPDATE event_corp_action AS event SET manual_case_id = manual_case.case_id, provisional = true "
+                            "FROM corporate_action_manual_case AS manual_case "
+                            "WHERE manual_case.event_corp_action_id = event.event_corp_action_id "
+                            "AND event.manual_case_id IS DISTINCT FROM manual_case.case_id"
+                        )
+                    )
         except SQLAlchemyError as error:
             raise RuntimeError("canonical bulk upsert failed") from error
 

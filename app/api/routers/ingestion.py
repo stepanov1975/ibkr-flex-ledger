@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
@@ -126,10 +127,14 @@ def api_create_ingestion_router(
 
     @router.get("/runs")
     def api_ingestion_run_list(
-        limit: int = Query(default=settings.api_default_limit, ge=1),
-        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=settings.api_default_limit),
+        offset: int = Query(default=0),
         sort_by: str = Query(default="started_at_utc"),
         sort_dir: str = Query(default="desc"),
+        run_status: str | None = Query(default=None, alias="status"),
+        from_utc: datetime | None = Query(default=None),
+        to_utc: datetime | None = Query(default=None),
+        run_type: str | None = Query(default=None),
     ) -> JSONResponse:
         """Return ingestion runs list ordered by latest first.
 
@@ -146,6 +151,11 @@ def api_create_ingestion_router(
 
         normalized_sort_by = sort_by.strip()
         normalized_sort_dir = sort_dir.strip().lower()
+        if limit < 1 or offset < 0:
+            return JSONResponse(
+                content={"status": "error", "code": "INVALID_PAGINATION", "message": "invalid limit or offset"},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         allowed_sort_by = {"started_at_utc", "ended_at_utc", "status", "duration_ms"}
         allowed_sort_dir = {"asc", "desc"}
         if normalized_sort_by not in allowed_sort_by:
@@ -164,12 +174,17 @@ def api_create_ingestion_router(
             return JSONResponse(content=payload, status_code=status.HTTP_400_BAD_REQUEST)
 
         applied_limit = min(limit, settings.api_max_limit)
-        run_rows = ingestion_repository.db_ingestion_run_list(
-            limit=applied_limit,
-            offset=offset,
-            sort_by=normalized_sort_by,
-            sort_dir=normalized_sort_dir,
-        )
+        filtered_list = getattr(ingestion_repository, "db_ingestion_run_list_filtered", None)
+        if filtered_list is not None:
+            run_rows, total = filtered_list(
+                limit=applied_limit, offset=offset, sort_by=normalized_sort_by, sort_dir=normalized_sort_dir,
+                status=run_status, from_utc=from_utc, to_utc=to_utc, run_type=run_type,
+            )
+        else:
+            run_rows = ingestion_repository.db_ingestion_run_list(
+                limit=applied_limit, offset=offset, sort_by=normalized_sort_by, sort_dir=normalized_sort_dir,
+            )
+            total = offset + len(run_rows)
         response_payload: dict[str, object] = {
             "items": [api_serialize_ingestion_run_record(run_record) for run_record in run_rows],
             "page": {
@@ -177,12 +192,19 @@ def api_create_ingestion_router(
                 "applied_limit": applied_limit,
                 "offset": offset,
                 "returned": len(run_rows),
+                "total": total,
+                "has_more": offset + len(run_rows) < total,
             },
             "sort": {
                 "sort_by": normalized_sort_by,
                 "sort_dir": normalized_sort_dir,
             },
-            "filters": {},
+            "filters": {
+                "status": run_status,
+                "from_utc": None if from_utc is None else from_utc.isoformat(),
+                "to_utc": None if to_utc is None else to_utc.isoformat(),
+                "run_type": run_type,
+            },
         }
         return JSONResponse(content=response_payload, status_code=status.HTTP_200_OK)
 

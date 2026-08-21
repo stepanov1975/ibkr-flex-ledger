@@ -11,6 +11,7 @@ from app.domain.flex_parsing import (
     domain_flex_parse_local_date,
     domain_flex_parse_timestamp_to_utc_iso,
 )
+from app.domain import domain_classify_corporate_action
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
     CanonicalCorpActionUpsertRequest,
@@ -143,6 +144,8 @@ class CanonicalMappingService:
                 continue
 
             if section_name == "CashTransactions":
+                if not self._mapping_row_matches_tag(raw_record, expected_row_tag="CashTransaction"):
+                    continue
                 cashflow_instrument_request, cashflow_request = self._mapping_map_cashflow_record(
                     account_id=normalized_account_id,
                     functional_currency=normalized_functional_currency,
@@ -154,6 +157,8 @@ class CanonicalMappingService:
                 continue
 
             if section_name == "ConversionRates":
+                if not self._mapping_row_matches_tag(raw_record, expected_row_tag="ConversionRate"):
+                    continue
                 fx_requests.append(
                     self._mapping_map_fx_record(
                         account_id=normalized_account_id,
@@ -414,6 +419,7 @@ class CanonicalMappingService:
         payload = raw_record.source_payload
         conid = self._mapping_required_value(payload, "conid", raw_record)
         reorg_code = self._mapping_required_value(payload, "type", raw_record)
+        classification = domain_classify_corporate_action(reorg_code, payload)
         report_date_local = self._mapping_resolve_report_date(raw_record, payload)
         currency = self._mapping_optional_value(payload, "currency") or "USD"
 
@@ -438,11 +444,11 @@ class CanonicalMappingService:
             source_raw_record_id=str(raw_record.raw_record_id),
             action_id=self._mapping_optional_value(payload, "actionID"),
             transaction_id=self._mapping_optional_value(payload, "transactionID"),
-            reorg_code=reorg_code,
+            reorg_code=classification.action_type,
             report_date_local=report_date_local,
             description=self._mapping_optional_value(payload, "description"),
-            requires_manual=False,
-            provisional=False,
+            requires_manual=classification.requires_manual,
+            provisional=classification.requires_manual,
             manual_case_id=None,
         )
         return instrument_request, corp_action_request

@@ -6,10 +6,19 @@ This module defines API application composition used by the MVP runtime.
 from fastapi import FastAPI
 
 from app.config import AppSettings
-from app.db import DatabaseHealthPort, IngestionRunRepositoryPort, LedgerSnapshotRepositoryPort
+from app.db import DatabaseHealthPort, IngestionRunRepositoryPort, LedgerSnapshotRepositoryPort, PortfolioRepositoryPort
 from app.jobs import JobOrchestratorPort
 
-from .routers import api_create_health_router, api_create_ingestion_router, api_create_snapshot_router
+from .routers import (
+    api_create_corporate_action_router,
+    api_create_health_router,
+    api_create_ingestion_router,
+    api_create_master_data_router,
+    api_create_operations_router,
+    api_create_reports_router,
+    api_create_snapshot_router,
+    api_create_ui_router,
+)
 
 
 def create_api_application(
@@ -19,6 +28,7 @@ def create_api_application(
     ingestion_orchestrator: JobOrchestratorPort,
     reprocess_orchestrator: JobOrchestratorPort | None = None,
     snapshot_repository: LedgerSnapshotRepositoryPort | None = None,
+    portfolio_repository: PortfolioRepositoryPort | None = None,
 ) -> FastAPI:
     """Create the FastAPI application instance for the service.
 
@@ -56,6 +66,7 @@ def create_api_application(
         }
 
     application.include_router(api_create_health_router(db_health_service=db_health_service))
+    application.include_router(api_create_ui_router())
     application.include_router(
         api_create_ingestion_router(
             settings=settings,
@@ -71,6 +82,10 @@ def create_api_application(
                 snapshot_repository=snapshot_repository,
             )
         )
+    if portfolio_repository is not None:
+        application.include_router(api_create_master_data_router(settings, portfolio_repository))
+        application.include_router(api_create_corporate_action_router(portfolio_repository))
+        application.include_router(api_create_reports_router(settings, portfolio_repository))
+        application.include_router(api_create_operations_router(settings, portfolio_repository))
 
     return application
-

@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
+    LedgerCorporateActionRecord,
     LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
@@ -350,6 +351,47 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             for row in rows
         ]
 
+    def db_ledger_corporate_action_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+    ) -> list[LedgerCorporateActionRecord]:
+        """List auto-classified split and stock-dividend factors."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        normalized_through_date = self._db_ledger_validate_optional_date_text(
+            through_report_date_local, "through_report_date_local"
+        )
+        if normalized_through_date is None:
+            raise ValueError("through_report_date_local must not be blank")
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT event.instrument_id, event.report_date_local, event.reorg_code AS action_type, "
+                        "COALESCE(NULLIF(raw.source_payload->>'ratio','')::numeric, "
+                        "NULLIF(raw.source_payload->>'newQuantity','')::numeric / "
+                        "NULLIF(NULLIF(raw.source_payload->>'oldQuantity','')::numeric, 0)) AS adjustment_factor "
+                        "FROM event_corp_action event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+                        "WHERE event.account_id=:account_id AND event.report_date_local<=CAST(:through_date AS date) "
+                        "AND event.requires_manual=false AND event.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
+                        "AND event.instrument_id IS NOT NULL ORDER BY event.report_date_local asc, event.event_corp_action_id asc"
+                    ),
+                    {"account_id": normalized_account_id, "through_date": normalized_through_date},
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger corporate-action read failed") from error
+        return [
+            LedgerCorporateActionRecord(
+                instrument_id=row["instrument_id"],
+                report_date_local=row["report_date_local"],
+                action_type=row["action_type"],
+                adjustment_factor=str(row["adjustment_factor"]),
+            )
+            for row in rows
+            if row["adjustment_factor"] is not None
+        ]
+
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
 
@@ -475,7 +517,10 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         ":account_id, CAST(:report_date_local AS date), CAST(:instrument_id AS uuid), "
                         "CAST(:position_qty AS numeric), CAST(:cost_basis AS numeric), CAST(:realized_pnl AS numeric), "
                         "CAST(:unrealized_pnl AS numeric), CAST(:total_pnl AS numeric), CAST(:fees AS numeric), "
-                        "CAST(:withholding_tax AS numeric), :currency, :provisional, :valuation_source, :fx_source, "
+                        "CAST(:withholding_tax AS numeric), :currency, "
+                        "(:provisional OR EXISTS (SELECT 1 FROM corporate_action_manual_case manual_case "
+                        "WHERE manual_case.instrument_id = CAST(:instrument_id AS uuid) AND manual_case.status = 'open')), "
+                        ":valuation_source, :fx_source, "
                         "CAST(:ingestion_run_id AS uuid)"
                         ") ON CONFLICT ON CONSTRAINT uq_pnl_snapshot_daily_account_date_instrument DO UPDATE SET "
                         "position_qty = EXCLUDED.position_qty, "
@@ -559,6 +604,31 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             raise RuntimeError("daily snapshot list failed") from error
 
         return [self._db_ledger_map_snapshot_row(row) for row in rows]
+
+    def db_pnl_snapshot_daily_count(
+        self,
+        account_id: str,
+        report_date_from: str | None = None,
+        report_date_to: str | None = None,
+    ) -> int:
+        """Count account snapshots within optional date bounds."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        normalized_from = self._db_ledger_validate_optional_date_text(report_date_from, "report_date_from")
+        normalized_to = self._db_ledger_validate_optional_date_text(report_date_to, "report_date_to")
+        try:
+            with self._engine.connect() as connection:
+                value = connection.execute(
+                    text(
+                        "SELECT count(*) FROM pnl_snapshot_daily WHERE account_id=:account_id "
+                        "AND (CAST(:date_from AS date) IS NULL OR report_date_local>=CAST(:date_from AS date)) "
+                        "AND (CAST(:date_to AS date) IS NULL OR report_date_local<=CAST(:date_to AS date))"
+                    ),
+                    {"account_id": normalized_account_id, "date_from": normalized_from, "date_to": normalized_to},
+                ).scalar_one()
+        except SQLAlchemyError as error:
+            raise RuntimeError("daily snapshot count failed") from error
+        return int(value)
 
     def _db_ledger_validate_position_lot_upsert_request(self, request: PositionLotUpsertRequest) -> dict[str, Any]:
         """Validate one position-lot upsert request.

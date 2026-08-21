@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -295,6 +295,51 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                 return [self._map_ingestion_run_record(row) for row in rows]
         except SQLAlchemyError as error:
             raise RuntimeError("failed to list ingestion runs") from error
+
+    def db_ingestion_run_list_filtered(
+        self,
+        limit: int,
+        offset: int,
+        sort_by: str,
+        sort_dir: str,
+        status: str | None,
+        from_utc: datetime | None,
+        to_utc: datetime | None,
+        run_type: str | None,
+    ) -> tuple[list[IngestionRunRecord], int]:
+        """List and count runs using the frozen operations filter contract."""
+
+        if sort_by not in self._INGESTION_RUN_ALLOWED_SORT_FIELDS or sort_dir not in self._INGESTION_RUN_ALLOWED_SORT_DIRECTIONS:
+            raise ValueError("unsupported ingestion run sort")
+        order = {
+            "started_at_utc": "started_at_utc",
+            "ended_at_utc": "ended_at_utc",
+            "status": "status",
+            "duration_ms": "duration_ms",
+        }[sort_by]
+        direction = "asc" if sort_dir == "asc" else "desc"
+        where = (
+            "(CAST(:status AS text) IS NULL OR status=:status) "
+            "AND (CAST(:from_utc AS timestamptz) IS NULL OR started_at_utc>=:from_utc) "
+            "AND (CAST(:to_utc AS timestamptz) IS NULL OR started_at_utc<=:to_utc) "
+            "AND (CAST(:run_type AS text) IS NULL OR run_type=:run_type)"
+        )
+        params = {"limit": limit, "offset": offset, "status": status, "from_utc": from_utc,
+                  "to_utc": to_utc, "run_type": run_type}
+        columns = (
+            "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, report_date_local, "
+            "started_at_utc, ended_at_utc, duration_ms, error_code, error_message, diagnostics, created_at_utc"
+        )
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(f"SELECT {columns} FROM ingestion_run WHERE {where} ORDER BY {order} {direction} NULLS LAST, ingestion_run_id {direction} LIMIT :limit OFFSET :offset"),
+                    params,
+                ).mappings().all()
+                total = int(connection.execute(text(f"SELECT count(*) FROM ingestion_run WHERE {where}"), params).scalar_one())
+        except SQLAlchemyError as error:
+            raise RuntimeError("failed to list filtered ingestion runs") from error
+        return ([self._map_ingestion_run_record(row) for row in rows], total)
 
     def _db_fetch_run_by_id_or_raise(self, connection: Connection, ingestion_run_id: UUID) -> IngestionRunRecord:
         """Fetch one run inside active transaction and raise when missing.

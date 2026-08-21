@@ -54,6 +54,7 @@ class AppSettings(BaseSettings):
     ibkr_flex_jitter_max_multiplier: float = Field(default=1.5, gt=0)
     api_default_limit: int = Field(default=50, ge=1)
     api_max_limit: int = Field(default=200, ge=1)
+    diagnostics_archive_dir: str = Field(default="var/diagnostics-archive", min_length=1)
 
     @field_validator("account_id", "ibkr_flex_token", "ibkr_flex_query_id")
     @classmethod

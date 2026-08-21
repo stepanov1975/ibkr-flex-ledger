@@ -778,6 +778,16 @@ class LedgerOpenPositionValuationRecord:
 
 
 @dataclass(frozen=True)
+class LedgerCorporateActionRecord:
+    """Deterministic quantity adjustment available to the FIFO ledger."""
+
+    instrument_id: UUID
+    report_date_local: date
+    action_type: str
+    adjustment_factor: str
+
+
+@dataclass(frozen=True)
 class PositionLotUpsertRequest:
     """Input contract for deterministic position-lot persistence.
 
@@ -959,6 +969,13 @@ class LedgerSnapshotRepositoryPort(Protocol):
     ) -> list[LedgerFxRateRecord]:
         """List conversion rates through a report date in fallback order."""
 
+    def db_ledger_corporate_action_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+    ) -> list[LedgerCorporateActionRecord]:
+        """List deterministic auto-handled quantity adjustments."""
+
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
 
@@ -1023,3 +1040,11 @@ class LedgerSnapshotRepositoryPort(Protocol):
             ValueError: Raised when input values are invalid.
             RuntimeError: Raised when database read fails.
         """
+
+    def db_pnl_snapshot_daily_count(
+        self,
+        account_id: str,
+        report_date_from: str | None = None,
+        report_date_to: str | None = None,
+    ) -> int:
+        """Count snapshot rows for the list response envelope."""

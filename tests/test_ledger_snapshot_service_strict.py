@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
+    LedgerCorporateActionRecord,
     LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerTradeFillRecord,
@@ -30,11 +31,13 @@ class _RepositoryStub:
         valuations: list[LedgerOpenPositionValuationRecord],
         fx_rates: list[LedgerFxRateRecord] | None = None,
         cashflows: list[LedgerCashflowRecord] | None = None,
+        corporate_actions: list[LedgerCorporateActionRecord] | None = None,
     ) -> None:
         self._trades = trades
         self._valuations = valuations
         self._fx_rates = fx_rates or []
         self._cashflows = cashflows or []
+        self._corporate_actions = corporate_actions or []
         self.position_requests = _SnapshotCapture(requests=[])
         self.snapshot_requests = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
@@ -58,6 +61,11 @@ class _RepositoryStub:
         """Return no conversion rows for USD-only fixtures."""
         _ = (account_id, through_report_date_local)
         return self._fx_rates
+
+    def db_ledger_corporate_action_list_for_account(self, account_id: str, through_report_date_local: str):
+        """Return deterministic corporate-action adjustments."""
+        _ = (account_id, through_report_date_local)
+        return self._corporate_actions
 
     def db_position_lot_upsert_many(self, requests):
         """Capture position-lot upsert payload for assertions."""
@@ -244,6 +252,36 @@ def test_snapshot_includes_base_cashflow_amount_in_realized_pnl() -> None:
     snapshot = repository.snapshot_requests.requests[0]
     assert Decimal(snapshot.realized_pnl) == Decimal("8.5")
     assert Decimal(snapshot.total_pnl) == Decimal("8.5")
+
+
+def test_snapshot_restates_pre_split_lots_on_current_quantity_basis() -> None:
+    """Apply deterministic split factor to pre-action quantity and unit basis."""
+
+    instrument_id = uuid4()
+    trade = LedgerTradeFillRecord(
+        event_trade_fill_id=uuid4(), account_id="U_TEST", instrument_id=instrument_id,
+        source_raw_record_id=uuid4(), trade_timestamp_utc=datetime(2026, 2, 19, 12, 0, tzinfo=timezone.utc),
+        report_date_local=date(2026, 2, 19), side="BUY", quantity="10", price="100", fees="0", commission="0",
+        functional_currency="USD",
+    )
+    action = LedgerCorporateActionRecord(
+        instrument_id=instrument_id, report_date_local=date(2026, 2, 20),
+        action_type="FORWARDSPLIT", adjustment_factor="2",
+    )
+    valuation = LedgerOpenPositionValuationRecord(
+        instrument_id=instrument_id, position_qty="20", mark_price="60", broker_unrealized_pnl="200",
+        report_date_local=date(2026, 2, 20),
+    )
+    repository = _RepositoryStub(trades=[trade], valuations=[valuation], corporate_actions=[action])
+
+    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+        account_id="U_TEST", ingestion_run_id=str(uuid4()), report_date_local="2026-02-20"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.position_qty) == Decimal("20")
+    assert Decimal(snapshot.cost_basis) == Decimal("1000")
+    assert Decimal(snapshot.unrealized_pnl) == Decimal("200")
 
 
 def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> None:

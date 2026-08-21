@@ -148,6 +148,13 @@ Service endpoints:
 - App: `http://127.0.0.1:8000`
 - Health: `http://127.0.0.1:8000/health`
 - PostgreSQL host port: `5433` (container port `5432`)
+- Portfolio dashboard: `http://127.0.0.1:8000/ui`
+- OpenAPI documentation: `http://127.0.0.1:8000/docs`
+
+The MVP now includes corporate-action manual cases, instrument labels and notes,
+PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
+SLO visibility. Backup, retention, and restore procedures are documented in
+`docs/operations.md`.
 
 ### Database runtime mode (Docker-only recommended)
 

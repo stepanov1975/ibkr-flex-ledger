@@ -104,6 +104,35 @@ def test_mapping_build_canonical_batch_maps_all_supported_event_types() -> None:
     assert mapped_batch.trade_fill_requests[0].ib_exec_id == "EXEC-1001"
 
 
+def test_mapping_ignores_empty_section_placeholders() -> None:
+    """Treat present-but-empty optional event sections as zero canonical rows."""
+
+    ingestion_run_id = uuid4()
+    raw_records = [
+        RawRecordForMapping(
+            raw_record_id=uuid4(),
+            ingestion_run_id=ingestion_run_id,
+            section_name=section_name,
+            source_row_ref=f"{section_name}:section:1",
+            report_date_local=date(2026, 2, 14),
+            source_payload={},
+        )
+        for section_name in ("Trades", "CashTransactions", "ConversionRates", "CorporateActions")
+    ]
+
+    mapped_batch = mapping_build_canonical_batch(
+        account_id="U_TEST",
+        functional_currency="USD",
+        raw_records=raw_records,
+    )
+
+    assert mapped_batch.instrument_upsert_requests == ()
+    assert mapped_batch.trade_fill_requests == ()
+    assert mapped_batch.cashflow_requests == ()
+    assert mapped_batch.fx_requests == ()
+    assert mapped_batch.corp_action_requests == ()
+
+
 def test_mapping_build_canonical_batch_fails_fast_on_contract_violation() -> None:
     """Fail the entire mapping pass when one required canonical field is missing.
 

@@ -5,6 +5,20 @@ from .ingestion_run import SQLAlchemyIngestionRunService
 from .canonical_persistence import SQLAlchemyCanonicalPersistenceService
 from .raw_persistence import SQLAlchemyRawPersistenceService
 from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
+from .portfolio import SQLAlchemyPortfolioService
+from .portfolio_interfaces import (
+    CorporateActionManualCaseRecord,
+    DiagnosticArchiveRecord,
+    IngestionSloRecord,
+    InstrumentPnlReportRecord,
+    InstrumentRecord,
+    LabelPnlReportRecord,
+    LabelRecord,
+    NoteRecord,
+    PortfolioRepositoryPort,
+    ProvenanceRecord,
+    ReconciliationSourceRecord,
+)
 from .interfaces import (
 	CanonicalCashflowUpsertRequest,
 	CanonicalCorpActionUpsertRequest,
@@ -15,6 +29,7 @@ from .interfaces import (
 	CanonicalTradeFillUpsertRequest,
 	DatabaseHealthPort,
     LedgerCashflowRecord,
+    LedgerCorporateActionRecord,
     LedgerFxRateRecord,
 	LedgerOpenPositionValuationRecord,
 	LedgerSnapshotRepositoryPort,
@@ -58,6 +73,7 @@ __all__ = [
 	"CanonicalFxUpsertRequest",
 	"CanonicalCorpActionUpsertRequest",
 	"LedgerTradeFillRecord",
+    "LedgerCorporateActionRecord",
     "LedgerCashflowRecord",
     "LedgerFxRateRecord",
 	"LedgerOpenPositionValuationRecord",
@@ -75,6 +91,18 @@ __all__ = [
 	"SQLAlchemyCanonicalPersistenceService",
 	"SQLAlchemyRawPersistenceService",
 	"SQLAlchemyLedgerSnapshotService",
+	"SQLAlchemyPortfolioService",
+	"CorporateActionManualCaseRecord",
+	"DiagnosticArchiveRecord",
+	"IngestionSloRecord",
+	"InstrumentPnlReportRecord",
+	"InstrumentRecord",
+	"LabelPnlReportRecord",
+	"LabelRecord",
+	"NoteRecord",
+	"PortfolioRepositoryPort",
+	"ProvenanceRecord",
+	"ReconciliationSourceRecord",
 	"db_create_engine",
 	"db_create_session_factory",
 ]
