@@ -121,7 +121,7 @@ def _migration_drop_database(admin_url: str, database_name: str) -> None:
         engine.dispose()
 
 
-def test_migrations_apply_and_are_idempotent() -> None:
+def test_migrations_apply_and_are_idempotent_ingestion_indexes() -> None:
     """Apply migrations on a fresh DB and verify idempotent re-run.
 
     Returns:
@@ -184,8 +184,37 @@ def test_migrations_apply_and_are_idempotent() -> None:
             assert "uq_event_cashflow_account_txn_action_ccy" in constraint_names
             assert "uq_event_fx_account_txn_ccy_pair" in constraint_names
             assert "uq_event_corp_action_account_action" in constraint_names
+
+            raw_record_indexes = {
+                index["name"]: tuple(index["column_names"])
+                for index in inspector.get_indexes("raw_record")
+            }
+            assert raw_record_indexes["ix_raw_record_run_created_id"] == (
+                "ingestion_run_id",
+                "created_at_utc",
+                "raw_record_id",
+            )
+            assert raw_record_indexes["ix_raw_record_prior_version"] == (
+                "account_id",
+                "flex_query_id",
+                "section_name",
+                "source_row_ref",
+                "created_at_utc",
+                "raw_record_id",
+            )
         finally:
             verification_engine.dispose()
+
+        command.downgrade(alembic_config, "20260821_03")
+        downgraded_engine = create_engine(temp_database_url)
+        try:
+            downgraded_names = {
+                index["name"] for index in inspect(downgraded_engine).get_indexes("raw_record")
+            }
+            assert "ix_raw_record_run_created_id" not in downgraded_names
+            assert "ix_raw_record_prior_version" not in downgraded_names
+        finally:
+            downgraded_engine.dispose()
     finally:
         if previous_database_url is None:
             del os.environ["DATABASE_URL"]

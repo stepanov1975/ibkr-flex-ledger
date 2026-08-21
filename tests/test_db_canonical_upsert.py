@@ -523,3 +523,80 @@ def test_db_canonical_trade_fill_upsert_rejects_non_uuid_text_values() -> None:
                 functional_currency="USD",
             )
         )
+
+
+def test_changed_rows_compare_with_immediate_predecessor() -> None:
+    """Select rows whose payload differs from their immediate prior version."""
+
+    base_url = _upsert_resolve_reachable_base_url()
+    database_name = f"test_changed_rows_{uuid.uuid4().hex[:10]}"
+    admin_url = _upsert_build_database_url(base_url, "postgres")
+    database_url = _upsert_build_database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _upsert_create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = database_url
+    engine = None
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(database_url)
+        run_ids = [str(uuid.uuid4()) for _ in range(4)]
+        artifact_ids = [str(uuid.uuid4()) for _ in range(4)]
+        payloads = ['{"price":"10"}', '{"price":"11"}', '{"price":"10"}', '{"price":"10"}']
+        with engine.begin() as connection:
+            for index, (run_id, artifact_id, payload) in enumerate(
+                zip(run_ids, artifact_ids, payloads, strict=True), start=1
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, "
+                        "period_key, flex_query_id, started_at_utc, ended_at_utc) VALUES "
+                        "(CAST(:run_id AS uuid), 'U1', 'manual', 'success', '2026-08', 'query', "
+                        "CAST(:created AS timestamptz), CAST(:created AS timestamptz))"
+                    ),
+                    {"run_id": run_id, "created": f"2026-08-21T00:00:0{index}+00:00"},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO raw_artifact (raw_artifact_id, ingestion_run_id, account_id, period_key, "
+                        "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc) VALUES "
+                        "(CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), 'U1', '2026-08', 'query', CAST(:sha AS bytea), "
+                        "DATE '2026-08-21', CAST(:sha AS bytea), CAST(:created AS timestamptz))"
+                    ),
+                    {
+                        "artifact_id": artifact_id,
+                        "run_id": run_id,
+                        "sha": f"sha-{index}",
+                        "created": f"2026-08-21T00:00:0{index}+00:00",
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO raw_record (raw_record_id, raw_artifact_id, ingestion_run_id, account_id, "
+                        "period_key, flex_query_id, payload_sha256, report_date_local, section_name, "
+                        "source_row_ref, source_payload, created_at_utc) VALUES "
+                        "(gen_random_uuid(), CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), 'U1', '2026-08', "
+                        "'query', :sha, DATE '2026-08-21', 'Trades', 'trade-1', CAST(:payload AS jsonb), "
+                        "CAST(:created AS timestamptz))"
+                    ),
+                    {
+                        "artifact_id": artifact_id,
+                        "run_id": run_id,
+                        "sha": f"sha-{index}",
+                        "payload": payload,
+                        "created": f"2026-08-21T00:00:0{index}+00:00",
+                    },
+                )
+
+        repository = SQLAlchemyCanonicalPersistenceService(engine)
+        assert len(repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[0]))) == 1
+        assert len(repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[1]))) == 1
+        assert len(repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[2]))) == 1
+        assert repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[3])) == []
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _upsert_drop_database(admin_url, database_name)

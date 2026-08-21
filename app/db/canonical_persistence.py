@@ -39,6 +39,30 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         + "WHERE ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
         + "ORDER BY created_at_utc ASC, raw_record_id ASC"
     )
+    _RAW_RECORD_QUERY_CHANGED_BY_RUN_ID = (
+        "SELECT current.raw_record_id, current.ingestion_run_id, current.account_id, current.period_key, "
+        "current.flex_query_id, current.report_date_local, current.section_name, current.source_row_ref, "
+        "current.source_payload "
+        "FROM raw_record AS current "
+        "LEFT JOIN LATERAL ("
+        "SELECT previous.raw_record_id, previous.source_payload "
+        "FROM raw_record AS previous "
+        "WHERE previous.account_id = current.account_id "
+        "AND previous.flex_query_id = current.flex_query_id "
+        "AND previous.section_name = current.section_name "
+        "AND previous.source_row_ref = current.source_row_ref "
+        "AND previous.ingestion_run_id <> current.ingestion_run_id "
+        "AND (previous.created_at_utc < current.created_at_utc "
+        "OR (previous.created_at_utc = current.created_at_utc "
+        "AND previous.raw_record_id < current.raw_record_id)) "
+        "ORDER BY previous.created_at_utc DESC, previous.raw_record_id DESC "
+        "LIMIT 1"
+        ") AS prior ON TRUE "
+        "WHERE current.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
+        "AND (prior.raw_record_id IS NULL "
+        "OR current.source_payload IS DISTINCT FROM prior.source_payload) "
+        "ORDER BY current.created_at_utc ASC, current.raw_record_id ASC"
+    )
 
     def __init__(self, engine: Engine):
         """Initialize canonical persistence service.
@@ -111,6 +135,28 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
 
         return self._db_canonical_read_raw_rows(
             query_template=self._RAW_RECORD_QUERY_BY_RUN_ID,
+            parameters={"ingestion_run_id": str(ingestion_run_id)},
+        )
+
+    def db_raw_record_list_changed_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
+        """List raw rows that differ from their immediate prior ingestion version.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered changed raw rows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when read operation fails.
+        """
+
+        if ingestion_run_id is None:
+            raise ValueError("ingestion_run_id must not be None")
+
+        return self._db_canonical_read_raw_rows(
+            query_template=self._RAW_RECORD_QUERY_CHANGED_BY_RUN_ID,
             parameters={"ingestion_run_id": str(ingestion_run_id)},
         )
 

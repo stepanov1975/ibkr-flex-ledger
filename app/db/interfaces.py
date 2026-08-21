@@ -547,6 +547,20 @@ class RawPersistenceRepositoryPort(Protocol):
 class RawRecordReadRepositoryPort(Protocol):
     """Port definition for raw-row reads used by canonical mapping workflows."""
 
+    def db_raw_record_list_changed_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
+        """List raw rows that differ from their immediate prior ingestion version.
+
+        Args:
+            ingestion_run_id: Ingestion run identifier.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered changed raw rows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when read operation fails.
+        """
+
     def db_raw_record_list_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
         """List raw rows for one ingestion run identity.
 
