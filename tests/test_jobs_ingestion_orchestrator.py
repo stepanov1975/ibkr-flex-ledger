@@ -392,6 +392,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
         account_id: str,
         ingestion_run_id: str | None,
         report_date_local: str,
+        functional_currency: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
     ) -> SnapshotBuildResult:
@@ -417,6 +418,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
                 "account_id": account_id,
                 "ingestion_run_id": ingestion_run_id,
                 "report_date_local": report_date_local,
+                "functional_currency": functional_currency,
                 "affected_conids": affected_conids,
                 "affected_currencies": affected_currencies,
             }
@@ -426,6 +428,10 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             snapshot_row_count=1,
             position_lot_row_count=1,
             missing_solid_valuation_count=0,
+            broker_position_match_count=2,
+            broker_position_mismatch_count=1,
+            broker_only_position_count=1,
+            broker_absent_nonzero_fifo_count=1,
         )
 
 
@@ -525,6 +531,12 @@ def test_jobs_ingestion_orchestrator_runs_snapshot_stage_on_success() -> None:
     assert result.status == "success"
     assert len(snapshot_service_stub.calls) == 1
     assert snapshot_service_stub.calls[0]["report_date_local"] == "2026-02-20"
+    assert snapshot_service_stub.calls[0]["functional_currency"] == "USD"
+    details = _completed_stage_details(repository_stub)["snapshot"]
+    assert details["broker_position_match_count"] == 2
+    assert details["broker_position_mismatch_count"] == 1
+    assert details["broker_only_position_count"] == 1
+    assert details["broker_absent_nonzero_fifo_count"] == 1
     snapshot_timeline_events = [
         event for event in repository_stub.finalize_calls[0]["diagnostics"] if event.get("stage") == "snapshot"
     ]

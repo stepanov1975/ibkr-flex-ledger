@@ -517,6 +517,10 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                         "snapshot_skip_reason": "snapshot_service_not_configured",
                         "snapshot_scope_mode": "skipped",
                         "snapshot_duration_ms": 0,
+                        "broker_position_match_count": 0,
+                        "broker_position_mismatch_count": 0,
+                        "broker_only_position_count": 0,
+                        "broker_absent_nonzero_fifo_count": 0,
                     },
                 )
             )
@@ -540,6 +544,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 account_id=self._config.account_id,
                 ingestion_run_id=run_record_id,
                 report_date_local=report_date_local,
+                functional_currency=self._config.functional_currency,
             )
             snapshot_duration_ms = _duration_ms(snapshot_started_ns)
             snapshot_scope_mode = "full_fallback"
@@ -552,6 +557,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     account_id=self._config.account_id,
                     ingestion_run_id=run_record_id,
                     report_date_local=report_date_local,
+                    functional_currency=self._config.functional_currency,
                 )
                 snapshot_duration_ms = _duration_ms(snapshot_started_ns)
                 snapshot_scope_mode = "full_fallback"
@@ -571,6 +577,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     account_id=self._config.account_id,
                     ingestion_run_id=run_record_id,
                     report_date_local=report_date_local,
+                    functional_currency=self._config.functional_currency,
                     affected_conids=scope.conids,
                     affected_currencies=scope.currencies,
                 )
@@ -582,6 +589,10 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             "snapshot_row_count": snapshot_result.snapshot_row_count,
             "position_lot_row_count": snapshot_result.position_lot_row_count,
             "missing_solid_valuation_count": snapshot_result.missing_solid_valuation_count,
+            "broker_position_match_count": snapshot_result.broker_position_match_count,
+            "broker_position_mismatch_count": snapshot_result.broker_position_mismatch_count,
+            "broker_only_position_count": snapshot_result.broker_only_position_count,
+            "broker_absent_nonzero_fifo_count": snapshot_result.broker_absent_nonzero_fifo_count,
             "snapshot_duration_ms": snapshot_duration_ms,
             "snapshot_scope_mode": snapshot_scope_mode,
         }
