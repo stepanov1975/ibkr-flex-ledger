@@ -74,7 +74,13 @@ def main() -> None:
             period_key=parsed_arguments.period_key,
             flex_query_id=parsed_arguments.flex_query_id,
         )
-        execution_result = reprocess_orchestrator.job_execute(job_name="reprocess_run")
+        if parsed_arguments.period_key is not None and parsed_arguments.flex_query_id is not None:
+            execution_result = reprocess_orchestrator.job_execute_reprocess_target(
+                period_key=parsed_arguments.period_key,
+                flex_query_id=parsed_arguments.flex_query_id,
+            )
+        else:
+            execution_result = reprocess_orchestrator.job_execute(job_name="reprocess_run")
         if execution_result.status != "success":
             raise SystemExit(1)
         return

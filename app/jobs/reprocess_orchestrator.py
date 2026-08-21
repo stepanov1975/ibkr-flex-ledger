@@ -3,15 +3,54 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import traceback
 
 from app.adapters import FlexAdapterConnectionError, FlexAdapterTimeoutError, FlexRequestError, FlexStatementError
-from app.db import CanonicalPersistenceRepositoryPort, IngestionRunRepositoryPort, RawRecordReadRepositoryPort
+from app.db import (
+    CanonicalPersistenceRepositoryPort,
+    IngestionRunRepositoryPort,
+    LedgerSnapshotRepositoryPort,
+    RawArtifactReplayCandidate,
+    RawRecordReadRepositoryPort,
+)
 from app.domain import domain_build_stage_event
+from app.ledger import StockLedgerSnapshotService
 
 from .canonical_pipeline import job_canonical_map_and_persist
 from .interfaces import JobExecutionResult, JobOrchestratorPort
+
+
+def job_select_replay_artifacts(
+    candidates: list[RawArtifactReplayCandidate],
+) -> tuple[RawArtifactReplayCandidate, ...]:
+    """Select the newest replayable artifact for each actual report date."""
+
+    selected_by_date: dict[date, RawArtifactReplayCandidate] = {}
+    for candidate in candidates:
+        current = selected_by_date.get(candidate.report_date_local)
+        if current is None or (
+            candidate.created_at_utc,
+            candidate.raw_artifact_id,
+        ) > (
+            current.created_at_utc,
+            current.raw_artifact_id,
+        ):
+            selected_by_date[candidate.report_date_local] = candidate
+    selected = tuple(
+        sorted(
+            selected_by_date.values(),
+            key=lambda item: (
+                item.report_date_local,
+                item.created_at_utc,
+                item.raw_artifact_id,
+            ),
+        )
+    )
+    missing = [item.raw_artifact_id for item in selected if not item.open_positions_present]
+    if missing:
+        raise ValueError(f"selected artifacts missing OpenPositions section: {missing}")
+    return selected
 
 
 @dataclass(frozen=True)
@@ -40,6 +79,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         self,
         raw_read_repository: RawRecordReadRepositoryPort,
         canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
+        snapshot_service: StockLedgerSnapshotService,
+        snapshot_repository: LedgerSnapshotRepositoryPort,
         config: CanonicalReprocessOrchestratorConfig,
         ingestion_repository: IngestionRunRepositoryPort | None = None,
     ):
@@ -48,6 +89,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         Args:
             raw_read_repository: Raw-row read repository.
             canonical_persistence_repository: Canonical persistence repository.
+            snapshot_service: Ledger snapshot build service.
+            snapshot_repository: Ledger snapshot cleanup repository.
             config: Reprocess configuration values.
             ingestion_repository: Optional ingestion run repository for timeline persistence.
 
@@ -62,6 +105,10 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             raise ValueError("raw_read_repository must not be None")
         if canonical_persistence_repository is None:
             raise ValueError("canonical_persistence_repository must not be None")
+        if snapshot_service is None:
+            raise ValueError("snapshot_service must not be None")
+        if snapshot_repository is None:
+            raise ValueError("snapshot_repository must not be None")
         if not config.account_id.strip():
             raise ValueError("config.account_id must not be blank")
         if not config.period_key.strip():
@@ -73,6 +120,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
 
         self._raw_read_repository = raw_read_repository
         self._canonical_persistence_repository = canonical_persistence_repository
+        self._snapshot_service = snapshot_service
+        self._snapshot_repository = snapshot_repository
         self._config = config
         self._ingestion_repository = ingestion_repository
 
@@ -106,7 +155,10 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         if normalized_job_name != self._REPROCESS_JOB_NAME:
             raise ValueError(f"unsupported job_name={normalized_job_name}")
 
-        return self._job_reprocess_execute_with_config(config=self._config)
+        return self._job_reprocess_execute_with_config(
+            config=self._config,
+            allow_unsupported_snapshot_cleanup=False,
+        )
 
     def job_execute_reprocess_target(self, period_key: str, flex_query_id: str) -> JobExecutionResult:
         """Execute canonical reprocess for one explicit period/query target.
@@ -134,13 +186,21 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             period_key=normalized_period_key,
             flex_query_id=normalized_flex_query_id,
         )
-        return self._job_reprocess_execute_with_config(config=scoped_config)
+        return self._job_reprocess_execute_with_config(
+            config=scoped_config,
+            allow_unsupported_snapshot_cleanup=True,
+        )
 
-    def _job_reprocess_execute_with_config(self, config: CanonicalReprocessOrchestratorConfig) -> JobExecutionResult:
+    def _job_reprocess_execute_with_config(
+        self,
+        config: CanonicalReprocessOrchestratorConfig,
+        allow_unsupported_snapshot_cleanup: bool,
+    ) -> JobExecutionResult:
         """Execute canonical reprocess using the provided replay scope config.
 
         Args:
             config: Effective replay scope values.
+            allow_unsupported_snapshot_cleanup: Whether explicit scope cleanup may delete rows.
 
         Returns:
             JobExecutionResult: Final execution status payload.
@@ -163,41 +223,149 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
 
         try:
             timeline.append(domain_build_stage_event(stage="raw_read", status="started"))
-            raw_rows = self._raw_read_repository.db_raw_record_list_for_period(
+            candidates = self._raw_read_repository.db_raw_artifact_replay_candidate_list(
                 account_id=config.account_id,
                 period_key=config.period_key,
                 flex_query_id=config.flex_query_id,
             )
+            selected = job_select_replay_artifacts(candidates)
             timeline.append(
                 domain_build_stage_event(
                     stage="raw_read",
                     status="completed",
-                    details={"raw_row_count": len(raw_rows)},
-                )
-            )
-
-            timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
-            canonical_started_at = datetime.now(timezone.utc)
-            canonical_counts = job_canonical_map_and_persist(
-                account_id=config.account_id,
-                functional_currency=config.functional_currency,
-                raw_records=raw_rows,
-                canonical_persistence_repository=self._canonical_persistence_repository,
-            )
-            canonical_duration_ms = max(
-                0,
-                int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
-            )
-            timeline.append(
-                domain_build_stage_event(
-                    stage="canonical_mapping",
-                    status="completed",
                     details={
-                        **canonical_counts,
-                        "canonical_duration_ms": canonical_duration_ms,
+                        "candidate_count": len(candidates),
+                        "selected_artifact_count": len(selected),
+                        "selected_report_dates": [
+                            candidate.report_date_local.isoformat() for candidate in selected
+                        ],
                     },
                 )
             )
+
+            for candidate in selected:
+                artifact_details = {
+                    "raw_artifact_id": str(candidate.raw_artifact_id),
+                    "ingestion_run_id": str(candidate.ingestion_run_id),
+                    "report_date_local": candidate.report_date_local.isoformat(),
+                }
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="artifact_raw_read",
+                        status="started",
+                        details=artifact_details,
+                    )
+                )
+                raw_rows = self._raw_read_repository.db_raw_record_list_for_artifact(
+                    raw_artifact_id=candidate.raw_artifact_id,
+                )
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="artifact_raw_read",
+                        status="completed",
+                        details={**artifact_details, "raw_row_count": len(raw_rows)},
+                    )
+                )
+
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="canonical_mapping",
+                        status="started",
+                        details=artifact_details,
+                    )
+                )
+                canonical_started_at = datetime.now(timezone.utc)
+                canonical_counts = job_canonical_map_and_persist(
+                    account_id=config.account_id,
+                    functional_currency=config.functional_currency,
+                    raw_records=raw_rows,
+                    canonical_persistence_repository=self._canonical_persistence_repository,
+                )
+                canonical_duration_ms = max(
+                    0,
+                    int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
+                )
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="canonical_mapping",
+                        status="completed",
+                        details={
+                            **artifact_details,
+                            **canonical_counts,
+                            "canonical_duration_ms": canonical_duration_ms,
+                        },
+                    )
+                )
+
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="snapshot",
+                        status="started",
+                        details=artifact_details,
+                    )
+                )
+                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
+                    account_id=config.account_id,
+                    ingestion_run_id=str(candidate.ingestion_run_id),
+                    report_date_local=candidate.report_date_local.isoformat(),
+                    functional_currency=config.functional_currency,
+                )
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="snapshot",
+                        status="completed",
+                        details={
+                            **artifact_details,
+                            "snapshot_row_count": snapshot_result.snapshot_row_count,
+                            "position_lot_row_count": snapshot_result.position_lot_row_count,
+                            "missing_solid_valuation_count": snapshot_result.missing_solid_valuation_count,
+                            "broker_position_match_count": snapshot_result.broker_position_match_count,
+                            "broker_position_mismatch_count": snapshot_result.broker_position_mismatch_count,
+                            "broker_only_position_count": snapshot_result.broker_only_position_count,
+                            "broker_absent_nonzero_fifo_count": snapshot_result.broker_absent_nonzero_fifo_count,
+                        },
+                    )
+                )
+
+            supported_report_dates = tuple(
+                candidate.report_date_local.isoformat() for candidate in selected
+            )
+            if supported_report_dates:
+                cleanup_candidates = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_list(
+                    account_id=config.account_id,
+                    period_key=config.period_key,
+                    flex_query_id=config.flex_query_id,
+                    supported_report_dates=supported_report_dates,
+                )
+                timeline.append(
+                    domain_build_stage_event(
+                        stage="snapshot_cleanup",
+                        status="completed",
+                        details={
+                            "candidates": [
+                                {
+                                    "report_date_local": candidate.report_date_local.isoformat(),
+                                    "row_count": candidate.row_count,
+                                }
+                                for candidate in cleanup_candidates
+                            ]
+                        },
+                    )
+                )
+                if allow_unsupported_snapshot_cleanup:
+                    deleted_row_count = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_delete(
+                        account_id=config.account_id,
+                        period_key=config.period_key,
+                        flex_query_id=config.flex_query_id,
+                        supported_report_dates=supported_report_dates,
+                    )
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="snapshot_cleanup",
+                            status="completed",
+                            details={"deleted_row_count": deleted_row_count},
+                        )
+                    )
 
             timeline.append(domain_build_stage_event(stage="run", status="success"))
             ingestion_repository = self._ingestion_repository

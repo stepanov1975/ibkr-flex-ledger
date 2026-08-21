@@ -71,6 +71,8 @@ def bootstrap_create_application() -> FastAPI:
     reprocess_orchestrator = CanonicalReprocessOrchestrator(
         raw_read_repository=canonical_repository,
         canonical_persistence_repository=canonical_repository,
+        snapshot_service=snapshot_service,
+        snapshot_repository=snapshot_repository,
         ingestion_repository=ingestion_repository,
         config=CanonicalReprocessOrchestratorConfig(
             account_id=settings.account_id,
@@ -152,9 +154,13 @@ def bootstrap_create_reprocess_orchestrator(
     engine = db_create_engine(database_url=settings.database_url)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)
     canonical_repository = SQLAlchemyCanonicalPersistenceService(engine=engine)
+    snapshot_repository = SQLAlchemyLedgerSnapshotService(engine=engine)
+    snapshot_service = StockLedgerSnapshotService(repository=snapshot_repository)
     return CanonicalReprocessOrchestrator(
         raw_read_repository=canonical_repository,
         canonical_persistence_repository=canonical_repository,
+        snapshot_service=snapshot_service,
+        snapshot_repository=snapshot_repository,
         ingestion_repository=ingestion_repository,
         config=CanonicalReprocessOrchestratorConfig(
             account_id=settings.account_id,
