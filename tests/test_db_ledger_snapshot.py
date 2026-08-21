@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from uuid import uuid4
 
-from app.db.interfaces import PositionLotUpsertRequest
+from app.db.interfaces import LedgerOpenPositionValuationRecord, PositionLotUpsertRequest
 from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
@@ -107,6 +108,71 @@ def test_scoped_ledger_reads_apply_instrument_and_currency_filters() -> None:
     assert "currency = ANY(:currencies)" in connection.executed_queries[4]
     assert connection.executed_parameters[0]["instrument_ids"] == [instrument_id]
     assert connection.executed_parameters[4]["currencies"] == ["EUR", "USD"]
+
+
+def test_open_position_read_includes_option_cost_fx_and_multiplier() -> None:
+    instrument_id = uuid4()
+    connection = _ConnectionStub(rows=[{
+        "instrument_id": instrument_id,
+        "asset_category": "OPT",
+        "currency": "USD",
+        "position_qty": Decimal("-1"),
+        "mark_price": Decimal("2.21"),
+        "cost_basis_money": Decimal("-28"),
+        "broker_unrealized_pnl": Decimal("-193"),
+        "fx_rate_to_base": Decimal("1"),
+        "multiplier": Decimal("100"),
+        "report_date_local": date(2026, 8, 20),
+    }])
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+
+    rows = repository.db_ledger_open_position_valuation_list_for_run(
+        "U1", str(uuid4())
+    )
+
+    assert rows == [LedgerOpenPositionValuationRecord(
+        instrument_id=instrument_id,
+        asset_category="OPT",
+        currency="USD",
+        position_qty="-1",
+        mark_price="2.21",
+        cost_basis_money="-28",
+        broker_unrealized_pnl="-193",
+        fx_rate_to_base="1",
+        multiplier="100",
+        report_date_local=date(2026, 8, 20),
+    )]
+    query = connection.executed_queries[0]
+    assert "assetCategory" in query
+    assert "costBasisMoney" in query
+    assert "fxRateToBase" in query
+    assert "multiplier" in query
+    assert "assetCategory', '') = 'STK'" not in query
+
+
+def test_open_position_read_preserves_blank_optional_values_as_none() -> None:
+    instrument_id = uuid4()
+    connection = _ConnectionStub(rows=[{
+        "instrument_id": instrument_id,
+        "asset_category": "STK",
+        "currency": "USD",
+        "position_qty": Decimal("5"),
+        "mark_price": None,
+        "cost_basis_money": None,
+        "broker_unrealized_pnl": None,
+        "fx_rate_to_base": None,
+        "multiplier": None,
+        "report_date_local": date(2026, 8, 20),
+    }])
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+    row = repository.db_ledger_open_position_valuation_list_for_run(
+        "U1", str(uuid4())
+    )[0]
+    assert row.mark_price is None
+    assert row.cost_basis_money is None
+    assert row.broker_unrealized_pnl is None
+    assert row.fx_rate_to_base is None
+    assert row.multiplier is None
 
 
 def test_scoped_lot_reconciliation_closes_and_replaces_only_selected_instruments() -> None:

@@ -332,9 +332,14 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement = (
             "WITH parsed AS ("
             "SELECT i.instrument_id, rr.raw_record_id, "
-            "CAST(rr.source_payload->>'position' AS numeric) AS position_qty, "
-            "CAST(rr.source_payload->>'markPrice' AS numeric) AS mark_price, "
-            "CAST(NULLIF(rr.source_payload->>'fifoPnlUnrealized', '') AS numeric) AS broker_unrealized_pnl, "
+            "UPPER(rr.source_payload->>'assetCategory') AS asset_category, "
+            "UPPER(rr.source_payload->>'currency') AS currency, "
+            "(rr.source_payload->>'position')::numeric AS position_qty, "
+            "NULLIF(rr.source_payload->>'markPrice', '')::numeric AS mark_price, "
+            "NULLIF(rr.source_payload->>'costBasisMoney', '')::numeric AS cost_basis_money, "
+            "NULLIF(rr.source_payload->>'fifoPnlUnrealized', '')::numeric AS broker_unrealized_pnl, "
+            "NULLIF(rr.source_payload->>'fxRateToBase', '')::numeric AS fx_rate_to_base, "
+            "NULLIF(rr.source_payload->>'multiplier', '')::numeric AS multiplier, "
             "CASE "
             "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
             "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
@@ -345,9 +350,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "WHERE rr.account_id = :account_id "
             "AND rr.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
             "AND rr.section_name = 'OpenPositions' "
-            "AND COALESCE(rr.source_payload->>'assetCategory', '') = 'STK' "
-            "AND rr.source_payload ? 'position' "
-            "AND rr.source_payload ? 'markPrice'"
+            "AND rr.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
+            "AND UPPER(rr.source_payload->>'assetCategory') NOT IN ('CASH', 'FX')"
         )
         parameters: dict[str, Any] = {
             "account_id": normalized_account_id,
@@ -361,11 +365,13 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             statement += " AND i.instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
         statement += (
             "), ranked AS ("
-            "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local, "
+            "SELECT instrument_id, asset_category, currency, position_qty, mark_price, cost_basis_money, "
+            "broker_unrealized_pnl, fx_rate_to_base, multiplier, report_date_local, "
             "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
             "FROM parsed"
             ") "
-            "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local "
+            "SELECT instrument_id, asset_category, currency, position_qty, mark_price, cost_basis_money, "
+            "broker_unrealized_pnl, fx_rate_to_base, multiplier, report_date_local "
             "FROM ranked WHERE row_rank = 1"
         )
 
@@ -381,11 +387,20 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         return [
             LedgerOpenPositionValuationRecord(
                 instrument_id=row["instrument_id"],
+                asset_category=row["asset_category"],
+                currency=row["currency"],
                 position_qty=str(row["position_qty"]),
-                mark_price=str(row["mark_price"]),
+                mark_price=None if row["mark_price"] is None else str(row["mark_price"]),
+                cost_basis_money=None
+                if row["cost_basis_money"] is None
+                else str(row["cost_basis_money"]),
                 broker_unrealized_pnl=None
                 if row["broker_unrealized_pnl"] is None
                 else str(row["broker_unrealized_pnl"]),
+                fx_rate_to_base=None
+                if row["fx_rate_to_base"] is None
+                else str(row["fx_rate_to_base"]),
+                multiplier=None if row["multiplier"] is None else str(row["multiplier"]),
                 report_date_local=row["report_date_local"],
             )
             for row in rows

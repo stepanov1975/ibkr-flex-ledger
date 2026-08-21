@@ -202,9 +202,14 @@ def test_snapshot_computes_unrealized_from_openpositions_mark_when_position_matc
     )
     valuation = LedgerOpenPositionValuationRecord(
         instrument_id=instrument_id,
+        asset_category="STK",
+        currency="USD",
         position_qty="10",
         mark_price="120",
+        cost_basis_money=None,
         broker_unrealized_pnl="200",
+        fx_rate_to_base=None,
+        multiplier=None,
         report_date_local=date(2026, 2, 20),
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation])
@@ -245,9 +250,14 @@ def test_snapshot_converts_foreign_trade_and_mark_to_base_currency() -> None:
     )
     valuation = LedgerOpenPositionValuationRecord(
         instrument_id=instrument_id,
+        asset_category="STK",
+        currency="EUR",
         position_qty="10",
         mark_price="110",
+        cost_basis_money=None,
         broker_unrealized_pnl="999",
+        fx_rate_to_base=None,
+        multiplier=None,
         report_date_local=date(2026, 2, 20),
     )
     fx_rate = LedgerFxRateRecord(
@@ -334,7 +344,8 @@ def test_snapshot_restates_pre_split_lots_on_current_quantity_basis() -> None:
         action_type="FORWARDSPLIT", adjustment_factor="2",
     )
     valuation = LedgerOpenPositionValuationRecord(
-        instrument_id=instrument_id, position_qty="20", mark_price="60", broker_unrealized_pnl="200",
+        instrument_id=instrument_id, asset_category="STK", currency="USD", position_qty="20", mark_price="60",
+        cost_basis_money=None, broker_unrealized_pnl="200", fx_rate_to_base=None, multiplier=None,
         report_date_local=date(2026, 2, 20),
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation], corporate_actions=[action])

@@ -833,16 +833,26 @@ class LedgerOpenPositionValuationRecord:
 
     Attributes:
         instrument_id: Canonical instrument identifier.
+        asset_category: Broker-reported asset category.
+        currency: Broker-reported instrument currency.
         position_qty: Broker-reported open position quantity.
-        mark_price: Broker-reported mark price.
-        broker_unrealized_pnl: Broker-reported unrealized PnL.
+        mark_price: Optional broker-reported mark price.
+        cost_basis_money: Optional broker-reported cost basis.
+        broker_unrealized_pnl: Optional broker-reported unrealized PnL.
+        fx_rate_to_base: Optional broker-reported FX rate to base currency.
+        multiplier: Optional broker-reported contract multiplier.
         report_date_local: Optional broker report date.
     """
 
     instrument_id: UUID
+    asset_category: str
+    currency: str
     position_qty: str
-    mark_price: str
+    mark_price: str | None
+    cost_basis_money: str | None
     broker_unrealized_pnl: str | None
+    fx_rate_to_base: str | None
+    multiplier: str | None
     report_date_local: date | None
 
 
