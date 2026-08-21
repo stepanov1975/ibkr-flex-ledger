@@ -322,17 +322,17 @@ def test_adapter_calculate_retry_wait_uses_fixed_initial_wait_then_backoff() -> 
     assert adapter.adapter_calculate_retry_wait_seconds(4) == 90.0
 
 
-def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
-    """Return initial wait when jittered backoff is lower than configured initial floor.
+def test_adapters_flex_retry_wait_uses_initial_delay_only_for_first_poll() -> None:
+    """Do not apply the fixed first-poll delay as a later retry floor.
 
     Args:
         None: This test uses deterministic adapter configuration only.
 
     Returns:
-        None: Assertions verify initial wait floor behavior.
+        None: Assertions verify fixed-first-poll behavior.
 
     Raises:
-        AssertionError: Raised when initial wait floor is not applied.
+        AssertionError: Raised when the first delay leaks into retry backoff.
     """
 
     adapter = FlexWebServiceAdapter(
@@ -346,6 +346,7 @@ def test_adapters_flex_retry_wait_respects_initial_wait_floor() -> None:
     )
 
     assert adapter.adapter_calculate_retry_wait_seconds(retry_index=0) == pytest.approx(5.0)
+    assert adapter.adapter_calculate_retry_wait_seconds(retry_index=1) == pytest.approx(0.5)
 
 
 def test_adapter_poll_diagnostics_include_monotonic_durations(monkeypatch: pytest.MonkeyPatch) -> None:

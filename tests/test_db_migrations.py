@@ -28,7 +28,7 @@ def _migration_build_database_url(base_url: str, database_name: str) -> str:
     """
 
     parsed_url: URL = make_url(base_url)
-    return parsed_url.set(database=database_name).render_as_string(hide_password=False)
+    return str(parsed_url.set(database=database_name).render_as_string(hide_password=False))
 
 
 def _migration_create_database(admin_url: str, database_name: str) -> None:
@@ -218,6 +218,127 @@ def test_migrations_apply_and_are_idempotent_ingestion_indexes() -> None:
     finally:
         if previous_database_url is None:
             del os.environ["DATABASE_URL"]
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)
+
+
+def test_migration_05_adds_nullable_artifact_completion_foreign_key() -> None:
+    """Add and remove the completion marker while enforcing run references."""
+
+    base_url = _migration_resolve_reachable_base_url()
+    temp_database_name = f"test_artifact_completion_{uuid.uuid4().hex[:10]}"
+    admin_url = _migration_build_database_url(base_url, "postgres")
+    temp_database_url = _migration_build_database_url(base_url, temp_database_name)
+    _migration_create_database(admin_url=admin_url, database_name=temp_database_name)
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = temp_database_url
+    try:
+        alembic_config = Config("alembic.ini")
+        command.upgrade(alembic_config, "20260821_04")
+        pre_upgrade_engine = create_engine(temp_database_url)
+        try:
+            assert "completed_ingestion_run_id" not in {
+                column["name"] for column in inspect(pre_upgrade_engine).get_columns("raw_artifact")
+            }
+        finally:
+            pre_upgrade_engine.dispose()
+
+        command.upgrade(alembic_config, "head")
+        verification_engine = create_engine(temp_database_url)
+        try:
+            inspector = inspect(verification_engine)
+            completion_column = next(
+                column
+                for column in inspector.get_columns("raw_artifact")
+                if column["name"] == "completed_ingestion_run_id"
+            )
+            assert completion_column["nullable"] is True
+            completion_links = [
+                key
+                for key in inspector.get_foreign_keys("raw_artifact")
+                if key.get("constrained_columns") == ["completed_ingestion_run_id"]
+                and key.get("referred_table") == "ingestion_run"
+                and key.get("referred_columns") == ["ingestion_run_id"]
+            ]
+            assert len(completion_links) == 1
+
+            owner_run_id = str(uuid.uuid4())
+            completed_run_id = str(uuid.uuid4())
+            artifact_id = str(uuid.uuid4())
+            with verification_engine.begin() as connection:
+                for run_id, status in (
+                    (owner_run_id, "failed"),
+                    (completed_run_id, "success"),
+                ):
+                    connection.execute(
+                        text(
+                            "INSERT INTO ingestion_run ("
+                            "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                            "started_at_utc, ended_at_utc) VALUES ("
+                            "CAST(:run_id AS uuid), 'U_MIGRATION', 'manual', :status, '2026-08', "
+                            "'query', now(), now())"
+                        ),
+                        {"run_id": run_id, "status": status},
+                    )
+                connection.execute(
+                    text(
+                        "INSERT INTO raw_artifact ("
+                        "raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                        "payload_sha256, source_payload) VALUES ("
+                        "CAST(:artifact_id AS uuid), CAST(:owner_run_id AS uuid), 'U_MIGRATION', "
+                        "'2026-08', 'query', 'sha', CAST('payload' AS bytea))"
+                    ),
+                    {"artifact_id": artifact_id, "owner_run_id": owner_run_id},
+                )
+                assert connection.execute(
+                    text(
+                        "SELECT completed_ingestion_run_id FROM raw_artifact "
+                        "WHERE raw_artifact_id = CAST(:artifact_id AS uuid)"
+                    ),
+                    {"artifact_id": artifact_id},
+                ).scalar_one() is None
+                connection.execute(
+                    text(
+                        "UPDATE raw_artifact SET completed_ingestion_run_id = CAST(:run_id AS uuid) "
+                        "WHERE raw_artifact_id = CAST(:artifact_id AS uuid)"
+                    ),
+                    {"artifact_id": artifact_id, "run_id": completed_run_id},
+                )
+
+            with verification_engine.connect() as connection:
+                assert connection.execute(
+                    text(
+                        "SELECT completed_ingestion_run_id FROM raw_artifact "
+                        "WHERE raw_artifact_id = CAST(:artifact_id AS uuid)"
+                    ),
+                    {"artifact_id": artifact_id},
+                ).scalar_one() == uuid.UUID(completed_run_id)
+
+            with pytest.raises(SQLAlchemyError):
+                with verification_engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "UPDATE raw_artifact SET completed_ingestion_run_id = CAST(:run_id AS uuid) "
+                            "WHERE raw_artifact_id = CAST(:artifact_id AS uuid)"
+                        ),
+                        {"artifact_id": artifact_id, "run_id": str(uuid.uuid4())},
+                    )
+        finally:
+            verification_engine.dispose()
+
+        command.downgrade(alembic_config, "20260821_04")
+        downgraded_engine = create_engine(temp_database_url)
+        try:
+            assert "completed_ingestion_run_id" not in {
+                column["name"] for column in inspect(downgraded_engine).get_columns("raw_artifact")
+            }
+        finally:
+            downgraded_engine.dispose()
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = previous_database_url
         _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)

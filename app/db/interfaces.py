@@ -142,6 +142,7 @@ class RawArtifactRecord:
         reference: Immutable dedupe identity values.
         source_payload: Immutable raw payload bytes.
         created_at_utc: Persistence row creation timestamp in UTC.
+        completed_ingestion_run_id: Run that most recently completed semantic processing.
     """
 
     raw_artifact_id: UUID
@@ -149,6 +150,7 @@ class RawArtifactRecord:
     reference: RawArtifactReference
     source_payload: bytes
     created_at_utc: datetime
+    completed_ingestion_run_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -543,6 +545,25 @@ class RawPersistenceRepositoryPort(Protocol):
             RuntimeError: Raised when persistence fails.
         """
 
+    def db_raw_artifact_mark_completed(
+        self,
+        raw_artifact_id: UUID,
+        completed_ingestion_run_id: UUID,
+    ) -> None:
+        """Record the ingestion run that completed semantic artifact processing.
+
+        Args:
+            raw_artifact_id: Raw artifact identifier.
+            completed_ingestion_run_id: Completing ingestion run identifier.
+
+        Returns:
+            None: Completion lineage is updated as a side effect.
+
+        Raises:
+            ValueError: Raised when identifiers are invalid.
+            RuntimeError: Raised when persistence fails or the artifact is absent.
+        """
+
 
 class RawRecordReadRepositoryPort(Protocol):
     """Port definition for raw-row reads used by canonical mapping workflows."""
@@ -569,6 +590,23 @@ class RawRecordReadRepositoryPort(Protocol):
 
         Returns:
             list[RawRecordForCanonicalMapping]: Deterministically ordered raw rows.
+
+        Raises:
+            ValueError: Raised when input values are invalid.
+            RuntimeError: Raised when read operation fails.
+        """
+
+    def db_raw_record_list_for_artifact(
+        self,
+        raw_artifact_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """List every raw row persisted for one immutable artifact.
+
+        Args:
+            raw_artifact_id: Raw artifact identifier.
+
+        Returns:
+            list[RawRecordForCanonicalMapping]: Deterministically ordered artifact rows.
 
         Raises:
             ValueError: Raised when input values are invalid.

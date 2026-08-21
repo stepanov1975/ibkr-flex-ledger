@@ -230,14 +230,15 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
             artifact_persistence_duration_ms = _duration_ms(artifact_persistence_started_ns)
 
-            artifact_owner_run_id = artifact_result.artifact.ingestion_run_id
             completed_duplicate = False
-            if artifact_result.deduplicated:
-                artifact_owner_run = self._ingestion_repository.db_ingestion_run_get_by_id(
-                    artifact_owner_run_id
+            completed_ingestion_run_id = artifact_result.artifact.completed_ingestion_run_id
+            if artifact_result.deduplicated and completed_ingestion_run_id is not None:
+                completed_ingestion_run = self._ingestion_repository.db_ingestion_run_get_by_id(
+                    completed_ingestion_run_id
                 )
                 completed_duplicate = (
-                    artifact_owner_run is not None and artifact_owner_run.state.status == "success"
+                    completed_ingestion_run is not None
+                    and completed_ingestion_run.state.status == "success"
                 )
 
             if completed_duplicate:
@@ -265,14 +266,8 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 raw_persistence_duration_ms = _duration_ms(raw_persistence_started_ns)
                 duplicate_skip_reason = None
 
-            reuse_artifact_owner_rows = (
-                artifact_result.deduplicated
-                and not completed_duplicate
-                and raw_record_result.inserted_count == 0
-            )
-            semantic_run_id = (
-                artifact_owner_run_id if reuse_artifact_owner_rows else run_record.ingestion_run_id
-            )
+            recover_artifact_rows = artifact_result.deduplicated and not completed_duplicate
+            semantic_run_id = run_record.ingestion_run_id
 
             persist_details: dict[str, object] = {
                 "payload_sha256": payload_sha256,
@@ -306,10 +301,19 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     canonical_skip_reason = duplicate_skip_reason
                 else:
                     canonical_raw_read_started_ns = perf_counter_ns()
-                    if reuse_artifact_owner_rows:
-                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_run(
-                            ingestion_run_id=artifact_owner_run_id,
+                    if recover_artifact_rows:
+                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_artifact(
+                            raw_artifact_id=artifact_result.artifact.raw_artifact_id,
                         )
+                        artifact_row_run_ids = {
+                            raw_row.ingestion_run_id for raw_row in canonical_raw_rows
+                        }
+                        if len(artifact_row_run_ids) > 1:
+                            raise RuntimeError(
+                                "raw artifact rows reference multiple ingestion runs"
+                            )
+                        if artifact_row_run_ids:
+                            semantic_run_id = next(iter(artifact_row_run_ids))
                     else:
                         canonical_raw_rows = self._canonical_repository.db_raw_record_list_changed_for_run(
                             ingestion_run_id=run_record.ingestion_run_id,
@@ -355,6 +359,16 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 duplicate_skip_reason=duplicate_skip_reason,
                 timeline=timeline,
             )
+
+            if (
+                duplicate_skip_reason is None
+                and self._canonical_repository is not None
+                and self._snapshot_service is not None
+            ):
+                self._raw_persistence_repository.db_raw_artifact_mark_completed(
+                    raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                    completed_ingestion_run_id=run_record.ingestion_run_id,
+                )
 
             timeline.append(domain_build_stage_event(stage="run", status="success"))
             self._ingestion_repository.db_ingestion_run_finalize(

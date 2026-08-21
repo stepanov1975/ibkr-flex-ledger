@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
+
+import pytest
 
 from app.adapters import AdapterFetchResult, FlexTokenInvalidError
 from app.db.interfaces import (
@@ -26,10 +29,12 @@ from app.db.interfaces import (
     RawRecordPersistResult,
 )
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
+import app.jobs.ingestion_orchestrator as ingestion_module
 from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService
 
 
 _ARTIFACT_OWNER_RUN_ID = UUID("00000000-0000-0000-0000-000000000001")
+_FAILED_COMPLETION_RUN_ID = UUID("00000000-0000-0000-0000-000000000002")
 
 
 class _RepositoryStub:
@@ -50,6 +55,7 @@ class _RepositoryStub:
         self.started_runs: list[IngestionRunRecord] = []
         self.finalize_calls: list[dict[str, Any]] = []
         self.get_by_id_calls: list[UUID] = []
+        self.operation_log: list[tuple[str, UUID, str | None]] = []
         artifact_owner = self._build_run(
             ingestion_run_id=_ARTIFACT_OWNER_RUN_ID,
             status=artifact_owner_status,
@@ -122,6 +128,7 @@ class _RepositoryStub:
                 "diagnostics": diagnostics,
             }
         )
+        self.operation_log.append(("finalize", ingestion_run_id, status))
         started_run = self.runs_by_id[ingestion_run_id]
         finalized_run = IngestionRunRecord(
             ingestion_run_id=ingestion_run_id,
@@ -255,6 +262,8 @@ class _RawPersistenceStub:
         self,
         artifact_deduplicated: bool = False,
         raw_insert_failures: int = 0,
+        completed_ingestion_run_id: UUID | None = _ARTIFACT_OWNER_RUN_ID,
+        operation_log: list[tuple[str, UUID, str | None]] | None = None,
     ) -> None:
         """Initialize deterministic raw persistence stub state.
 
@@ -268,9 +277,14 @@ class _RawPersistenceStub:
         self.raw_artifact_id = uuid4()
         self.artifact_deduplicated = artifact_deduplicated
         self.raw_insert_failures = raw_insert_failures
+        self.completed_ingestion_run_id = (
+            completed_ingestion_run_id if artifact_deduplicated else None
+        )
+        self.operation_log = operation_log
         self.artifact: RawArtifactRecord | None = None
         self.raw_insert_calls = 0
         self.raw_insert_run_ids: list[UUID] = []
+        self.completion_calls: list[tuple[UUID, UUID]] = []
         self.raw_rows_persisted = artifact_deduplicated
 
     def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
@@ -301,6 +315,7 @@ class _RawPersistenceStub:
                 ),
                 source_payload=request.source_payload,
                 created_at_utc=datetime.now(timezone.utc),
+                completed_ingestion_run_id=self.completed_ingestion_run_id,
             )
             deduplicated = self.artifact_deduplicated
         else:
@@ -336,8 +351,25 @@ class _RawPersistenceStub:
         self.raw_rows_persisted = True
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
+    def db_raw_artifact_mark_completed(
+        self,
+        raw_artifact_id: UUID,
+        completed_ingestion_run_id: UUID,
+    ) -> None:
+        """Capture completion lineage and expose it on later artifact upserts."""
 
-class _SnapshotServiceStub(StockLedgerSnapshotService):
+        assert self.artifact is not None
+        assert raw_artifact_id == self.artifact.raw_artifact_id
+        self.completion_calls.append((raw_artifact_id, completed_ingestion_run_id))
+        if self.operation_log is not None:
+            self.operation_log.append(("mark_completed", completed_ingestion_run_id, None))
+        self.artifact = replace(
+            self.artifact,
+            completed_ingestion_run_id=completed_ingestion_run_id,
+        )
+
+
+class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
     """Snapshot service stub capturing automatic snapshot execution calls."""
 
     def __init__(self) -> None:
@@ -671,10 +703,14 @@ def test_jobs_ingestion_orchestrator_canonical_stage_contains_duration_details()
     assert details["canonical_duration_ms"] >= 0
 
 
-def _raw_row(section_name: str, source_payload: dict[str, str]) -> RawRecordForCanonicalMapping:
+def _raw_row(
+    section_name: str,
+    source_payload: dict[str, str],
+    ingestion_run_id: UUID | None = None,
+) -> RawRecordForCanonicalMapping:
     """Build one deterministic raw row for orchestrator scope tests."""
 
-    run_id = uuid4()
+    run_id = ingestion_run_id or uuid4()
     return RawRecordForCanonicalMapping(
         raw_record_id=uuid4(),
         ingestion_run_id=run_id,
@@ -695,6 +731,8 @@ class _CanonicalRepositoryStub:
         self,
         changed_rows: list[RawRecordForCanonicalMapping] | None = None,
         changed_read_failures: int = 0,
+        artifact_rows: list[RawRecordForCanonicalMapping] | None = None,
+        artifact_read_failures: int = 0,
     ) -> None:
         """Initialize deterministic changed rows and call counters."""
 
@@ -722,10 +760,13 @@ class _CanonicalRepositoryStub:
             )
         ]
         self.all_rows = self.changed_rows
+        self.artifact_rows = artifact_rows if artifact_rows is not None else self.all_rows
         self.changed_read_failures = changed_read_failures
+        self.artifact_read_failures = artifact_read_failures
         self.changed_read_calls = 0
         self.changed_read_run_ids: list[UUID] = []
         self.all_read_run_ids: list[UUID] = []
+        self.artifact_read_ids: list[UUID] = []
         self.bulk_upsert_calls = 0
 
     def db_raw_record_list_changed_for_run(
@@ -759,6 +800,18 @@ class _CanonicalRepositoryStub:
 
         self.all_read_run_ids.append(ingestion_run_id)
         return self.all_rows
+
+    def db_raw_record_list_for_artifact(
+        self,
+        raw_artifact_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """Return configured artifact rows and capture artifact-scoped reads."""
+
+        self.artifact_read_ids.append(raw_artifact_id)
+        if self.artifact_read_failures > 0:
+            self.artifact_read_failures -= 1
+            raise RuntimeError("canonical artifact-row read failed")
+        return self.artifact_rows
 
     def db_raw_record_list_for_period(
         self,
@@ -925,7 +978,7 @@ def _completed_stage_details(repository: _RepositoryStub) -> dict[str, dict[str,
 
 
 def test_exact_duplicate_skips_raw_canonical_and_snapshot_work() -> None:
-    """Stop semantic work after an existing artifact identity is returned."""
+    """Stop semantic work after a successful completion marker is returned."""
 
     repository = _RepositoryStub()
     raw = _RawPersistenceStub(artifact_deduplicated=True)
@@ -949,57 +1002,109 @@ def test_exact_duplicate_skips_raw_canonical_and_snapshot_work() -> None:
     assert details["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
 
 
-def test_failed_owner_without_raw_rows_retries_current_run_and_processes_delta() -> None:
-    """Recover an artifact-only failed run by inserting and processing current rows."""
+def test_three_attempt_recovery_records_completion_then_enables_duplicate_fast_path() -> None:
+    """Recover artifact rows across two failures and skip only after durable success."""
 
-    repository = _RepositoryStub(run_count=2)
-    raw = _RawPersistenceStub(raw_insert_failures=1)
-    canonical = _CanonicalRepositoryStub(changed_rows=[_raw_row("Trades", {"conid": "100"})])
-    snapshot = _SnapshotServiceStub()
-    orchestrator = _build_orchestrator(repository, raw=raw, canonical=canonical, snapshot=snapshot)
-
-    first_result = orchestrator.job_execute("ingestion_run")
-    retry_result = orchestrator.job_execute("ingestion_run")
-
-    owner_run_id = repository.started_runs[0].ingestion_run_id
-    retry_run_id = repository.started_runs[1].ingestion_run_id
-    assert [first_result.status, retry_result.status] == ["failed", "success"]
-    assert repository.get_by_id_calls == [owner_run_id]
-    assert raw.raw_insert_calls == 2
-    assert raw.raw_insert_run_ids == [owner_run_id, retry_run_id]
-    assert canonical.changed_read_run_ids == [retry_run_id]
-    assert canonical.all_read_run_ids == []
-    assert canonical.bulk_upsert_calls == 1
-    assert snapshot.build_calls == 1
-    assert snapshot.calls[0]["ingestion_run_id"] == str(retry_run_id)
-
-
-def test_failed_owner_with_raw_rows_reuses_owner_rows_and_processes_semantics() -> None:
-    """Recover post-raw failure by replaying the failed artifact owner's complete rows."""
-
-    repository = _RepositoryStub(run_count=2)
-    raw = _RawPersistenceStub()
+    repository = _RepositoryStub(run_count=4)
+    raw = _RawPersistenceStub(
+        raw_insert_failures=1,
+        operation_log=repository.operation_log,
+    )
+    raw_row_run_id = repository.created_runs[1].ingestion_run_id
     canonical = _CanonicalRepositoryStub(
-        changed_rows=[_raw_row("Trades", {"conid": "100"})],
+        artifact_rows=[
+            _raw_row("Trades", {"conid": "100"}, ingestion_run_id=raw_row_run_id),
+        ],
         changed_read_failures=1,
+        artifact_read_failures=1,
     )
     snapshot = _SnapshotServiceStub()
     orchestrator = _build_orchestrator(repository, raw=raw, canonical=canonical, snapshot=snapshot)
 
-    first_result = orchestrator.job_execute("ingestion_run")
-    retry_result = orchestrator.job_execute("ingestion_run")
+    results = [orchestrator.job_execute("ingestion_run") for _ in range(4)]
 
-    owner_run_id = repository.started_runs[0].ingestion_run_id
-    retry_run_id = repository.started_runs[1].ingestion_run_id
-    assert [first_result.status, retry_result.status] == ["failed", "success"]
-    assert repository.get_by_id_calls == [owner_run_id]
-    assert raw.raw_insert_calls == 2
-    assert raw.raw_insert_run_ids == [owner_run_id, retry_run_id]
-    assert canonical.changed_read_run_ids == [owner_run_id]
-    assert canonical.all_read_run_ids == [owner_run_id]
+    run_ids = [run.ingestion_run_id for run in repository.started_runs]
+    assert [result.status for result in results] == ["failed", "failed", "success", "success"]
+    assert raw.raw_insert_run_ids == run_ids[:3]
+    assert canonical.changed_read_run_ids == []
+    assert canonical.all_read_run_ids == []
+    assert canonical.artifact_read_ids == [raw.raw_artifact_id, raw.raw_artifact_id]
     assert canonical.bulk_upsert_calls == 1
     assert snapshot.build_calls == 1
-    assert snapshot.calls[0]["ingestion_run_id"] == str(owner_run_id)
+    assert snapshot.calls[0]["ingestion_run_id"] == str(raw_row_run_id)
+    assert raw.completion_calls == [(raw.raw_artifact_id, run_ids[2])]
+    assert repository.get_by_id_calls == [run_ids[2]]
+    marker_index = repository.operation_log.index(("mark_completed", run_ids[2], None))
+    success_index = repository.operation_log.index(("finalize", run_ids[2], "success"))
+    assert marker_index < success_index
+    details = _completed_stage_details(repository)
+    assert details["persist"]["raw_persistence_skip_reason"] == "exact_duplicate_artifact"
+    assert details["canonical_mapping"]["canonical_skip_reason"] == "exact_duplicate_artifact"
+    assert details["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
+
+
+def test_artifact_rows_with_multiple_ingestion_runs_fail_recovery_explicitly() -> None:
+    """Reject ambiguous OpenPositions lineage instead of guessing a semantic run."""
+
+    repository = _RepositoryStub(artifact_owner_status="failed")
+    raw = _RawPersistenceStub(
+        artifact_deduplicated=True,
+        completed_ingestion_run_id=None,
+    )
+    canonical = _CanonicalRepositoryStub(
+        artifact_rows=[
+            _raw_row("Trades", {"conid": "100"}, ingestion_run_id=uuid4()),
+            _raw_row("OpenPositions", {"conid": "100"}, ingestion_run_id=uuid4()),
+        ]
+    )
+    snapshot = _SnapshotServiceStub()
+
+    result = _build_orchestrator(
+        repository,
+        raw=raw,
+        canonical=canonical,
+        snapshot=snapshot,
+    ).job_execute("ingestion_run")
+
+    assert result.status == "failed"
+    assert repository.finalize_calls[-1]["error_code"] == "INGESTION_UNEXPECTED_ERROR"
+    assert "multiple ingestion runs" in str(repository.finalize_calls[-1]["error_message"])
+    assert canonical.bulk_upsert_calls == 0
+    assert snapshot.build_calls == 0
+    assert raw.completion_calls == []
+
+
+def test_completion_marker_target_must_be_successful_before_duplicate_fast_path() -> None:
+    """Replay an artifact when its completion marker references a failed run."""
+
+    repository = _RepositoryStub()
+    failed_completion = repository._build_run(
+        ingestion_run_id=_FAILED_COMPLETION_RUN_ID,
+        status="failed",
+    )
+    repository.runs_by_id[_FAILED_COMPLETION_RUN_ID] = failed_completion
+    raw = _RawPersistenceStub(
+        artifact_deduplicated=True,
+        completed_ingestion_run_id=_FAILED_COMPLETION_RUN_ID,
+    )
+    canonical = _CanonicalRepositoryStub(
+        artifact_rows=[_raw_row("Trades", {"conid": "100"})]
+    )
+    snapshot = _SnapshotServiceStub()
+
+    result = _build_orchestrator(
+        repository,
+        raw=raw,
+        canonical=canonical,
+        snapshot=snapshot,
+    ).job_execute("ingestion_run")
+
+    assert result.status == "success"
+    assert repository.get_by_id_calls == [_FAILED_COMPLETION_RUN_ID]
+    assert raw.raw_insert_calls == 1
+    assert canonical.artifact_read_ids == [raw.raw_artifact_id]
+    assert canonical.bulk_upsert_calls == 1
+    assert snapshot.build_calls == 1
 
 
 def test_distinct_artifact_reads_changed_rows_and_passes_incremental_scope() -> None:
@@ -1038,31 +1143,48 @@ def test_unscopable_changed_row_falls_back_to_full_snapshot() -> None:
     assert details["snapshot_full_rebuild_reason"] == "unscopable_changed_row:Trades:missing_conid"
 
 
-def test_ingestion_completed_stages_include_all_monotonic_durations() -> None:
-    """Expose every new orchestrator duration as a non-negative integer."""
+def test_ingestion_completed_stages_use_distinct_monotonic_operation_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measure every operation from its own deterministic monotonic boundary."""
 
     repository = _RepositoryStub()
+    clock_values = iter(
+        [
+            0,
+            2_000_000,
+            10_000_000,
+            13_000_000,
+            20_000_000,
+            25_000_000,
+            30_000_000,
+            37_000_000,
+            40_000_000,
+            51_000_000,
+            60_000_000,
+            73_000_000,
+            80_000_000,
+            97_000_000,
+        ]
+    )
+    monkeypatch.setattr(ingestion_module, "perf_counter_ns", lambda: next(clock_values))
 
     _build_orchestrator(repository).job_execute("ingestion_run")
 
     details = _completed_stage_details(repository)
     expected = {
-        "preflight": "preflight_duration_ms",
-        "xml_extraction": "xml_extraction_duration_ms",
-        "persist": "raw_persistence_duration_ms",
-        "canonical_mapping": "canonical_duration_ms",
-        "snapshot": "snapshot_duration_ms",
+        ("preflight", "preflight_duration_ms"): 2,
+        ("xml_extraction", "xml_extraction_duration_ms"): 3,
+        ("persist", "artifact_persistence_duration_ms"): 5,
+        ("persist", "raw_persistence_duration_ms"): 7,
+        ("canonical_mapping", "canonical_raw_read_duration_ms"): 11,
+        ("canonical_mapping", "canonical_duration_ms"): 13,
+        ("snapshot", "snapshot_duration_ms"): 17,
     }
-    for stage, key in expected.items():
-        duration_ms = details[stage][key]
-        assert isinstance(duration_ms, int)
-        assert duration_ms >= 0
-    artifact_persistence_duration_ms = details["persist"]["artifact_persistence_duration_ms"]
-    canonical_raw_read_duration_ms = details["canonical_mapping"]["canonical_raw_read_duration_ms"]
-    assert isinstance(artifact_persistence_duration_ms, int)
-    assert artifact_persistence_duration_ms >= 0
-    assert isinstance(canonical_raw_read_duration_ms, int)
-    assert canonical_raw_read_duration_ms >= 0
+    assert {
+        (stage, key): details[stage][key]
+        for stage, key in expected
+    } == expected
 
 
 def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_absent() -> None:
@@ -1070,6 +1192,7 @@ def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_
 
     repository = _RepositoryStub()
     snapshot = _SnapshotServiceStub()
+    raw = _RawPersistenceStub()
     payload = (
         b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
@@ -1078,7 +1201,7 @@ def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_
     )
     orchestrator = IngestionJobOrchestrator(
         ingestion_repository=repository,
-        raw_persistence_repository=_RawPersistenceStub(),
+        raw_persistence_repository=raw,
         flex_adapter=_AdapterStub(payload),
         config=IngestionOrchestratorConfig(account_id="U1", flex_query_id="query"),
         snapshot_service=snapshot,
@@ -1090,6 +1213,7 @@ def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_
     assert snapshot.build_calls == 1
     assert snapshot.affected_conids is None
     assert snapshot.affected_currencies is None
+    assert raw.completion_calls == []
 
 
 def test_exact_duplicate_skips_snapshot_when_canonical_repository_is_absent() -> None:
@@ -1201,3 +1325,4 @@ def test_jobs_ingestion_orchestrator_canonical_stage_skips_when_run_has_no_new_r
     assert isinstance(details, dict)
     assert details["canonical_input_row_count"] == 0
     assert details["canonical_skip_reason"] == "no_new_raw_rows_for_run"
+    assert raw_persistence_stub.completion_calls == []

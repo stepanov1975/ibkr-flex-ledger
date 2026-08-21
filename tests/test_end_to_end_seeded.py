@@ -172,6 +172,41 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
         )
 
         first_result = orchestrator.job_execute("ingestion_run")
+        assert first_result.status == "success"
+        with engine.begin() as connection:
+            initial_trade = dict(
+                connection.execute(
+                    text(
+                        "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price "
+                        "FROM event_trade_fill WHERE account_id='SEEDED_ACCOUNT' "
+                        "AND ib_exec_id='SEED-EXEC-1'"
+                    )
+                ).mappings().one()
+            )
+            initial_snapshot = dict(
+                connection.execute(
+                    text(
+                        "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees "
+                        "FROM pnl_snapshot_daily WHERE account_id='SEEDED_ACCOUNT'"
+                    )
+                ).mappings().one()
+            )
+            initial_lot = dict(
+                connection.execute(
+                    text(
+                        "SELECT position_lot_id, open_event_trade_fill_id, open_quantity, "
+                        "remaining_quantity, open_price, cost_basis_open FROM position_lot "
+                        "WHERE account_id='SEEDED_ACCOUNT' AND status='open'"
+                    )
+                ).mappings().one()
+            )
+            connection.execute(
+                text(
+                    "UPDATE position_lot SET open_quantity=999 "
+                    "WHERE position_lot_id=:position_lot_id"
+                ),
+                {"position_lot_id": initial_lot["position_lot_id"]},
+            )
         duplicate_result = orchestrator.job_execute("ingestion_run")
         seeded_adapter.payload_bytes = _SEEDED_PAYLOAD.replace(
             b'tradePrice="100"', b'tradePrice="111"'
@@ -245,13 +280,48 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             assert raw_counts[0] > 0
             assert raw_counts[1] == 0
             assert raw_counts[2] == raw_counts[0]
-            corrected_price = connection.execute(
+            corrected_trade = connection.execute(
                 text(
-                    "SELECT price FROM event_trade_fill "
+                    "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price "
+                    "FROM event_trade_fill "
                     "WHERE account_id='SEEDED_ACCOUNT' AND ib_exec_id='SEED-EXEC-1'"
                 )
-            ).scalar_one()
-            assert corrected_price == Decimal("111")
+            ).mappings().one()
+            corrected_snapshot = connection.execute(
+                text(
+                    "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees "
+                    "FROM pnl_snapshot_daily WHERE account_id='SEEDED_ACCOUNT'"
+                )
+            ).mappings().one()
+            corrected_lot = connection.execute(
+                text(
+                    "SELECT position_lot_id, open_event_trade_fill_id, open_quantity, "
+                    "remaining_quantity, open_price, cost_basis_open FROM position_lot "
+                    "WHERE account_id='SEEDED_ACCOUNT' AND status='open'"
+                )
+            ).mappings().one()
+            assert corrected_trade["price"] == Decimal("111")
+            assert corrected_trade["event_trade_fill_id"] == initial_trade["event_trade_fill_id"]
+            assert corrected_trade["ingestion_run_id"] == initial_trade["ingestion_run_id"]
+            assert corrected_trade["source_raw_record_id"] == initial_trade["source_raw_record_id"]
+            assert dict(corrected_snapshot) == {
+                "position_qty": Decimal("2"),
+                "cost_basis": Decimal("223"),
+                "realized_pnl": Decimal("0"),
+                "unrealized_pnl": Decimal("-3"),
+                "total_pnl": Decimal("-3"),
+                "fees": Decimal("1"),
+            }
+            assert dict(corrected_snapshot) != initial_snapshot
+            assert corrected_lot["position_lot_id"] == initial_lot["position_lot_id"]
+            assert (
+                corrected_lot["open_event_trade_fill_id"]
+                == initial_lot["open_event_trade_fill_id"]
+            )
+            assert corrected_lot["open_quantity"] == Decimal("2")
+            assert corrected_lot["remaining_quantity"] == Decimal("2")
+            assert corrected_lot["open_price"] == Decimal("111")
+            assert corrected_lot["cost_basis_open"] == Decimal("223")
             assert (
                 _completed_details(runs[1], "canonical_mapping")["canonical_skip_reason"]
                 == "exact_duplicate_artifact"
@@ -261,6 +331,249 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             )
             assert _completed_details(runs[2], "snapshot")["snapshot_scope_mode"] == "incremental"
             assert connection.execute(text("SELECT count(*) FROM pnl_snapshot_daily")).scalar_one() == 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state() -> None:
+    """Rebuild an FX-affected instrument without touching unrelated lots or snapshots."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_fx_scope_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        run_id = uuid.uuid4()
+        eur_instrument_id = uuid.uuid4()
+        gbp_instrument_id = uuid.uuid4()
+        eur_trade_raw_id = uuid.uuid4()
+        gbp_trade_raw_id = uuid.uuid4()
+        eur_fx_raw_id = uuid.uuid4()
+        gbp_fx_raw_id = uuid.uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run ("
+                    "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                    "report_date_local, started_at_utc, ended_at_utc) VALUES ("
+                    ":run_id, 'U_FX_SCOPE', 'manual', 'success', '2026-08', 'query', "
+                    "DATE '2026-08-21', now(), now())"
+                ),
+                {"run_id": run_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO instrument ("
+                    "instrument_id, account_id, conid, symbol, asset_category, currency) VALUES ("
+                    ":instrument_id, 'U_FX_SCOPE', :conid, :symbol, 'STK', :currency)"
+                ),
+                [
+                    {
+                        "instrument_id": eur_instrument_id,
+                        "conid": "100",
+                        "symbol": "EUR_STOCK",
+                        "currency": "EUR",
+                    },
+                    {
+                        "instrument_id": gbp_instrument_id,
+                        "conid": "200",
+                        "symbol": "GBP_STOCK",
+                        "currency": "GBP",
+                    },
+                ],
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO raw_record ("
+                    "raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                    "payload_sha256, report_date_local, section_name, source_row_ref, source_payload) VALUES ("
+                    ":raw_record_id, :run_id, 'U_FX_SCOPE', '2026-08', 'query', :sha, "
+                    "DATE '2026-08-21', :section_name, :source_row_ref, "
+                    "jsonb_build_object('closePrice', CAST(:close_price AS text)))"
+                ),
+                [
+                    {
+                        "raw_record_id": eur_trade_raw_id,
+                        "run_id": run_id,
+                        "sha": "eur-trade",
+                        "section_name": "Trades",
+                        "source_row_ref": "trade-eur",
+                        "close_price": "12",
+                    },
+                    {
+                        "raw_record_id": gbp_trade_raw_id,
+                        "run_id": run_id,
+                        "sha": "gbp-trade",
+                        "section_name": "Trades",
+                        "source_row_ref": "trade-gbp",
+                        "close_price": "25",
+                    },
+                    {
+                        "raw_record_id": eur_fx_raw_id,
+                        "run_id": run_id,
+                        "sha": "eur-fx",
+                        "section_name": "ConversionRates",
+                        "source_row_ref": "fx-eur",
+                        "close_price": "",
+                    },
+                    {
+                        "raw_record_id": gbp_fx_raw_id,
+                        "run_id": run_id,
+                        "sha": "gbp-fx",
+                        "section_name": "ConversionRates",
+                        "source_row_ref": "fx-gbp",
+                        "close_price": "",
+                    },
+                ],
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO event_trade_fill ("
+                    "event_trade_fill_id, account_id, instrument_id, ingestion_run_id, "
+                    "source_raw_record_id, ib_exec_id, transaction_id, trade_timestamp_utc, "
+                    "report_date_local, side, quantity, price, commission, fees, currency, "
+                    "functional_currency) VALUES ("
+                    ":event_id, 'U_FX_SCOPE', :instrument_id, :run_id, :raw_record_id, :exec_id, "
+                    ":transaction_id, TIMESTAMPTZ '2026-08-21 12:00:00+00', DATE '2026-08-21', "
+                    "'BUY', 1, :price, 0, 0, :currency, 'USD')"
+                ),
+                [
+                    {
+                        "event_id": uuid.uuid4(),
+                        "instrument_id": eur_instrument_id,
+                        "run_id": run_id,
+                        "raw_record_id": eur_trade_raw_id,
+                        "exec_id": "EUR-EXEC",
+                        "transaction_id": "1",
+                        "price": "10",
+                        "currency": "EUR",
+                    },
+                    {
+                        "event_id": uuid.uuid4(),
+                        "instrument_id": gbp_instrument_id,
+                        "run_id": run_id,
+                        "raw_record_id": gbp_trade_raw_id,
+                        "exec_id": "GBP-EXEC",
+                        "transaction_id": "2",
+                        "price": "20",
+                        "currency": "GBP",
+                    },
+                ],
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO event_fx ("
+                    "account_id, ingestion_run_id, source_raw_record_id, transaction_id, "
+                    "report_date_local, currency, functional_currency, fx_rate, fx_source) VALUES ("
+                    "'U_FX_SCOPE', :run_id, :raw_record_id, :transaction_id, DATE '2026-08-21', "
+                    ":currency, 'USD', :fx_rate, 'seeded')"
+                ),
+                [
+                    {
+                        "run_id": run_id,
+                        "raw_record_id": eur_fx_raw_id,
+                        "transaction_id": "FX-EUR",
+                        "currency": "EUR",
+                        "fx_rate": "1",
+                    },
+                    {
+                        "run_id": run_id,
+                        "raw_record_id": gbp_fx_raw_id,
+                        "transaction_id": "FX-GBP",
+                        "currency": "GBP",
+                        "fx_rate": "2",
+                    },
+                ],
+            )
+
+        snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
+        snapshot_service = StockLedgerSnapshotService(snapshot_repository)
+        initial_result = snapshot_service.ledger_snapshot_build_and_persist(
+            account_id="U_FX_SCOPE",
+            ingestion_run_id=str(run_id),
+            report_date_local="2026-08-21",
+        )
+        assert initial_result.snapshot_row_count == 2
+        assert initial_result.position_lot_row_count == 2
+
+        with engine.connect() as connection:
+            initial_snapshots = {
+                row["instrument_id"]: dict(row)
+                for row in connection.execute(
+                    text(
+                        "SELECT * FROM pnl_snapshot_daily WHERE account_id='U_FX_SCOPE' "
+                        "ORDER BY instrument_id"
+                    )
+                ).mappings().all()
+            }
+            initial_lots = {
+                row["instrument_id"]: dict(row)
+                for row in connection.execute(
+                    text(
+                        "SELECT * FROM position_lot WHERE account_id='U_FX_SCOPE' "
+                        "ORDER BY instrument_id"
+                    )
+                ).mappings().all()
+            }
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE event_fx SET fx_rate=1.5 "
+                    "WHERE account_id='U_FX_SCOPE' AND currency='EUR'"
+                )
+            )
+
+        scoped_result = snapshot_service.ledger_snapshot_build_and_persist(
+            account_id="U_FX_SCOPE",
+            ingestion_run_id=str(run_id),
+            report_date_local="2026-08-21",
+            affected_conids=frozenset(),
+            affected_currencies=frozenset({"EUR"}),
+        )
+        assert scoped_result.snapshot_row_count == 1
+        assert scoped_result.position_lot_row_count == 1
+
+        with engine.connect() as connection:
+            final_snapshots = {
+                row["instrument_id"]: dict(row)
+                for row in connection.execute(
+                    text(
+                        "SELECT * FROM pnl_snapshot_daily WHERE account_id='U_FX_SCOPE' "
+                        "ORDER BY instrument_id"
+                    )
+                ).mappings().all()
+            }
+            final_lots = {
+                row["instrument_id"]: dict(row)
+                for row in connection.execute(
+                    text(
+                        "SELECT * FROM position_lot WHERE account_id='U_FX_SCOPE' "
+                        "ORDER BY instrument_id"
+                    )
+                ).mappings().all()
+            }
+
+        assert final_snapshots[gbp_instrument_id] == initial_snapshots[gbp_instrument_id]
+        assert final_lots[gbp_instrument_id] == initial_lots[gbp_instrument_id]
+        assert final_snapshots[eur_instrument_id]["cost_basis"] == Decimal("15")
+        assert final_snapshots[eur_instrument_id]["unrealized_pnl"] == Decimal("3")
+        assert final_snapshots[eur_instrument_id] != initial_snapshots[eur_instrument_id]
+        assert final_lots[eur_instrument_id]["open_price"] == Decimal("15")
+        assert final_lots[eur_instrument_id]["cost_basis_open"] == Decimal("15")
+        assert final_lots[eur_instrument_id] != initial_lots[eur_instrument_id]
     finally:
         if engine is not None:
             engine.dispose()

@@ -40,6 +40,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         + "WHERE ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
         + "ORDER BY created_at_utc ASC, raw_record_id ASC"
     )
+    _RAW_RECORD_QUERY_BY_ARTIFACT_ID = (
+        _RAW_RECORD_SELECT_COLUMNS
+        + "WHERE raw_artifact_id = CAST(:raw_artifact_id AS uuid) "
+        + "ORDER BY created_at_utc ASC, raw_record_id ASC"
+    )
     _RAW_RECORD_QUERY_CHANGED_BY_RUN_ID = (
         "SELECT current.raw_record_id, current.ingestion_run_id, current.account_id, current.period_key, "
         "current.flex_query_id, current.report_date_local, current.section_name, current.source_row_ref, "
@@ -48,6 +53,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         "LEFT JOIN LATERAL ("
         "SELECT previous.raw_record_id, previous.source_payload "
         "FROM raw_record AS previous "
+        "JOIN raw_artifact AS previous_artifact "
+        "ON previous_artifact.raw_artifact_id = previous.raw_artifact_id "
+        "JOIN ingestion_run AS completed_run "
+        "ON completed_run.ingestion_run_id = previous_artifact.completed_ingestion_run_id "
+        "AND completed_run.status = 'success' "
         "WHERE previous.account_id = current.account_id "
         "AND previous.flex_query_id = current.flex_query_id "
         "AND previous.section_name = current.section_name "
@@ -159,6 +169,20 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         return self._db_canonical_read_raw_rows(
             query_template=self._RAW_RECORD_QUERY_CHANGED_BY_RUN_ID,
             parameters={"ingestion_run_id": str(ingestion_run_id)},
+        )
+
+    def db_raw_record_list_for_artifact(
+        self,
+        raw_artifact_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """List every raw row persisted for one immutable artifact."""
+
+        if raw_artifact_id is None:
+            raise ValueError("raw_artifact_id must not be None")
+
+        return self._db_canonical_read_raw_rows(
+            query_template=self._RAW_RECORD_QUERY_BY_ARTIFACT_ID,
+            parameters={"raw_artifact_id": str(raw_artifact_id)},
         )
 
     def db_canonical_instrument_upsert_many(

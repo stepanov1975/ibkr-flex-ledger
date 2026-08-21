@@ -232,6 +232,10 @@ alembic upgrade head
 Migration usage details:
 
 - `docs/migrations.md`
+- The incremental-ingestion indexes use ordinary transactional `CREATE INDEX`.
+  Apply these migrations in a maintenance window when the tables are materially
+  larger than the current dataset because writes can be blocked while each index
+  is built.
 
 ## Ingestion orchestration baseline (Task 3)
 
@@ -250,6 +254,51 @@ Operational note for live IBKR runs:
 
 - If ingestion fails with `MISSING_REQUIRED_SECTION`, update the IBKR Flex query configuration to include the missing sections, then re-run ingestion.
 - During assisted troubleshooting, the operator should be asked to add missing sections in IBKR query settings before retrying.
+
+### Recovering a stale `started` ingestion run
+
+Use this manual procedure only after an abrupt process death. There is no
+automatic timeout or lease that marks an ingestion run failed.
+
+1. Confirm that no app, CLI ingestion command, scheduler, or other worker is
+   still executing the affected account/run. Stop the worker first if there is
+   any uncertainty.
+2. Back up PostgreSQL before changing run state:
+
+   ```bash
+   docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > stock_app_before_stale_run.dump
+   ```
+
+3. Inspect and copy the exact `ingestion_run_id`; confirm that its current
+   status is still `started`:
+
+   ```sql
+   SELECT ingestion_run_id, account_id, started_at_utc, status
+   FROM ingestion_run
+   WHERE ingestion_run_id = '<exact-run-uuid>'::uuid;
+   ```
+
+4. Mark only that exact run failed in one transaction:
+
+   ```sql
+   BEGIN;
+   UPDATE ingestion_run
+   SET status = 'failed',
+       ended_at_utc = now(),
+       duration_ms = GREATEST(
+           0,
+           CAST(EXTRACT(EPOCH FROM (now() - started_at_utc)) * 1000 AS BIGINT)
+       ),
+       error_code = 'INGESTION_OPERATOR_RECOVERY',
+       error_message = 'Marked failed after confirmed abrupt process termination'
+   WHERE ingestion_run_id = '<exact-run-uuid>'::uuid
+     AND status = 'started'
+   RETURNING ingestion_run_id, account_id, status, ended_at_utc;
+   COMMIT;
+   ```
+
+Do not bulk-update `started` runs, and do not infer staleness from elapsed time
+alone.
 
 API endpoints:
 
@@ -275,11 +324,14 @@ Included behavior:
 - Raw section-row extraction persisted into `raw_record` for all detected sections (including non-MVP-mapped sections)
 - Raw row provenance linked through `raw_record.raw_artifact_id -> raw_artifact.raw_artifact_id`
 - Persist-stage diagnostics now include `payload_sha256`, `raw_artifact_id`, artifact dedupe flag, and inserted/deduplicated raw row counts
-- Duplicate artifact ingest still finalizes run as `success` with explicit dedupe/no-op diagnostics
+- A duplicate artifact takes the semantic no-op fast path only when
+  `completed_ingestion_run_id` references an ingestion run persisted as
+  `success`; otherwise ingestion recovers and processes that artifact's rows
 
 Migration files and configuration additions:
 
 - `alembic/versions/20260214_02_task4_raw_artifact_persistence.py`
+- `alembic/versions/20260821_05_raw_artifact_completion.py`
 
 Task 4 implementation modules:
 
@@ -296,8 +348,11 @@ Included behavior:
 - Canonical mapping service for `Trades`, `CashTransactions`, `ConversionRates`, and `CorporateActions` with fail-fast contract validation
 - Conid-first instrument upsert before event upserts so canonical event rows resolve deterministic `instrument_id`
 - Canonical UPSERT persistence for `event_trade_fill`, `event_cashflow`, `event_fx`, and `event_corp_action` using frozen natural keys and collision policies
-- Ingestion workflow runs `canonical_mapping` stage after raw persistence using current `ingestion_run_id` raw rows only (run-scoped processing)
-- Duplicate raw payload retries are canonical no-op for ingestion when no new run-scoped raw rows are inserted; diagnostics include `canonical_skip_reason=no_new_raw_rows_for_run`
+- Normal distinct ingestion runs `canonical_mapping` after raw persistence using
+  changed current-run rows; incomplete duplicate recovery reads the immutable
+  artifact's complete row set
+- Successfully completed duplicate artifacts are canonical no-ops; incomplete
+  duplicate attempts replay semantic work before they can establish completion
 - Deterministic reprocess workflow replays canonical mapping from `raw_record` only, without adapter request/poll/download
 - Reprocess trigger surfaces exposed through both API and CLI
 
@@ -330,16 +385,19 @@ Ingestion diagnostics timeline additions:
 ### Incremental ingestion diagnostics
 
 Normal ingestion keeps every distinct Flex artifact and its raw rows. An exact
-duplicate artifact completes successfully while skipping raw-row insertion,
-canonical mapping, and snapshot rebuilding. A distinct artifact canonicalizes
-only rows changed from their immediately preceding source version and rebuilds
-snapshots only for affected instruments and FX source currencies. Explicit
-reprocess commands remain full replays.
+duplicate artifact skips raw-row insertion, canonical mapping, and snapshot
+rebuilding only when that artifact has a successfully completed prior processing
+run. A distinct artifact canonicalizes only rows changed from its latest
+successfully processed source version and rebuilds snapshots only for affected
+instruments and FX source currencies. Explicit reprocess commands remain full
+replays.
 
 Run-detail diagnostics include request transport, polling, cumulative poll wait,
 preflight, XML extraction, artifact persistence, raw persistence, canonical raw
 read, canonical mapping/persistence, snapshot, and total run durations in integer
-milliseconds. Skipped and full-fallback stages include their reason.
+milliseconds. Exact-duplicate skips and full-fallback stages include their
+reason. An empty affected scope is reported as `snapshot_scope_mode="skipped"`;
+it does not carry a separate skip reason.
 
 CLI trigger command additions:
 

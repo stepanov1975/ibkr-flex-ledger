@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -70,7 +71,8 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                         "ON CONFLICT (account_id, period_key, flex_query_id, payload_sha256) DO UPDATE SET "
                         "created_at_utc = raw_artifact.created_at_utc "
                         "RETURNING raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
-                        "payload_sha256, report_date_local, source_payload, created_at_utc, (xmax = 0) AS inserted"
+                        "payload_sha256, report_date_local, source_payload, created_at_utc, "
+                        "completed_ingestion_run_id, (xmax = 0) AS inserted"
                     ),
                     {
                         "ingestion_run_id": request.ingestion_run_id,
@@ -151,6 +153,37 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                 return RawRecordPersistResult(inserted_count=inserted_count, deduplicated_count=deduplicated_count)
         except SQLAlchemyError as error:
             raise RuntimeError("raw row persistence failed") from error
+
+    def db_raw_artifact_mark_completed(
+        self,
+        raw_artifact_id: UUID,
+        completed_ingestion_run_id: UUID,
+    ) -> None:
+        """Record which ingestion run completed semantic processing for an artifact."""
+
+        if raw_artifact_id is None:
+            raise ValueError("raw_artifact_id must not be None")
+        if completed_ingestion_run_id is None:
+            raise ValueError("completed_ingestion_run_id must not be None")
+
+        try:
+            with self._engine.begin() as connection:
+                updated_row = connection.execute(
+                    text(
+                        "UPDATE raw_artifact SET "
+                        "completed_ingestion_run_id = CAST(:completed_ingestion_run_id AS uuid) "
+                        "WHERE raw_artifact_id = CAST(:raw_artifact_id AS uuid) "
+                        "RETURNING raw_artifact_id"
+                    ),
+                    {
+                        "raw_artifact_id": str(raw_artifact_id),
+                        "completed_ingestion_run_id": str(completed_ingestion_run_id),
+                    },
+                ).first()
+                if updated_row is None:
+                    raise RuntimeError("raw artifact completion target not found")
+        except SQLAlchemyError as error:
+            raise RuntimeError("raw artifact completion persistence failed") from error
 
     def _db_raw_validate_reference(self, reference: RawArtifactReference) -> RawArtifactReference:
         """Validate and normalize raw artifact identity fields.
@@ -236,6 +269,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
             ),
             source_payload=source_payload,
             created_at_utc=row["created_at_utc"],
+            completed_ingestion_run_id=row["completed_ingestion_run_id"],
         )
 
     def _db_raw_validate_non_empty_text(self, value: str, field_name: str) -> str:

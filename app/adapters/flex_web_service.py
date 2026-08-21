@@ -44,7 +44,7 @@ class _AdapterRetryStrategy:
     """Immutable retry strategy config and calculation helpers.
 
     Attributes:
-        initial_wait_seconds: Delay floor before each poll attempt.
+        initial_wait_seconds: Fixed delay before the first poll attempt.
         retry_attempts: Number of polling attempts.
         backoff_base_seconds: Base delay for exponential backoff.
         max_backoff_seconds: Exponential delay cap before jitter.

@@ -375,6 +375,110 @@ def _upsert_drop_database(admin_url: str, database_name: str) -> None:
         admin_engine.dispose()
 
 
+def test_artifact_rows_and_completion_marker_follow_retry_lineage() -> None:
+    """Read rows by artifact identity and persist the run that completed processing."""
+
+    base_url = _upsert_resolve_reachable_base_url()
+    database_name = f"test_artifact_lineage_{uuid.uuid4().hex[:10]}"
+    admin_url = _upsert_build_database_url(base_url, "postgres")
+    database_url = _upsert_build_database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _upsert_create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = database_url
+    engine = None
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(database_url)
+        owner_run_id = uuid.uuid4()
+        retry_run_id = uuid.uuid4()
+        with engine.begin() as connection:
+            for run_id, status in (
+                (owner_run_id, "failed"),
+                (retry_run_id, "started"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO ingestion_run ("
+                        "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                        "started_at_utc, ended_at_utc) VALUES ("
+                        ":run_id, 'U_LINEAGE', 'manual', :status, '2026-08', 'query', now(), "
+                        "CASE WHEN :status = 'started' THEN NULL ELSE now() END)"
+                    ),
+                        {"run_id": run_id, "status": status},
+                )
+
+        raw_repository = SQLAlchemyRawPersistenceService(engine)
+        canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
+        artifact_result = raw_repository.db_raw_artifact_upsert(
+            RawArtifactPersistRequest(
+                ingestion_run_id=owner_run_id,
+                reference=RawArtifactReference(
+                    account_id="U_LINEAGE",
+                    period_key="2026-08",
+                    flex_query_id="query",
+                    payload_sha256="artifact-lineage-sha",
+                    report_date_local=None,
+                ),
+                source_payload=b"artifact-lineage",
+            )
+        )
+        assert artifact_result.artifact.completed_ingestion_run_id is None
+
+        raw_repository.db_raw_record_insert_many(
+            [
+                RawRecordPersistRequest(
+                    ingestion_run_id=retry_run_id,
+                    raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                    artifact_reference=artifact_result.artifact.reference,
+                    report_date_local=None,
+                    section_name="Trades",
+                    source_row_ref="Trades:Trade:transactionID=1",
+                    source_payload={"transactionID": "1"},
+                ),
+                RawRecordPersistRequest(
+                    ingestion_run_id=retry_run_id,
+                    raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                    artifact_reference=artifact_result.artifact.reference,
+                    report_date_local=None,
+                    section_name="OpenPositions",
+                    source_row_ref="OpenPositions:OpenPosition:conid=100",
+                    source_payload={"conid": "100"},
+                ),
+            ]
+        )
+        artifact_rows = canonical_repository.db_raw_record_list_for_artifact(
+            artifact_result.artifact.raw_artifact_id
+        )
+        assert {row.section_name for row in artifact_rows} == {"Trades", "OpenPositions"}
+        assert [row.raw_record_id for row in artifact_rows] == sorted(
+            row.raw_record_id for row in artifact_rows
+        )
+        assert {row.ingestion_run_id for row in artifact_rows} == {retry_run_id}
+
+        raw_repository.db_raw_artifact_mark_completed(
+            artifact_result.artifact.raw_artifact_id,
+            retry_run_id,
+        )
+        duplicate_result = raw_repository.db_raw_artifact_upsert(
+            RawArtifactPersistRequest(
+                ingestion_run_id=uuid.uuid4(),
+                reference=artifact_result.artifact.reference,
+                source_payload=b"artifact-lineage",
+            )
+        )
+        assert duplicate_result.deduplicated is True
+        assert duplicate_result.artifact.ingestion_run_id == owner_run_id
+        assert duplicate_result.artifact.completed_ingestion_run_id == retry_run_id
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _upsert_drop_database(admin_url, database_name)
+
+
 def _upsert_insert_delta_run_and_artifact(
     connection: Connection,
     *,
@@ -383,6 +487,8 @@ def _upsert_insert_delta_run_and_artifact(
     account_id: str,
     flex_query_id: str,
     created_at_utc: str,
+    run_status: str = "success",
+    completed: bool = True,
 ) -> None:
     """Insert one delta-read ingestion run and its raw artifact fixture."""
 
@@ -391,22 +497,25 @@ def _upsert_insert_delta_run_and_artifact(
         text(
             "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, "
             "period_key, flex_query_id, started_at_utc, ended_at_utc) VALUES "
-            "(CAST(:run_id AS uuid), :account_id, 'manual', 'success', '2026-08', :flex_query_id, "
+            "(CAST(:run_id AS uuid), :account_id, 'manual', :run_status, '2026-08', :flex_query_id, "
             "CAST(:created AS timestamptz), CAST(:created AS timestamptz))"
         ),
         {
             "run_id": ingestion_run_id,
             "account_id": account_id,
             "flex_query_id": flex_query_id,
+            "run_status": run_status,
             "created": created_at_utc,
         },
     )
     connection.execute(
         text(
             "INSERT INTO raw_artifact (raw_artifact_id, ingestion_run_id, account_id, period_key, "
-            "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc) VALUES "
+            "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc, "
+            "completed_ingestion_run_id) VALUES "
             "(CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), :account_id, '2026-08', :flex_query_id, :sha, "
-            "DATE '2026-08-21', CAST(:source_payload AS bytea), CAST(:created AS timestamptz))"
+            "DATE '2026-08-21', CAST(:source_payload AS bytea), CAST(:created AS timestamptz), "
+            "CAST(:completed_run_id AS uuid))"
         ),
         {
             "artifact_id": raw_artifact_id,
@@ -416,6 +525,7 @@ def _upsert_insert_delta_run_and_artifact(
             "sha": payload_sha256,
             "source_payload": payload_sha256,
             "created": created_at_utc,
+            "completed_run_id": ingestion_run_id if completed else None,
         },
     )
 
@@ -854,6 +964,72 @@ def test_db_canonical_trade_fill_upsert_rejects_non_uuid_text_values() -> None:
         )
 
 
+def test_changed_rows_ignore_failed_and_unprocessed_artifact_predecessors() -> None:
+    """Compare a later artifact with the latest successfully completed semantic baseline."""
+
+    base_url = _upsert_resolve_reachable_base_url()
+    database_name = f"test_completed_baseline_{uuid.uuid4().hex[:10]}"
+    admin_url = _upsert_build_database_url(base_url, "postgres")
+    database_url = _upsert_build_database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _upsert_create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = database_url
+    engine = None
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(database_url)
+        fixture_ids = [
+            (str(uuid.uuid4()), str(uuid.uuid4()))
+            for _ in range(4)
+        ]
+        with engine.begin() as connection:
+            for index, ((run_id, artifact_id), payload, status, completed) in enumerate(
+                zip(
+                    fixture_ids,
+                    ('{"price":"10"}', '{"price":"11"}', '{"price":"12"}', '{"price":"12"}'),
+                    ("success", "failed", "failed", "started"),
+                    (True, False, True, False),
+                    strict=True,
+                ),
+                start=1,
+            ):
+                _upsert_insert_delta_run_and_artifact(
+                    connection,
+                    ingestion_run_id=run_id,
+                    raw_artifact_id=artifact_id,
+                    account_id="U_COMPLETED_BASELINE",
+                    flex_query_id="query-baseline",
+                    created_at_utc=f"2026-08-21T01:00:0{index}+00:00",
+                    run_status=status,
+                    completed=completed,
+                )
+                _upsert_insert_delta_raw_record(
+                    connection,
+                    raw_record_id=str(uuid.uuid4()),
+                    raw_artifact_id=artifact_id,
+                    ingestion_run_id=run_id,
+                    account_id="U_COMPLETED_BASELINE",
+                    flex_query_id="query-baseline",
+                    source_row_ref="trade-baseline",
+                    source_payload=payload,
+                    created_at_utc=f"2026-08-21T01:00:0{index}+00:00",
+                )
+
+        rows = SQLAlchemyCanonicalPersistenceService(engine).db_raw_record_list_changed_for_run(
+            uuid.UUID(fixture_ids[-1][0])
+        )
+        assert len(rows) == 1
+        assert rows[0].source_payload == {"price": "12"}
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _upsert_drop_database(admin_url, database_name)
+
+
 def test_changed_rows_compare_with_immediate_predecessor() -> None:
     """Select rows whose payload differs from their immediate prior version."""
 
@@ -887,9 +1063,10 @@ def test_changed_rows_compare_with_immediate_predecessor() -> None:
                 connection.execute(
                     text(
                         "INSERT INTO raw_artifact (raw_artifact_id, ingestion_run_id, account_id, period_key, "
-                        "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc) VALUES "
+                        "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc, "
+                        "completed_ingestion_run_id) VALUES "
                         "(CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), 'U1', '2026-08', 'query', CAST(:sha AS bytea), "
-                        "DATE '2026-08-21', CAST(:sha AS bytea), CAST(:created AS timestamptz))"
+                        "DATE '2026-08-21', CAST(:sha AS bytea), CAST(:created AS timestamptz), CAST(:run_id AS uuid))"
                     ),
                     {
                         "artifact_id": artifact_id,

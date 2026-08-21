@@ -609,7 +609,11 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                             "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), "
                             "CAST(:cost_basis_open AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
                             "ON CONFLICT (position_lot_id) DO UPDATE SET "
-                            "remaining_quantity = EXCLUDED.remaining_quantity, closed_at_utc = EXCLUDED.closed_at_utc, "
+                            "open_quantity = EXCLUDED.open_quantity, "
+                            "remaining_quantity = EXCLUDED.remaining_quantity, "
+                            "open_price = EXCLUDED.open_price, "
+                            "cost_basis_open = EXCLUDED.cost_basis_open, "
+                            "closed_at_utc = EXCLUDED.closed_at_utc, "
                             "realized_pnl_to_date = EXCLUDED.realized_pnl_to_date, status = EXCLUDED.status, "
                             "updated_at_utc = now()"
                         ),
