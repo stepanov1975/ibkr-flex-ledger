@@ -147,13 +147,20 @@ class _RepositoryStub:
         self.snapshot_requests.requests = requests
 
 
-def _trade(instrument_id: UUID, side: str, quantity: str, price: str) -> LedgerTradeFillRecord:
+def _trade(
+    instrument_id: UUID,
+    side: str,
+    quantity: str,
+    price: str,
+    *,
+    minute: int = 0,
+) -> LedgerTradeFillRecord:
     return LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
         account_id="U_TEST",
         instrument_id=instrument_id,
         source_raw_record_id=uuid4(),
-        trade_timestamp_utc=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        trade_timestamp_utc=datetime(2026, 8, 20, 10, minute, tzinfo=timezone.utc),
         report_date_local=date(2026, 8, 20),
         side=side,
         quantity=quantity,
@@ -227,8 +234,8 @@ def test_snapshot_uses_last_trade_fallback_without_completed_openpositions() -> 
     assert Decimal(snapshot.unrealized_pnl) == Decimal("0")
 
 
-def test_snapshot_computes_unrealized_from_openpositions_mark_when_position_matches() -> None:
-    """Compute economic unrealized PnL from the broker mark rather than copying broker PnL."""
+def test_snapshot_uses_openpositions_unrealized_when_position_matches() -> None:
+    """Use broker-reported unrealized PnL when broker and FIFO quantities match."""
 
     instrument_id = uuid4()
     trade = LedgerTradeFillRecord(
@@ -578,6 +585,26 @@ def test_snapshot_uses_broker_quantity_and_cost_when_fifo_mismatches() -> None:
     assert result.broker_position_mismatch_count == 1
 
 
+def test_snapshot_mismatch_uses_broker_cost_and_preserves_realized_pnl() -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[
+            _trade(instrument_id, "BUY", "10", "10"),
+            _trade(instrument_id, "SELL", "4", "12", minute=1),
+        ],
+        valuations=[_broker_position(instrument_id, "5", cost="55", unrealized="5")],
+    )
+    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.position_qty == "5"
+    assert snapshot.cost_basis == "55"
+    assert snapshot.realized_pnl == "8"
+    assert snapshot.provisional is True
+    assert result.broker_position_mismatch_count == 1
+
+
 def test_snapshot_treats_broker_absence_as_zero_without_synthetic_lot() -> None:
     instrument_id = uuid4()
     repository = _RepositoryStub(
@@ -703,6 +730,32 @@ def test_snapshot_includes_instrument_cashflow_without_trade_history() -> None:
     assert result.broker_position_mismatch_count == 0
     assert result.broker_only_position_count == 0
     assert result.broker_absent_nonzero_fifo_count == 0
+
+
+def test_snapshot_explicit_functional_currency_overrides_cashflow_base_currency() -> None:
+    instrument_id = uuid4()
+    cashflow = LedgerCashflowRecord(
+        event_cashflow_id=uuid4(),
+        account_id="U_TEST",
+        instrument_id=instrument_id,
+        report_date_local=date(2026, 8, 20),
+        withholding_tax="0",
+        fees="0",
+        functional_currency="EUR",
+        amount="25",
+        amount_in_base="30",
+        currency="USD",
+    )
+    repository = _RepositoryStub(trades=[], valuations=[], cashflows=[cashflow])
+
+    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.currency == "USD"
+    assert snapshot.realized_pnl == "25"
+    assert "cashflow_amount_in_base" not in snapshot.fx_source
 
 
 def test_snapshot_option_mark_fallback_applies_contract_multiplier() -> None:
