@@ -274,7 +274,6 @@ class _IngestionRepositoryStub:
         """
 
         self._run_id = uuid4()
-        self._timestamp = datetime(2026, 2, 14, tzinfo=timezone.utc)
         self.finalize_calls: list[_FinalizeCall] = []
 
     def db_ingestion_run_create_started(
@@ -313,14 +312,14 @@ class _IngestionRepositoryStub:
             ),
             state=IngestionRunState(
                 status="started",
-                started_at_utc=self._timestamp,
+                started_at_utc=cast(datetime, None),
                 ended_at_utc=None,
                 duration_ms=None,
                 error_code=None,
                 error_message=None,
                 diagnostics=None,
             ),
-            created_at_utc=self._timestamp,
+            created_at_utc=cast(datetime, None),
         )
 
     def db_ingestion_run_finalize(
@@ -367,14 +366,14 @@ class _IngestionRepositoryStub:
             ),
             state=IngestionRunState(
                 status=status,
-                started_at_utc=self._timestamp,
+                started_at_utc=cast(datetime, None),
                 ended_at_utc=None,
                 duration_ms=None,
                 error_code=error_code,
                 error_message=error_message,
                 diagnostics=diagnostics,
             ),
-            created_at_utc=self._timestamp,
+            created_at_utc=cast(datetime, None),
         )
 
 

@@ -494,11 +494,11 @@ def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> Non
 def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     """Propagate one resolved instrument scope through every scoped read and write."""
 
-    instrument_id = UUID("00000000-0000-0000-0000-000000000010")
+    instrument_id = "00000000-0000-0000-0000-000000000010"
     trade = LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
         account_id="U1",
-        instrument_id=instrument_id,
+        instrument_id=cast(UUID, instrument_id),
         source_raw_record_id=uuid4(),
         trade_timestamp_utc=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
         report_date_local=date(2026, 8, 21),
@@ -513,7 +513,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     unrelated_trade = LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
         account_id="U1",
-        instrument_id=UUID("00000000-0000-0000-0000-000000000099"),
+        instrument_id=cast(UUID, "00000000-0000-0000-0000-000000000099"),
         source_raw_record_id=uuid4(),
         trade_timestamp_utc=datetime(2026, 8, 21, 13, 0, tzinfo=timezone.utc),
         report_date_local=date(2026, 8, 21),
@@ -528,7 +528,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     cashflow = LedgerCashflowRecord(
         event_cashflow_id=uuid4(),
         account_id="U1",
-        instrument_id=instrument_id,
+        instrument_id=cast(UUID, instrument_id),
         report_date_local=date(2026, 8, 21),
         withholding_tax="0",
         fees="0",
@@ -540,7 +540,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
         trades=[trade, unrelated_trade],
         valuations=[],
         cashflows=[cashflow],
-        scope_ids=[str(instrument_id)],
+        scope_ids=[instrument_id],
         instrument_currencies=["GBP"],
     )
 
@@ -553,15 +553,15 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
         affected_currencies=frozenset({"AUD"}),
     )
 
-    expected = (str(instrument_id),)
+    expected = (instrument_id,)
     assert repository.trade_instrument_ids == expected
     assert repository.cashflow_instrument_ids == expected
     assert repository.corp_action_instrument_ids == expected
     assert repository.open_position_instrument_ids == expected
     assert repository.reconciled_instrument_ids == expected
     assert repository.fx_currencies == ("AUD", "CHF", "EUR", "GBP", "JPY", "USD")
-    assert [request.instrument_id for request in repository.position_requests.requests] == [str(instrument_id)]
-    assert [request.instrument_id for request in repository.snapshot_requests.requests] == [str(instrument_id)]
+    assert [request.instrument_id for request in repository.position_requests.requests] == [instrument_id]
+    assert [request.instrument_id for request in repository.snapshot_requests.requests] == [instrument_id]
 
 
 def test_snapshot_build_empty_scope_is_noop() -> None:

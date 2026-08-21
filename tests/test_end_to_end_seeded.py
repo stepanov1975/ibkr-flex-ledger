@@ -636,9 +636,10 @@ def test_postgresql_deterministic_replay_cleanup_is_scoped_immutable_and_idempot
         )
 
         snapshot_query = text(
-            "SELECT s.pnl_snapshot_daily_id, s.report_date_local, i.conid, s.position_qty, "
-            "s.cost_basis, s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
-            "s.valuation_source, s.ingestion_run_id, s.created_at_utc "
+            "SELECT s.account_id, s.report_date_local, s.instrument_id, i.conid, "
+            "s.position_qty, s.cost_basis, s.realized_pnl, s.unrealized_pnl, "
+            "s.total_pnl, s.fees, s.withholding_tax, s.currency, s.provisional, "
+            "s.valuation_source, s.fx_source, s.ingestion_run_id "
             "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
             "WHERE s.account_id='U_REPLAY' ORDER BY s.report_date_local, i.conid"
         )
