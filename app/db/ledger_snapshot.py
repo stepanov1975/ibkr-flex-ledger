@@ -93,10 +93,63 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             raise ValueError("engine must not be None")
         self._engine = engine
 
+    def db_ledger_instrument_ids_for_scope(
+        self,
+        account_id: str,
+        conids: tuple[str, ...],
+        currencies: tuple[str, ...],
+    ) -> list[str]:
+        """Resolve instruments matching affected conids or source currencies."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT instrument_id FROM instrument "
+                        "WHERE account_id = :account_id "
+                        "AND (conid = ANY(:conids) OR currency = ANY(:currencies)) "
+                        "ORDER BY instrument_id"
+                    ),
+                    {
+                        "account_id": normalized_account_id,
+                        "conids": list(conids),
+                        "currencies": list(currencies),
+                    },
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger instrument scope read failed") from error
+        return [str(row["instrument_id"]) for row in rows]
+
+    def db_ledger_instrument_currency_list(
+        self,
+        instrument_ids: tuple[str, ...],
+    ) -> list[str]:
+        """List distinct currencies for selected canonical instruments."""
+
+        normalized_instrument_ids = tuple(
+            self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+            for instrument_id in instrument_ids
+        )
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT DISTINCT currency FROM instrument "
+                        "WHERE instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
+                        "ORDER BY currency"
+                    ),
+                    {"instrument_ids": list(normalized_instrument_ids)},
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger instrument currency read failed") from error
+        return [row["currency"] for row in rows]
+
     def db_ledger_trade_fill_list_for_account(
         self,
         account_id: str,
         through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerTradeFillRecord]:
         """List trade-fill rows for FIFO computation in deterministic order.
 
@@ -118,30 +171,41 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "through_report_date_local",
         )
 
+        statement = (
+            "SELECT "
+            "etf.event_trade_fill_id, etf.account_id, etf.instrument_id, etf.source_raw_record_id, "
+            "etf.trade_timestamp_utc, etf.report_date_local, etf.side, etf.quantity, etf.price, "
+            "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
+            "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
+            "NULLIF(rr.source_payload->>'closePrice', '') AS close_price "
+            "FROM event_trade_fill etf "
+            "LEFT JOIN raw_record rr ON rr.raw_record_id = etf.source_raw_record_id "
+            "WHERE etf.account_id = :account_id "
+            "AND (CAST(:through_report_date_local AS date) IS NULL "
+            "OR etf.report_date_local <= CAST(:through_report_date_local AS date)) "
+        )
+        parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "through_report_date_local": normalized_through_date,
+        }
+        if instrument_ids is not None:
+            parameters["instrument_ids"] = [
+                self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+                for instrument_id in instrument_ids
+            ]
+            statement += "AND etf.instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
+        statement += (
+            "ORDER BY etf.trade_timestamp_utc asc, "
+            "CASE WHEN etf.transaction_id ~ '^[0-9]+$' THEN CAST(etf.transaction_id AS numeric) END asc NULLS FIRST, "
+            "etf.transaction_id asc NULLS FIRST, "
+            "etf.source_raw_record_id asc, etf.event_trade_fill_id asc"
+        )
+
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT "
-                        "etf.event_trade_fill_id, etf.account_id, etf.instrument_id, etf.source_raw_record_id, "
-                        "etf.trade_timestamp_utc, etf.report_date_local, etf.side, etf.quantity, etf.price, "
-                        "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
-                        "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
-                        "NULLIF(rr.source_payload->>'closePrice', '') AS close_price "
-                        "FROM event_trade_fill etf "
-                        "LEFT JOIN raw_record rr ON rr.raw_record_id = etf.source_raw_record_id "
-                        "WHERE etf.account_id = :account_id "
-                        "AND (CAST(:through_report_date_local AS date) IS NULL "
-                        "OR etf.report_date_local <= CAST(:through_report_date_local AS date)) "
-                        "ORDER BY etf.trade_timestamp_utc asc, "
-                        "CASE WHEN etf.transaction_id ~ '^[0-9]+$' THEN CAST(etf.transaction_id AS numeric) END asc NULLS FIRST, "
-                        "etf.transaction_id asc NULLS FIRST, "
-                        "etf.source_raw_record_id asc, etf.event_trade_fill_id asc"
-                    ),
-                    {
-                        "account_id": normalized_account_id,
-                        "through_report_date_local": normalized_through_date,
-                    },
+                    text(statement),
+                    parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger trade-fill read failed") from error
@@ -174,6 +238,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         self,
         account_id: str,
         through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerCashflowRecord]:
         """List cashflow rows for fee/withholding adjustments in deterministic order.
 
@@ -195,23 +260,32 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "through_report_date_local",
         )
 
+        statement = (
+            "SELECT "
+            "event_cashflow_id, account_id, instrument_id, report_date_local, withholding_tax, fees, "
+            "functional_currency, amount, amount_in_base, currency "
+            "FROM event_cashflow "
+            "WHERE account_id = :account_id "
+            "AND (CAST(:through_report_date_local AS date) IS NULL "
+            "OR report_date_local <= CAST(:through_report_date_local AS date)) "
+        )
+        parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "through_report_date_local": normalized_through_date,
+        }
+        if instrument_ids is not None:
+            parameters["instrument_ids"] = [
+                self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+                for instrument_id in instrument_ids
+            ]
+            statement += "AND instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
+        statement += "ORDER BY report_date_local asc, event_cashflow_id asc"
+
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT "
-                        "event_cashflow_id, account_id, instrument_id, report_date_local, withholding_tax, fees, "
-                        "functional_currency, amount, amount_in_base, currency "
-                        "FROM event_cashflow "
-                        "WHERE account_id = :account_id "
-                        "AND (CAST(:through_report_date_local AS date) IS NULL "
-                        "OR report_date_local <= CAST(:through_report_date_local AS date)) "
-                        "ORDER BY report_date_local asc, event_cashflow_id asc"
-                    ),
-                    {
-                        "account_id": normalized_account_id,
-                        "through_report_date_local": normalized_through_date,
-                    },
+                    text(statement),
+                    parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger cashflow read failed") from error
@@ -236,6 +310,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         self,
         account_id: str,
         ingestion_run_id: str,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerOpenPositionValuationRecord]:
         """List broker OpenPositions valuation rows for one ingestion run.
 
@@ -254,40 +329,51 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
         normalized_ingestion_run_id = self._db_ledger_validate_uuid_text(ingestion_run_id, "ingestion_run_id")
 
+        statement = (
+            "WITH parsed AS ("
+            "SELECT i.instrument_id, rr.raw_record_id, "
+            "CAST(rr.source_payload->>'position' AS numeric) AS position_qty, "
+            "CAST(rr.source_payload->>'markPrice' AS numeric) AS mark_price, "
+            "CAST(NULLIF(rr.source_payload->>'fifoPnlUnrealized', '') AS numeric) AS broker_unrealized_pnl, "
+            "CASE "
+            "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
+            "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
+            "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
+            "END AS report_date_local "
+            "FROM raw_record rr "
+            "JOIN instrument i ON i.account_id = rr.account_id AND i.conid = rr.source_payload->>'conid' "
+            "WHERE rr.account_id = :account_id "
+            "AND rr.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
+            "AND rr.section_name = 'OpenPositions' "
+            "AND COALESCE(rr.source_payload->>'assetCategory', '') = 'STK' "
+            "AND rr.source_payload ? 'position' "
+            "AND rr.source_payload ? 'markPrice'"
+        )
+        parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "ingestion_run_id": normalized_ingestion_run_id,
+        }
+        if instrument_ids is not None:
+            parameters["instrument_ids"] = [
+                self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+                for instrument_id in instrument_ids
+            ]
+            statement += " AND i.instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
+        statement += (
+            "), ranked AS ("
+            "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local, "
+            "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
+            "FROM parsed"
+            ") "
+            "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local "
+            "FROM ranked WHERE row_rank = 1"
+        )
+
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "WITH parsed AS ("
-                        "SELECT i.instrument_id, rr.raw_record_id, "
-                        "CAST(rr.source_payload->>'position' AS numeric) AS position_qty, "
-                        "CAST(rr.source_payload->>'markPrice' AS numeric) AS mark_price, "
-                        "CAST(NULLIF(rr.source_payload->>'fifoPnlUnrealized', '') AS numeric) AS broker_unrealized_pnl, "
-                        "CASE "
-                        "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
-                        "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
-                        "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
-                        "END AS report_date_local "
-                        "FROM raw_record rr "
-                        "JOIN instrument i ON i.account_id = rr.account_id AND i.conid = rr.source_payload->>'conid' "
-                        "WHERE rr.account_id = :account_id "
-                        "AND rr.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
-                        "AND rr.section_name = 'OpenPositions' "
-                        "AND COALESCE(rr.source_payload->>'assetCategory', '') = 'STK' "
-                        "AND rr.source_payload ? 'position' "
-                        "AND rr.source_payload ? 'markPrice'"
-                        "), ranked AS ("
-                        "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local, "
-                        "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
-                        "FROM parsed"
-                        ") "
-                        "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local "
-                        "FROM ranked WHERE row_rank = 1"
-                    ),
-                    {
-                        "account_id": normalized_account_id,
-                        "ingestion_run_id": normalized_ingestion_run_id,
-                    },
+                    text(statement),
+                    parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger OpenPositions valuation read failed") from error
@@ -309,6 +395,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         self,
         account_id: str,
         through_report_date_local: str,
+        currencies: tuple[str, ...] | None = None,
     ) -> list[LedgerFxRateRecord]:
         """List usable canonical conversion rates through one report date."""
 
@@ -320,20 +407,26 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if normalized_through_date is None:
             raise ValueError("through_report_date_local must not be blank")
 
+        statement = (
+            "SELECT report_date_local, currency, functional_currency, fx_rate, fx_source, "
+            "ingestion_run_id, source_raw_record_id "
+            "FROM event_fx WHERE account_id = :account_id "
+            "AND report_date_local <= CAST(:through_report_date_local AS date) "
+        )
+        parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "through_report_date_local": normalized_through_date,
+        }
+        if currencies is not None:
+            parameters["currencies"] = list(currencies)
+            statement += "AND event_fx.currency = ANY(:currencies) "
+        statement += "ORDER BY report_date_local asc, ingestion_run_id asc, source_raw_record_id asc"
+
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT report_date_local, currency, functional_currency, fx_rate, fx_source, "
-                        "ingestion_run_id, source_raw_record_id "
-                        "FROM event_fx WHERE account_id = :account_id "
-                        "AND report_date_local <= CAST(:through_report_date_local AS date) "
-                        "ORDER BY report_date_local asc, ingestion_run_id asc, source_raw_record_id asc"
-                    ),
-                    {
-                        "account_id": normalized_account_id,
-                        "through_report_date_local": normalized_through_date,
-                    },
+                    text(statement),
+                    parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger FX-rate read failed") from error
@@ -355,6 +448,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         self,
         account_id: str,
         through_report_date_local: str,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerCorporateActionRecord]:
         """List auto-classified split and stock-dividend factors."""
 
@@ -364,20 +458,32 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         )
         if normalized_through_date is None:
             raise ValueError("through_report_date_local must not be blank")
+        statement = (
+            "SELECT event.instrument_id, event.report_date_local, event.reorg_code AS action_type, "
+            "COALESCE(NULLIF(raw.source_payload->>'ratio','')::numeric, "
+            "NULLIF(raw.source_payload->>'newQuantity','')::numeric / "
+            "NULLIF(NULLIF(raw.source_payload->>'oldQuantity','')::numeric, 0)) AS adjustment_factor "
+            "FROM event_corp_action event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND event.report_date_local<=CAST(:through_date AS date) "
+            "AND event.requires_manual=false AND event.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
+            "AND event.instrument_id IS NOT NULL "
+        )
+        parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "through_date": normalized_through_date,
+        }
+        if instrument_ids is not None:
+            parameters["instrument_ids"] = [
+                self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+                for instrument_id in instrument_ids
+            ]
+            statement += "AND event.instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
+        statement += "ORDER BY event.report_date_local asc, event.event_corp_action_id asc"
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
-                    text(
-                        "SELECT event.instrument_id, event.report_date_local, event.reorg_code AS action_type, "
-                        "COALESCE(NULLIF(raw.source_payload->>'ratio','')::numeric, "
-                        "NULLIF(raw.source_payload->>'newQuantity','')::numeric / "
-                        "NULLIF(NULLIF(raw.source_payload->>'oldQuantity','')::numeric, 0)) AS adjustment_factor "
-                        "FROM event_corp_action event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
-                        "WHERE event.account_id=:account_id AND event.report_date_local<=CAST(:through_date AS date) "
-                        "AND event.requires_manual=false AND event.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
-                        "AND event.instrument_id IS NOT NULL ORDER BY event.report_date_local asc, event.event_corp_action_id asc"
-                    ),
-                    {"account_id": normalized_account_id, "through_date": normalized_through_date},
+                    text(statement),
+                    parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger corporate-action read failed") from error
@@ -443,6 +549,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         account_id: str,
         closed_at_utc: datetime,
         requests: list[PositionLotUpsertRequest],
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> None:
         """Close stale open lots and upsert the recomputed open-lot projection."""
 
@@ -451,17 +558,43 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             raise ValueError("closed_at_utc must be offset-aware")
         if requests is None:
             raise ValueError("requests must not be None")
-        normalized_requests = [self._db_ledger_validate_position_lot_upsert_request(request) for request in requests]
+        normalized_instrument_ids = (
+            None
+            if instrument_ids is None
+            else tuple(
+                self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+                for instrument_id in instrument_ids
+            )
+        )
+        selected_instrument_ids = None if normalized_instrument_ids is None else set(normalized_instrument_ids)
+        scoped_requests = (
+            requests
+            if selected_instrument_ids is None
+            else [request for request in requests if str(request.instrument_id) in selected_instrument_ids]
+        )
+        normalized_requests = [
+            self._db_ledger_validate_position_lot_upsert_request(request)
+            for request in scoped_requests
+        ]
+
+        close_statement = (
+            "UPDATE position_lot SET remaining_quantity = 0, status = 'closed', "
+            "closed_at_utc = :closed_at_utc, updated_at_utc = now() "
+            "WHERE account_id = :account_id AND status = 'open'"
+        )
+        close_parameters: dict[str, Any] = {
+            "account_id": normalized_account_id,
+            "closed_at_utc": closed_at_utc,
+        }
+        if normalized_instrument_ids is not None:
+            close_statement += " AND instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
+            close_parameters["instrument_ids"] = list(normalized_instrument_ids)
 
         try:
             with self._engine.begin() as connection:
                 connection.execute(
-                    text(
-                        "UPDATE position_lot SET remaining_quantity = 0, status = 'closed', "
-                        "closed_at_utc = :closed_at_utc, updated_at_utc = now() "
-                        "WHERE account_id = :account_id AND status = 'open'"
-                    ),
-                    {"account_id": normalized_account_id, "closed_at_utc": closed_at_utc},
+                    text(close_statement),
+                    close_parameters,
                 )
                 if normalized_requests:
                     connection.execute(

@@ -32,48 +32,113 @@ class _RepositoryStub:
         fx_rates: list[LedgerFxRateRecord] | None = None,
         cashflows: list[LedgerCashflowRecord] | None = None,
         corporate_actions: list[LedgerCorporateActionRecord] | None = None,
+        scope_ids: list[str] | None = None,
+        instrument_currencies: list[str] | None = None,
     ) -> None:
         self._trades = trades
         self._valuations = valuations
         self._fx_rates = fx_rates or []
         self._cashflows = cashflows or []
         self._corporate_actions = corporate_actions or []
+        self._scope_ids = list(scope_ids or [])
+        self._instrument_currencies = list(instrument_currencies or [])
         self.position_requests = _SnapshotCapture(requests=[])
         self.snapshot_requests = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
+        self.trade_instrument_ids = None
+        self.cashflow_instrument_ids = None
+        self.corp_action_instrument_ids = None
+        self.open_position_instrument_ids = None
+        self.reconciled_instrument_ids = None
+        self.fx_currencies = None
+        self.read_call_count = 0
 
-    def db_ledger_trade_fill_list_for_account(self, account_id: str, through_report_date_local: str | None = None):
+    def db_ledger_instrument_ids_for_scope(self, account_id: str, conids: tuple[str, ...], currencies: tuple[str, ...]):
+        """Return the configured deterministic instrument scope."""
+        _ = (account_id, conids, currencies)
+        self.read_call_count += 1
+        return self._scope_ids
+
+    def db_ledger_instrument_currency_list(self, instrument_ids: tuple[str, ...]):
+        """Return currencies for the configured instrument scope."""
+        _ = instrument_ids
+        self.read_call_count += 1
+        return self._instrument_currencies
+
+    def db_ledger_trade_fill_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
+    ):
         """Return deterministic trade rows for one account/date query."""
         _ = (account_id, through_report_date_local)
+        self.read_call_count += 1
+        self.trade_instrument_ids = instrument_ids
         return self._trades
 
-    def db_ledger_cashflow_list_for_account(self, account_id: str, through_report_date_local: str | None = None):
+    def db_ledger_cashflow_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
+    ):
         """Return deterministic cashflow rows for one account/date query."""
         _ = (account_id, through_report_date_local)
+        self.read_call_count += 1
+        self.cashflow_instrument_ids = instrument_ids
         return self._cashflows
 
-    def db_ledger_open_position_valuation_list_for_run(self, account_id: str, ingestion_run_id: str):
+    def db_ledger_open_position_valuation_list_for_run(
+        self,
+        account_id: str,
+        ingestion_run_id: str,
+        instrument_ids: tuple[str, ...] | None = None,
+    ):
         """Return deterministic OpenPositions valuation rows for one run."""
         _ = (account_id, ingestion_run_id)
+        self.read_call_count += 1
+        self.open_position_instrument_ids = instrument_ids
         return self._valuations
 
-    def db_ledger_fx_rate_list_for_account(self, account_id: str, through_report_date_local: str):
+    def db_ledger_fx_rate_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+        currencies: tuple[str, ...] | None = None,
+    ):
         """Return no conversion rows for USD-only fixtures."""
         _ = (account_id, through_report_date_local)
+        self.read_call_count += 1
+        self.fx_currencies = currencies
         return self._fx_rates
 
-    def db_ledger_corporate_action_list_for_account(self, account_id: str, through_report_date_local: str):
+    def db_ledger_corporate_action_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+        instrument_ids: tuple[str, ...] | None = None,
+    ):
         """Return deterministic corporate-action adjustments."""
         _ = (account_id, through_report_date_local)
+        self.read_call_count += 1
+        self.corp_action_instrument_ids = instrument_ids
         return self._corporate_actions
 
     def db_position_lot_upsert_many(self, requests):
         """Capture position-lot upsert payload for assertions."""
         self.position_requests.requests = requests
 
-    def db_position_lot_reconcile_open(self, account_id: str, closed_at_utc: datetime, requests):
+    def db_position_lot_reconcile_open(
+        self,
+        account_id: str,
+        closed_at_utc: datetime,
+        requests,
+        instrument_ids: tuple[str, ...] | None = None,
+    ):
         """Capture the reconciled open-lot projection."""
         _ = (account_id, closed_at_utc)
+        self.reconciled_instrument_ids = instrument_ids
         self.reconcile_call_count += 1
         self.position_requests.requests = requests
 
@@ -318,3 +383,113 @@ def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> Non
 
     assert repository.reconcile_call_count == 1
     assert repository.position_requests.requests == []
+
+
+def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
+    """Propagate one resolved instrument scope through every scoped read and write."""
+
+    instrument_id = "00000000-0000-0000-0000-000000000010"
+    trade = LedgerTradeFillRecord(
+        event_trade_fill_id=uuid4(),
+        account_id="U1",
+        instrument_id=instrument_id,
+        source_raw_record_id=uuid4(),
+        trade_timestamp_utc=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
+        report_date_local=date(2026, 8, 21),
+        side="BUY",
+        quantity="1",
+        price="100",
+        fees="0",
+        commission="0",
+        functional_currency="USD",
+        currency="EUR",
+    )
+    unrelated_trade = LedgerTradeFillRecord(
+        event_trade_fill_id=uuid4(),
+        account_id="U1",
+        instrument_id="00000000-0000-0000-0000-000000000099",
+        source_raw_record_id=uuid4(),
+        trade_timestamp_utc=datetime(2026, 8, 21, 13, 0, tzinfo=timezone.utc),
+        report_date_local=date(2026, 8, 21),
+        side="BUY",
+        quantity="1",
+        price="100",
+        fees="0",
+        commission="0",
+        functional_currency="USD",
+        currency="EUR",
+    )
+    cashflow = LedgerCashflowRecord(
+        event_cashflow_id=uuid4(),
+        account_id="U1",
+        instrument_id=instrument_id,
+        report_date_local=date(2026, 8, 21),
+        withholding_tax="0",
+        fees="0",
+        functional_currency="JPY",
+        amount="10",
+        currency="CHF",
+    )
+    repository = _RepositoryStub(
+        trades=[trade, unrelated_trade],
+        valuations=[],
+        cashflows=[cashflow],
+        scope_ids=[instrument_id],
+        instrument_currencies=["GBP"],
+    )
+
+    StockLedgerSnapshotService(repository=repository).ledger_snapshot_build_and_persist(
+        account_id="U1",
+        ingestion_run_id="00000000-0000-0000-0000-000000000001",
+        report_date_local="2026-08-21",
+        affected_conids=frozenset({"100"}),
+        affected_currencies=frozenset({"AUD"}),
+    )
+
+    expected = (instrument_id,)
+    assert repository.trade_instrument_ids == expected
+    assert repository.cashflow_instrument_ids == expected
+    assert repository.corp_action_instrument_ids == expected
+    assert repository.open_position_instrument_ids == expected
+    assert repository.reconciled_instrument_ids == expected
+    assert repository.fx_currencies == ("AUD", "CHF", "EUR", "GBP", "JPY", "USD")
+    assert [request.instrument_id for request in repository.position_requests.requests] == [instrument_id]
+    assert [request.instrument_id for request in repository.snapshot_requests.requests] == [instrument_id]
+
+
+def test_snapshot_build_empty_scope_is_noop() -> None:
+    """Avoid every repository read when both affected scope sets are empty."""
+
+    repository = _RepositoryStub(trades=[], valuations=[])
+
+    result = StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+        "U1",
+        "00000000-0000-0000-0000-000000000001",
+        "2026-08-21",
+        frozenset(),
+        frozenset(),
+    )
+
+    assert result.snapshot_row_count == 0
+    assert result.position_lot_row_count == 0
+    assert repository.read_call_count == 0
+    assert repository.reconcile_call_count == 0
+
+
+def test_snapshot_build_none_scope_retains_full_reads() -> None:
+    """Keep the existing full-history read and reconciliation contract by default."""
+
+    repository = _RepositoryStub(trades=[], valuations=[])
+
+    StockLedgerSnapshotService(repository).ledger_snapshot_build_and_persist(
+        "U1",
+        "00000000-0000-0000-0000-000000000001",
+        "2026-08-21",
+    )
+
+    assert repository.trade_instrument_ids is None
+    assert repository.cashflow_instrument_ids is None
+    assert repository.corp_action_instrument_ids is None
+    assert repository.open_position_instrument_ids is None
+    assert repository.reconciled_instrument_ids is None
+    assert repository.fx_currencies is None

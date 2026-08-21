@@ -936,10 +936,25 @@ class PnlSnapshotDailyRecord:
 class LedgerSnapshotRepositoryPort(Protocol):
     """Port definition for Task 7 ledger inputs and snapshot persistence."""
 
+    def db_ledger_instrument_ids_for_scope(
+        self,
+        account_id: str,
+        conids: tuple[str, ...],
+        currencies: tuple[str, ...],
+    ) -> list[str]:
+        """Resolve canonical instrument identifiers for affected source keys."""
+
+    def db_ledger_instrument_currency_list(
+        self,
+        instrument_ids: tuple[str, ...],
+    ) -> list[str]:
+        """List distinct currencies for selected canonical instruments."""
+
     def db_ledger_trade_fill_list_for_account(
         self,
         account_id: str,
         through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerTradeFillRecord]:
         """List trade-fill rows for FIFO computation in deterministic order.
 
@@ -959,6 +974,7 @@ class LedgerSnapshotRepositoryPort(Protocol):
         self,
         account_id: str,
         through_report_date_local: str | None = None,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerCashflowRecord]:
         """List cashflow rows for fee/withholding adjustments in deterministic order.
 
@@ -978,6 +994,7 @@ class LedgerSnapshotRepositoryPort(Protocol):
         self,
         account_id: str,
         ingestion_run_id: str,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerOpenPositionValuationRecord]:
         """List broker OpenPositions valuation rows for one ingestion run.
 
@@ -997,6 +1014,7 @@ class LedgerSnapshotRepositoryPort(Protocol):
         self,
         account_id: str,
         through_report_date_local: str,
+        currencies: tuple[str, ...] | None = None,
     ) -> list[LedgerFxRateRecord]:
         """List conversion rates through a report date in fallback order."""
 
@@ -1004,6 +1022,7 @@ class LedgerSnapshotRepositoryPort(Protocol):
         self,
         account_id: str,
         through_report_date_local: str,
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerCorporateActionRecord]:
         """List deterministic auto-handled quantity adjustments."""
 
@@ -1026,6 +1045,7 @@ class LedgerSnapshotRepositoryPort(Protocol):
         account_id: str,
         closed_at_utc: datetime,
         requests: list[PositionLotUpsertRequest],
+        instrument_ids: tuple[str, ...] | None = None,
     ) -> None:
         """Replace the account's open-lot projection and close stale rows."""
 

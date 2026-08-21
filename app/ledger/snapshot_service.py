@@ -63,6 +63,8 @@ class StockLedgerSnapshotService:
         account_id: str,
         ingestion_run_id: str | None,
         report_date_local: str,
+        affected_conids: frozenset[str] | None = None,
+        affected_currencies: frozenset[str] | None = None,
     ) -> SnapshotBuildResult:
         """Build and persist day-level snapshots for one account context.
 
@@ -89,23 +91,64 @@ class StockLedgerSnapshotService:
             raise ValueError("report_date_local must use YYYY-MM-DD format") from error
         normalized_report_date = parsed_report_date.isoformat()
 
+        is_full_build = affected_conids is None and affected_currencies is None
+        if not is_full_build and not affected_conids and not affected_currencies:
+            return SnapshotBuildResult(
+                report_date_local=normalized_report_date,
+                snapshot_row_count=0,
+                position_lot_row_count=0,
+                missing_solid_valuation_count=0,
+            )
+
+        instrument_ids: tuple[str, ...] | None = None
+        if not is_full_build:
+            instrument_ids = tuple(
+                self._repository.db_ledger_instrument_ids_for_scope(
+                    account_id=normalized_account_id,
+                    conids=tuple(sorted(affected_conids or ())),
+                    currencies=tuple(sorted(affected_currencies or ())),
+                )
+            )
+            if not instrument_ids:
+                return SnapshotBuildResult(
+                    report_date_local=normalized_report_date,
+                    snapshot_row_count=0,
+                    position_lot_row_count=0,
+                    missing_solid_valuation_count=0,
+                )
+
         trade_rows = self._repository.db_ledger_trade_fill_list_for_account(
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
+            instrument_ids=instrument_ids,
         )
         cashflow_rows = self._repository.db_ledger_cashflow_list_for_account(
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
+            instrument_ids=instrument_ids,
         )
+
+        fx_currencies: tuple[str, ...] | None = None
+        if instrument_ids is not None:
+            required_currencies = set(affected_currencies or ())
+            required_currencies.update(self._repository.db_ledger_instrument_currency_list(instrument_ids))
+            required_currencies.update(row.currency for row in trade_rows)
+            required_currencies.update(row.functional_currency for row in trade_rows)
+            required_currencies.update(row.currency for row in cashflow_rows)
+            required_currencies.update(row.functional_currency for row in cashflow_rows)
+            fx_currencies = tuple(sorted(required_currencies))
+
         fx_rate_rows = self._repository.db_ledger_fx_rate_list_for_account(
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
+            currencies=fx_currencies,
         )
         corporate_action_reader = getattr(self._repository, "db_ledger_corporate_action_list_for_account", None)
         corporate_action_rows = (
             corporate_action_reader(
                 account_id=normalized_account_id,
                 through_report_date_local=normalized_report_date,
+                instrument_ids=instrument_ids,
             )
             if corporate_action_reader is not None
             else []
@@ -114,6 +157,7 @@ class StockLedgerSnapshotService:
             self._repository.db_ledger_open_position_valuation_list_for_run(
                 account_id=normalized_account_id,
                 ingestion_run_id=ingestion_run_id or "00000000-0000-0000-0000-000000000000",
+                instrument_ids=instrument_ids,
             )
             if ingestion_run_id is not None
             else []
@@ -284,10 +328,23 @@ class StockLedgerSnapshotService:
             (trade.trade_timestamp_utc for trade in trade_rows),
             default=datetime.now(timezone.utc),
         )
+        if instrument_ids is not None:
+            selected_instrument_ids = set(instrument_ids)
+            position_lot_requests = [
+                request
+                for request in position_lot_requests
+                if request.instrument_id in selected_instrument_ids
+            ]
+            snapshot_requests = [
+                request
+                for request in snapshot_requests
+                if request.instrument_id in selected_instrument_ids
+            ]
         self._repository.db_position_lot_reconcile_open(
             account_id=normalized_account_id,
             closed_at_utc=closed_at_utc,
             requests=position_lot_requests,
+            instrument_ids=instrument_ids,
         )
         self._repository.db_pnl_snapshot_daily_upsert_many(snapshot_requests)
 
