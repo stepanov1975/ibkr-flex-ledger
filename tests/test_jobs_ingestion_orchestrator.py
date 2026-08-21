@@ -3,28 +3,39 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from app.adapters import AdapterFetchResult, FlexTokenInvalidError
 from app.db.interfaces import (
+    CanonicalCashflowUpsertRequest,
+    CanonicalCorpActionUpsertRequest,
+    CanonicalFxUpsertRequest,
     CanonicalInstrumentRecord,
     CanonicalInstrumentUpsertRequest,
+    CanonicalTradeFillUpsertRequest,
     IngestionRunRecord,
     IngestionRunReference,
     IngestionRunState,
+    RawArtifactPersistRequest,
     RawArtifactPersistResult,
     RawArtifactRecord,
     RawArtifactReference,
     RawRecordForCanonicalMapping,
+    RawRecordPersistRequest,
     RawRecordPersistResult,
 )
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
+from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService
+
+
+_ARTIFACT_OWNER_RUN_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 class _RepositoryStub:
     """Repository stub that captures finalize payloads for assertions."""
 
-    def __init__(self):
+    def __init__(self, run_count: int = 1, artifact_owner_status: str = "success") -> None:
         """Initialize repository stub state.
 
         Returns:
@@ -34,8 +45,19 @@ class _RepositoryStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        self.created_run = self._build_started_record()
-        self.finalize_calls: list[dict[str, object]] = []
+        self.created_runs = [self._build_run() for _ in range(run_count)]
+        self.created_run = self.created_runs[0]
+        self.started_runs: list[IngestionRunRecord] = []
+        self.finalize_calls: list[dict[str, Any]] = []
+        self.get_by_id_calls: list[UUID] = []
+        artifact_owner = self._build_run(
+            ingestion_run_id=_ARTIFACT_OWNER_RUN_ID,
+            status=artifact_owner_status,
+        )
+        self.runs_by_id = {
+            artifact_owner.ingestion_run_id: artifact_owner,
+            **{run.ingestion_run_id: run for run in self.created_runs},
+        }
 
     def db_ingestion_run_create_started(
         self,
@@ -43,7 +65,7 @@ class _RepositoryStub:
         run_type: str,
         period_key: str,
         flex_query_id: str,
-        report_date_local,
+        report_date_local: date | None,
     ) -> IngestionRunRecord:
         """Return deterministic started run record.
 
@@ -62,7 +84,10 @@ class _RepositoryStub:
         """
 
         _ = (account_id, run_type, period_key, flex_query_id, report_date_local)
-        return self.created_run
+        run = self.created_runs[len(self.started_runs)]
+        self.started_runs.append(run)
+        self.runs_by_id[run.ingestion_run_id] = run
+        return run
 
     def db_ingestion_run_finalize(
         self,
@@ -70,7 +95,7 @@ class _RepositoryStub:
         status: str,
         error_code: str | None,
         error_message: str | None,
-        diagnostics,
+        diagnostics: list[dict[str, Any]] | None,
     ) -> IngestionRunRecord:
         """Capture finalize call and return updated run record.
 
@@ -97,28 +122,53 @@ class _RepositoryStub:
                 "diagnostics": diagnostics,
             }
         )
-        return IngestionRunRecord(
+        started_run = self.runs_by_id[ingestion_run_id]
+        finalized_run = IngestionRunRecord(
             ingestion_run_id=ingestion_run_id,
-            account_id=self.created_run.account_id,
-            run_type=self.created_run.run_type,
-            reference=self.created_run.reference,
+            account_id=started_run.account_id,
+            run_type=started_run.run_type,
+            reference=started_run.reference,
             state=IngestionRunState(
                 status=status,
-                started_at_utc=self.created_run.state.started_at_utc,
-                ended_at_utc=self.created_run.state.started_at_utc,
+                started_at_utc=started_run.state.started_at_utc,
+                ended_at_utc=started_run.state.started_at_utc,
                 duration_ms=100,
                 error_code=error_code,
                 error_message=error_message,
                 diagnostics=diagnostics,
             ),
-            created_at_utc=self.created_run.created_at_utc,
+            created_at_utc=started_run.created_at_utc,
         )
+        self.runs_by_id[ingestion_run_id] = finalized_run
+        return finalized_run
 
-    def _build_started_record(self) -> IngestionRunRecord:
-        """Build started run record.
+    def db_ingestion_run_get_by_id(self, ingestion_run_id: UUID) -> IngestionRunRecord | None:
+        """Return a configured run by id and capture owner-state reads."""
+
+        self.get_by_id_calls.append(ingestion_run_id)
+        return self.runs_by_id.get(ingestion_run_id)
+
+    def db_ingestion_run_list(
+        self,
+        limit: int,
+        offset: int,
+        sort_by: str = "started_at_utc",
+        sort_dir: str = "desc",
+    ) -> list[IngestionRunRecord]:
+        """Return deterministic configured runs for protocol completeness."""
+
+        _ = (sort_by, sort_dir)
+        return list(self.runs_by_id.values())[offset : offset + limit]
+
+    def _build_run(
+        self,
+        ingestion_run_id: UUID | None = None,
+        status: str = "started",
+    ) -> IngestionRunRecord:
+        """Build one deterministic run record.
 
         Returns:
-            IngestionRunRecord: Started run record.
+            IngestionRunRecord: Run record in the requested state.
 
         Raises:
             RuntimeError: This helper does not raise runtime errors.
@@ -126,7 +176,7 @@ class _RepositoryStub:
 
         started_at = datetime.now(timezone.utc)
         return IngestionRunRecord(
-            ingestion_run_id=uuid4(),
+            ingestion_run_id=ingestion_run_id or uuid4(),
             account_id="U_TEST",
             run_type="manual",
             reference=IngestionRunReference(
@@ -135,10 +185,10 @@ class _RepositoryStub:
                 report_date_local=None,
             ),
             state=IngestionRunState(
-                status="started",
+                status=status,
                 started_at_utc=started_at,
-                ended_at_utc=None,
-                duration_ms=None,
+                ended_at_utc=None if status == "started" else started_at,
+                duration_ms=None if status == "started" else 100,
                 error_code=None,
                 error_message=None,
                 diagnostics=None,
@@ -201,7 +251,11 @@ class _AdapterStub:
 class _RawPersistenceStub:
     """Raw persistence stub returning deterministic artifact and row counters."""
 
-    def __init__(self, artifact_deduplicated: bool = False):
+    def __init__(
+        self,
+        artifact_deduplicated: bool = False,
+        raw_insert_failures: int = 0,
+    ) -> None:
         """Initialize deterministic raw persistence stub state.
 
         Returns:
@@ -213,9 +267,13 @@ class _RawPersistenceStub:
 
         self.raw_artifact_id = uuid4()
         self.artifact_deduplicated = artifact_deduplicated
+        self.raw_insert_failures = raw_insert_failures
+        self.artifact: RawArtifactRecord | None = None
         self.raw_insert_calls = 0
+        self.raw_insert_run_ids: list[UUID] = []
+        self.raw_rows_persisted = artifact_deduplicated
 
-    def db_raw_artifact_upsert(self, request) -> RawArtifactPersistResult:
+    def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
         """Return deterministic artifact upsert result.
 
         Args:
@@ -228,10 +286,12 @@ class _RawPersistenceStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        return RawArtifactPersistResult(
-            artifact=RawArtifactRecord(
+        if self.artifact is None:
+            self.artifact = RawArtifactRecord(
                 raw_artifact_id=self.raw_artifact_id,
-                ingestion_run_id=request.ingestion_run_id,
+                ingestion_run_id=(
+                    _ARTIFACT_OWNER_RUN_ID if self.artifact_deduplicated else request.ingestion_run_id
+                ),
                 reference=RawArtifactReference(
                     account_id=request.reference.account_id,
                     period_key=request.reference.period_key,
@@ -241,11 +301,19 @@ class _RawPersistenceStub:
                 ),
                 source_payload=request.source_payload,
                 created_at_utc=datetime.now(timezone.utc),
-            ),
-            deduplicated=self.artifact_deduplicated,
+            )
+            deduplicated = self.artifact_deduplicated
+        else:
+            deduplicated = True
+        return RawArtifactPersistResult(
+            artifact=self.artifact,
+            deduplicated=deduplicated,
         )
 
-    def db_raw_record_insert_many(self, requests) -> RawRecordPersistResult:
+    def db_raw_record_insert_many(
+        self,
+        requests: list[RawRecordPersistRequest],
+    ) -> RawRecordPersistResult:
         """Return deterministic raw row insert summary.
 
         Args:
@@ -259,13 +327,20 @@ class _RawPersistenceStub:
         """
 
         self.raw_insert_calls += 1
+        self.raw_insert_run_ids.append(requests[0].ingestion_run_id)
+        if self.raw_insert_failures > 0:
+            self.raw_insert_failures -= 1
+            raise RuntimeError("raw row persistence failed")
+        if self.raw_rows_persisted:
+            return RawRecordPersistResult(inserted_count=0, deduplicated_count=len(requests))
+        self.raw_rows_persisted = True
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
 
-class _SnapshotServiceStub:
+class _SnapshotServiceStub(StockLedgerSnapshotService):
     """Snapshot service stub capturing automatic snapshot execution calls."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize snapshot service call capture state.
 
         Returns:
@@ -287,7 +362,7 @@ class _SnapshotServiceStub:
         report_date_local: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
-    ):
+    ) -> SnapshotBuildResult:
         """Capture snapshot trigger parameters and return deterministic result.
 
         Args:
@@ -314,16 +389,12 @@ class _SnapshotServiceStub:
                 "affected_currencies": affected_currencies,
             }
         )
-        return type(
-            "SnapshotResult",
-            (),
-            {
-                "report_date_local": "2026-02-20",
-                "snapshot_row_count": 1,
-                "position_lot_row_count": 1,
-                "missing_solid_valuation_count": 0,
-            },
-        )()
+        return SnapshotBuildResult(
+            report_date_local="2026-02-20",
+            snapshot_row_count=1,
+            position_lot_row_count=1,
+            missing_solid_valuation_count=0,
+        )
 
 
 def test_jobs_ingestion_orchestrator_marks_failed_on_missing_required_sections() -> None:
@@ -620,7 +691,11 @@ def _raw_row(section_name: str, source_payload: dict[str, str]) -> RawRecordForC
 class _CanonicalRepositoryStub:
     """Canonical repository stub implementing read and upsert behaviors."""
 
-    def __init__(self, changed_rows: list[RawRecordForCanonicalMapping] | None = None):
+    def __init__(
+        self,
+        changed_rows: list[RawRecordForCanonicalMapping] | None = None,
+        changed_read_failures: int = 0,
+    ) -> None:
         """Initialize deterministic changed rows and call counters."""
 
         self.changed_rows = changed_rows if changed_rows is not None else [
@@ -646,7 +721,11 @@ class _CanonicalRepositoryStub:
                 },
             )
         ]
+        self.all_rows = self.changed_rows
+        self.changed_read_failures = changed_read_failures
         self.changed_read_calls = 0
+        self.changed_read_run_ids: list[UUID] = []
+        self.all_read_run_ids: list[UUID] = []
         self.bulk_upsert_calls = 0
 
     def db_raw_record_list_changed_for_run(
@@ -655,11 +734,17 @@ class _CanonicalRepositoryStub:
     ) -> list[RawRecordForCanonicalMapping]:
         """Return configured changed rows and record the delta read."""
 
-        _ = ingestion_run_id
         self.changed_read_calls += 1
+        self.changed_read_run_ids.append(ingestion_run_id)
+        if self.changed_read_failures > 0:
+            self.changed_read_failures -= 1
+            raise RuntimeError("canonical changed-row read failed")
         return self.changed_rows
 
-    def db_raw_record_list_for_run(self, ingestion_run_id):
+    def db_raw_record_list_for_run(
+        self,
+        ingestion_run_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
         """Return one deterministic trade row for canonical mapping.
 
         Args:
@@ -672,8 +757,19 @@ class _CanonicalRepositoryStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        _ = ingestion_run_id
-        return self.changed_rows
+        self.all_read_run_ids.append(ingestion_run_id)
+        return self.all_rows
+
+    def db_raw_record_list_for_period(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """Return configured rows for protocol completeness."""
+
+        _ = (account_id, period_key, flex_query_id)
+        return self.all_rows
 
     def db_canonical_instrument_upsert_many(
         self, requests: list[CanonicalInstrumentUpsertRequest]
@@ -699,7 +795,41 @@ class _CanonicalRepositoryStub:
             for request in requests
         ]
 
-    def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
+    def db_canonical_instrument_upsert(
+        self,
+        request: CanonicalInstrumentUpsertRequest,
+    ) -> CanonicalInstrumentRecord:
+        """Return one deterministic instrument record."""
+
+        return self.db_canonical_instrument_upsert_many([request])[0]
+
+    def db_canonical_trade_fill_upsert(self, request: CanonicalTradeFillUpsertRequest) -> None:
+        """Accept one trade request for protocol completeness."""
+
+        _ = request
+
+    def db_canonical_cashflow_upsert(self, request: CanonicalCashflowUpsertRequest) -> None:
+        """Accept one cashflow request for protocol completeness."""
+
+        _ = request
+
+    def db_canonical_fx_upsert(self, request: CanonicalFxUpsertRequest) -> None:
+        """Accept one FX request for protocol completeness."""
+
+        _ = request
+
+    def db_canonical_corp_action_upsert(self, request: CanonicalCorpActionUpsertRequest) -> None:
+        """Accept one corporate-action request for protocol completeness."""
+
+        _ = request
+
+    def db_canonical_bulk_upsert(
+        self,
+        trade_requests: list[CanonicalTradeFillUpsertRequest],
+        cashflow_requests: list[CanonicalCashflowUpsertRequest],
+        fx_requests: list[CanonicalFxUpsertRequest],
+        corp_action_requests: list[CanonicalCorpActionUpsertRequest],
+    ) -> None:
         """Accept bulk canonical requests without side effects.
 
         Args:
@@ -722,7 +852,7 @@ class _CanonicalRepositoryStub:
 class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
     """Canonical repository stub returning no run-scoped rows."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize with an empty changed-row result."""
 
         super().__init__(changed_rows=[])
@@ -733,11 +863,14 @@ class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
     ) -> list[RawRecordForCanonicalMapping]:
         """Return no changed rows for normal ingestion."""
 
-        _ = ingestion_run_id
         self.changed_read_calls += 1
+        self.changed_read_run_ids.append(ingestion_run_id)
         return []
 
-    def db_raw_record_list_for_run(self, ingestion_run_id):
+    def db_raw_record_list_for_run(
+        self,
+        ingestion_run_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
         """Return no rows for run-scoped canonical mapping.
 
         Args:
@@ -750,7 +883,7 @@ class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        _ = ingestion_run_id
+        self.all_read_run_ids.append(ingestion_run_id)
         return []
 
 
@@ -803,6 +936,7 @@ def test_exact_duplicate_skips_raw_canonical_and_snapshot_work() -> None:
     result = orchestrator.job_execute(job_name="ingestion_run")
 
     assert result.status == "success"
+    assert repository.get_by_id_calls == [_ARTIFACT_OWNER_RUN_ID]
     assert raw.raw_insert_calls == 0
     assert canonical.changed_read_calls == 0
     assert canonical.bulk_upsert_calls == 0
@@ -813,6 +947,59 @@ def test_exact_duplicate_skips_raw_canonical_and_snapshot_work() -> None:
     assert details["persist"]["raw_record_deduplicated_count"] == 7
     assert details["canonical_mapping"]["canonical_skip_reason"] == "exact_duplicate_artifact"
     assert details["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
+
+
+def test_failed_owner_without_raw_rows_retries_current_run_and_processes_delta() -> None:
+    """Recover an artifact-only failed run by inserting and processing current rows."""
+
+    repository = _RepositoryStub(run_count=2)
+    raw = _RawPersistenceStub(raw_insert_failures=1)
+    canonical = _CanonicalRepositoryStub(changed_rows=[_raw_row("Trades", {"conid": "100"})])
+    snapshot = _SnapshotServiceStub()
+    orchestrator = _build_orchestrator(repository, raw=raw, canonical=canonical, snapshot=snapshot)
+
+    first_result = orchestrator.job_execute("ingestion_run")
+    retry_result = orchestrator.job_execute("ingestion_run")
+
+    owner_run_id = repository.started_runs[0].ingestion_run_id
+    retry_run_id = repository.started_runs[1].ingestion_run_id
+    assert [first_result.status, retry_result.status] == ["failed", "success"]
+    assert repository.get_by_id_calls == [owner_run_id]
+    assert raw.raw_insert_calls == 2
+    assert raw.raw_insert_run_ids == [owner_run_id, retry_run_id]
+    assert canonical.changed_read_run_ids == [retry_run_id]
+    assert canonical.all_read_run_ids == []
+    assert canonical.bulk_upsert_calls == 1
+    assert snapshot.build_calls == 1
+    assert snapshot.calls[0]["ingestion_run_id"] == str(retry_run_id)
+
+
+def test_failed_owner_with_raw_rows_reuses_owner_rows_and_processes_semantics() -> None:
+    """Recover post-raw failure by replaying the failed artifact owner's complete rows."""
+
+    repository = _RepositoryStub(run_count=2)
+    raw = _RawPersistenceStub()
+    canonical = _CanonicalRepositoryStub(
+        changed_rows=[_raw_row("Trades", {"conid": "100"})],
+        changed_read_failures=1,
+    )
+    snapshot = _SnapshotServiceStub()
+    orchestrator = _build_orchestrator(repository, raw=raw, canonical=canonical, snapshot=snapshot)
+
+    first_result = orchestrator.job_execute("ingestion_run")
+    retry_result = orchestrator.job_execute("ingestion_run")
+
+    owner_run_id = repository.started_runs[0].ingestion_run_id
+    retry_run_id = repository.started_runs[1].ingestion_run_id
+    assert [first_result.status, retry_result.status] == ["failed", "success"]
+    assert repository.get_by_id_calls == [owner_run_id]
+    assert raw.raw_insert_calls == 2
+    assert raw.raw_insert_run_ids == [owner_run_id, retry_run_id]
+    assert canonical.changed_read_run_ids == [owner_run_id]
+    assert canonical.all_read_run_ids == [owner_run_id]
+    assert canonical.bulk_upsert_calls == 1
+    assert snapshot.build_calls == 1
+    assert snapshot.calls[0]["ingestion_run_id"] == str(owner_run_id)
 
 
 def test_distinct_artifact_reads_changed_rows_and_passes_incremental_scope() -> None:

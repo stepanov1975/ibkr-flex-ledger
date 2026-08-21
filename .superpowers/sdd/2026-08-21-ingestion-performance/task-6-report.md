@@ -132,7 +132,7 @@ MyPy on the touched test file, with narrow exemptions for its pre-existing untyp
 Success: no issues found in 1 source file
 ```
 
-A strict combined MyPy invocation was also run and reported 36 existing errors in `tests/test_jobs_ingestion_orchestrator.py`, primarily `no-untyped-def`, incomplete `IngestionRunRepositoryPort`/canonical/snapshot test doubles, and `object`-typed diagnostics. No production error was reported; rewriting the legacy test module's unrelated typing surface was kept out of Task 6.
+A strict comparison performed during fix round 1 showed that this statement was incorrect: the Task 6 base had 26 findings and commit `a378086` had 35. The added findings included Task 6 test-double annotations and protocol call-site incompatibilities; they were not all pre-existing. Fix round 1 corrects the touched test doubles and brings strict MyPy on this file to zero findings.
 
 Full suite, run once after final focused/static verification:
 
@@ -171,4 +171,132 @@ Output: clean.
 
 ## Concerns
 
-- `tests/test_jobs_ingestion_orchestrator.py` does not pass the repository's strict default MyPy settings because of pre-existing untyped and intentionally incomplete test doubles. Production MyPy is clean, and the touched test behavior is clean under narrow baseline exemptions documented above.
+None after fix round 1. The original strict-MyPy concern and its inaccurate attribution are corrected below.
+
+## Fix Round 1: Failed-owner Recovery and Strict MyPy
+
+### Root Cause
+
+`db_raw_artifact_upsert` and `db_raw_record_insert_many` use separate database transactions. The original Task 6 short-circuit treated `RawArtifactPersistResult.deduplicated=True` as proof that the earlier run had also committed raw rows and completed semantic work. A failure after the artifact transaction could therefore leave an artifact owned by a failed run, and every retry would skip the missing raw insertion permanently.
+
+The raw-row uniqueness key is artifact/section/source identity and the raw batch is atomic. A failed-owner retry can safely attempt the entire batch:
+
+- a nonzero insert means the retry supplied previously missing rows, so canonical work reads the current run's changed rows;
+- an all-conflict result means the failed owner already committed the raw batch, so canonical work reads all rows for the artifact-owning run;
+- only an artifact owner whose persisted ingestion-run status is `success` is a completed exact duplicate.
+
+When owner rows are reused, the snapshot call also receives the owner run ID so owner-scoped OpenPositions valuation context is available. Existing exact duplicate skip diagnostics apply only to the owner-success path. Optional canonical/snapshot service behavior remains unchanged.
+
+### Implementation
+
+- Read the artifact owner's ingestion run through `db_ingestion_run_get_by_id` for every deduplicated artifact.
+- Preserve the original raw/canonical/snapshot short-circuit only when the owner state is `success`.
+- Attempt raw insertion for a failed or otherwise non-success owner.
+- Select `db_raw_record_list_changed_for_run(current_run_id)` when retry insertion adds rows.
+- Select `db_raw_record_list_for_run(artifact_owner_run_id)` when retry insertion is all conflicts.
+- Carry the selected semantic run ID into the snapshot service.
+- Made the Task 6-modified repository, raw, canonical, and snapshot test doubles fully typed and protocol-compatible. Strict MyPy on the touched test file now reports zero findings, versus 26 at the base and 35 at the original Task 6 head.
+
+### TDD Evidence
+
+RED command:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_ingestion_orchestrator.py -k 'exact_duplicate_skips_raw_canonical_and_snapshot_work or failed_owner'
+```
+
+Output:
+
+```text
+FFF                                                                      [100%]
+3 failed, 15 deselected in 0.38s
+```
+
+All failures showed that `repository.get_by_id_calls` was empty. The owner-success path never validated success, and both failed-owner retries therefore had no recovery-state decision.
+
+GREEN command:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_ingestion_orchestrator.py -k 'exact_duplicate_skips_raw_canonical_and_snapshot_work or failed_owner'
+```
+
+Output:
+
+```text
+...                                                                      [100%]
+3 passed, 15 deselected in 0.31s
+```
+
+The two recovery tests execute two sequential runs and assert owner-state reads, raw insertion calls and run IDs, current changed-row versus owner all-row selection, canonical persistence calls, snapshot calls, and snapshot run ID.
+
+### Verification
+
+Complete ingestion orchestrator file:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_ingestion_orchestrator.py
+..................                                                       [100%]
+18 passed in 0.31s
+```
+
+Ingestion and reprocess suites:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_ingestion_orchestrator.py tests/test_jobs_reprocess.py
+......................                                                   [100%]
+22 passed in 0.31s
+```
+
+Scope and snapshot suites:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_incremental_scope.py tests/test_ledger_snapshot_service_strict.py
+..............                                                           [100%]
+14 passed in 0.32s
+```
+
+Ruff and configured production/test MyPy:
+
+```text
+/stock_app/.venv/bin/ruff check app/jobs/ingestion_orchestrator.py tests/test_jobs_ingestion_orchestrator.py
+All checks passed!
+
+/stock_app/.venv/bin/mypy app/jobs/ingestion_orchestrator.py
+Success: no issues found in 1 source file
+
+/stock_app/.venv/bin/mypy tests/test_jobs_ingestion_orchestrator.py
+Success: no issues found in 1 source file
+```
+
+Strict base comparison using MyPy's shadow-file support:
+
+```text
+/stock_app/.venv/bin/mypy --shadow-file tests/test_jobs_ingestion_orchestrator.py <(git show ca100d8:tests/test_jobs_ingestion_orchestrator.py) tests/test_jobs_ingestion_orchestrator.py
+Found 26 errors in 1 file (checked 1 source file)
+```
+
+The original Task 6 head (`a378086`) produced `Found 35 errors in 1 file`; the corrected working tree produces zero. Thus the Task 6 diff adds no strict-MyPy findings relative to its base.
+
+Full suite, run once after final focused and static verification:
+
+```text
+set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q
+........................................................................ [ 50%]
+........................................................................ [100%]
+144 passed in 3.95s
+```
+
+### Fix-round Self-Review
+
+- Artifact identity is no longer used as a completion signal; persisted owner-run success is required.
+- The raw retry remains one atomic batch and uses its inserted count to select the only two durable recovery histories.
+- Recovery after raw failure reads only the current run delta; recovery after later semantic failure reads the failed owner's complete raw rows.
+- Reused owner rows and snapshots use the same owner run ID.
+- Owner-success duplicates retain exact skip counts, durations, and reasons.
+- Missing canonical or snapshot services retain their established compatibility branches.
+- Reprocess remains unchanged and continues to use complete-period reads.
+- No repository schema, transaction, API, or adapter behavior changed.
+
+### Fix-round Concerns
+
+None.

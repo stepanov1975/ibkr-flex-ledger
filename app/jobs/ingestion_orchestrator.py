@@ -230,7 +230,17 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
             artifact_persistence_duration_ms = _duration_ms(artifact_persistence_started_ns)
 
+            artifact_owner_run_id = artifact_result.artifact.ingestion_run_id
+            completed_duplicate = False
             if artifact_result.deduplicated:
+                artifact_owner_run = self._ingestion_repository.db_ingestion_run_get_by_id(
+                    artifact_owner_run_id
+                )
+                completed_duplicate = (
+                    artifact_owner_run is not None and artifact_owner_run.state.status == "success"
+                )
+
+            if completed_duplicate:
                 raw_record_result = RawRecordPersistResult(
                     inserted_count=0,
                     deduplicated_count=len(extraction_result.rows),
@@ -254,6 +264,15 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 raw_record_result = self._raw_persistence_repository.db_raw_record_insert_many(raw_record_requests)
                 raw_persistence_duration_ms = _duration_ms(raw_persistence_started_ns)
                 duplicate_skip_reason = None
+
+            reuse_artifact_owner_rows = (
+                artifact_result.deduplicated
+                and not completed_duplicate
+                and raw_record_result.inserted_count == 0
+            )
+            semantic_run_id = (
+                artifact_owner_run_id if reuse_artifact_owner_rows else run_record.ingestion_run_id
+            )
 
             persist_details: dict[str, object] = {
                 "payload_sha256": payload_sha256,
@@ -287,9 +306,14 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     canonical_skip_reason = duplicate_skip_reason
                 else:
                     canonical_raw_read_started_ns = perf_counter_ns()
-                    canonical_raw_rows = self._canonical_repository.db_raw_record_list_changed_for_run(
-                        ingestion_run_id=run_record.ingestion_run_id,
-                    )
+                    if reuse_artifact_owner_rows:
+                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_run(
+                            ingestion_run_id=artifact_owner_run_id,
+                        )
+                    else:
+                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_changed_for_run(
+                            ingestion_run_id=run_record.ingestion_run_id,
+                        )
                     canonical_raw_read_duration_ms = _duration_ms(canonical_raw_read_started_ns)
                     if len(canonical_raw_rows) == 0:
                         canonical_duration_ms = 0
@@ -321,7 +345,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 )
 
             self._job_append_snapshot_stage_timeline(
-                run_record_id=str(run_record.ingestion_run_id),
+                run_record_id=str(semantic_run_id),
                 report_date_local=(
                     extraction_result.report_date_local.isoformat()
                     if extraction_result.report_date_local is not None
