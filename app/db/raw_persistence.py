@@ -1,5 +1,4 @@
 """Database service for immutable raw artifact and raw row persistence."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 

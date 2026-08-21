@@ -24,7 +24,11 @@ def db_create_engine(database_url: str) -> Engine:
     if not database_url.strip():
         raise ValueError("database_url must not be blank")
 
-    return create_engine(database_url, pool_pre_ping=True)
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 5},
+    )
 
 
 def db_create_session_factory(engine: Engine) -> sessionmaker:

@@ -256,7 +256,7 @@ class _RawPersistenceStub:
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
 
-class _SnapshotServiceStub:  # pylint: disable=too-few-public-methods
+class _SnapshotServiceStub:
     """Snapshot service stub capturing automatic snapshot execution calls."""
 
     def __init__(self):
@@ -275,14 +275,14 @@ class _SnapshotServiceStub:  # pylint: disable=too-few-public-methods
         self,
         account_id: str,
         ingestion_run_id: str | None,
-        run_completed_at_utc: str,
+        report_date_local: str,
     ):
         """Capture snapshot trigger parameters and return deterministic result.
 
         Args:
             account_id: Internal account identifier.
             ingestion_run_id: Ingestion run identifier.
-            run_completed_at_utc: Run completion UTC timestamp.
+            report_date_local: Flex statement business date.
 
         Returns:
             object: Lightweight snapshot build result.
@@ -295,7 +295,7 @@ class _SnapshotServiceStub:  # pylint: disable=too-few-public-methods
             {
                 "account_id": account_id,
                 "ingestion_run_id": ingestion_run_id,
-                "run_completed_at_utc": run_completed_at_utc,
+                "report_date_local": report_date_local,
             }
         )
         return type(
@@ -352,7 +352,7 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
     """
 
     complete_payload = (
-        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+            b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement reportDate=\"20260220\">"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
         b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
@@ -384,7 +384,7 @@ def test_jobs_ingestion_orchestrator_runs_snapshot_stage_on_success() -> None:
     """
 
     complete_payload = (
-        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
+        b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement reportDate=\"20260220\">"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
         b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
@@ -405,6 +405,7 @@ def test_jobs_ingestion_orchestrator_runs_snapshot_stage_on_success() -> None:
 
     assert result.status == "success"
     assert len(snapshot_service_stub.calls) == 1
+    assert snapshot_service_stub.calls[0]["report_date_local"] == "2026-02-20"
     snapshot_timeline_events = [
         event for event in repository_stub.finalize_calls[0]["diagnostics"] if event.get("stage") == "snapshot"
     ]

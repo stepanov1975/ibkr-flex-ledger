@@ -108,7 +108,7 @@ def job_canonical_map_and_persist(
     canonical_persistence_repository.db_canonical_bulk_upsert(
         trade_requests=resolved_trade_requests,
         cashflow_requests=resolved_cashflow_requests,
-        fx_requests=mapped_batch.fx_requests,
+        fx_requests=list(mapped_batch.fx_requests),
         corp_action_requests=resolved_corp_action_requests,
     )
 

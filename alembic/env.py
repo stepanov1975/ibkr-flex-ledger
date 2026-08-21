@@ -1,5 +1,4 @@
 """Alembic environment configuration for Task 2 schema migrations."""
-# pylint: disable=no-member,invalid-name,wrong-import-order
 
 from logging.config import fileConfig
 

@@ -1,5 +1,4 @@
 """Canonical mapping service for Task 5 raw-to-canonical transformations."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -144,13 +143,13 @@ class CanonicalMappingService:
                 continue
 
             if section_name == "CashTransactions":
-                instrument_request, cashflow_request = self._mapping_map_cashflow_record(
+                cashflow_instrument_request, cashflow_request = self._mapping_map_cashflow_record(
                     account_id=normalized_account_id,
                     functional_currency=normalized_functional_currency,
                     raw_record=raw_record,
                 )
-                if instrument_request is not None:
-                    instrument_requests.append(instrument_request)
+                if cashflow_instrument_request is not None:
+                    instrument_requests.append(cashflow_instrument_request)
                 cashflow_requests.append(cashflow_request)
                 continue
 
@@ -167,12 +166,12 @@ class CanonicalMappingService:
             if section_name == "CorporateActions":
                 if not self._mapping_row_matches_tag(raw_record, expected_row_tag="CorporateAction"):
                     continue
-                instrument_request, corp_action_request = self._mapping_map_corp_action_record(
+                corp_action_instrument_request, corp_action_request = self._mapping_map_corp_action_record(
                     account_id=normalized_account_id,
                     raw_record=raw_record,
                 )
-                if instrument_request is not None:
-                    instrument_requests.append(instrument_request)
+                if corp_action_instrument_request is not None:
+                    instrument_requests.append(corp_action_instrument_request)
                 corp_action_requests.append(corp_action_request)
 
         return CanonicalMappingBatch(

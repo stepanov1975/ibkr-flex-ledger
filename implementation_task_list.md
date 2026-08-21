@@ -246,5 +246,5 @@ Source: MVP.md + MVP_spec_freeze.md
 
 **Acceptance criteria (user-verifiable)**
 - Full test suite passes, including integration flow and deterministic replay checks.
-- `ruff` and `pylint` pass with zero new errors.
+- `ruff` and `mypy` pass with zero errors.
 - Seeded walkthrough demonstrates full provenance chain and reconciliation diagnostics.

@@ -77,7 +77,7 @@ def _migration_resolve_reachable_base_url() -> str:
 
     last_exception_message = ""
     for candidate_url in candidate_urls:
-        engine = create_engine(candidate_url)
+        engine = create_engine(candidate_url, connect_args={"connect_timeout": 1})
         try:
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))

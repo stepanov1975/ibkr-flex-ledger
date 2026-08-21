@@ -30,15 +30,13 @@
    * Ensure all Jinja blocks are properly closed (`{% endif %}`, `{% endfor %}`)
    * Validate HTML tag nesting (unclosed tags cause rendering issues)
 
-## Python LINTING & SUPPRESSION POLICY
-1. **Pylint Workflow:**
-   * Command: `pylint app/ --disable=C0303,R0913,R0914,R0917,C0301,R0911,R0912,C0302,C0305,R0902`
-   * **Zero Tolerance:** No `E` (Error) or `F` (Fatal) messages allowed.
-   * **Refactor:** Address `R` (Refactor) and `W` (Warning) messages by code improvement, not suppression.
-2. **Ruff Workflow:**
+## Python LINTING & TYPE-CHECKING POLICY
+1. **Ruff Workflow:**
    * Command: `ruff check app/ --ignore=E501,W293,W291`
+2. **MyPy Workflow:**
+   * Command: `mypy`
+   * Configuration: `mypy.ini`
+   * Scope: first-party runtime code under `app/`.
 3. **Suppression Rules:**
-   * **Last Resort:** Only suppress linting errors if fixing them introduces risk or reduces readability.
-   * **Syntax:**
-     * `pylint: disable=broad-except` → Must include comment: `# Reason: <Why specific catch is unsafe>`
-     * `pylint: disable=missing-function-docstring` → Allowed ONLY for trivial getters/setters.
+   * **Last Resort:** Prefer correcting the type contract over adding `type: ignore`.
+   * Every `type: ignore` must name the exact error code and explain why runtime behavior cannot be expressed more accurately.

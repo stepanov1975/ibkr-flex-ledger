@@ -87,7 +87,7 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
                     RawExtractedRow(
                         section_name=section_name,
                         source_row_ref=source_row_ref,
-                        source_payload=row_payload,
+                        source_payload={key: value for key, value in row_payload.items()},
                     )
                 )
 

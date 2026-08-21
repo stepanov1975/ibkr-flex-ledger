@@ -711,6 +711,12 @@ class LedgerTradeFillRecord:
     fees: str | None
     commission: str | None
     functional_currency: str
+    currency: str = "USD"
+    transaction_id: str | None = None
+    net_cash: str | None = None
+    net_cash_in_base: str | None = None
+    fx_rate_to_base: str | None = None
+    close_price: str | None = None
 
 
 @dataclass(frozen=True)
@@ -734,6 +740,22 @@ class LedgerCashflowRecord:
     withholding_tax: str | None
     fees: str | None
     functional_currency: str
+    amount: str = "0"
+    amount_in_base: str | None = None
+    currency: str = "USD"
+
+
+@dataclass(frozen=True)
+class LedgerFxRateRecord:
+    """Canonical conversion rate available to ledger fallback resolution."""
+
+    report_date_local: date
+    currency: str
+    functional_currency: str
+    fx_rate: str | None
+    fx_source: str
+    ingestion_run_id: UUID
+    source_raw_record_id: UUID
 
 
 @dataclass(frozen=True)
@@ -751,7 +773,7 @@ class LedgerOpenPositionValuationRecord:
     instrument_id: UUID
     position_qty: str
     mark_price: str
-    broker_unrealized_pnl: str
+    broker_unrealized_pnl: str | None
     report_date_local: date | None
 
 
@@ -930,6 +952,13 @@ class LedgerSnapshotRepositoryPort(Protocol):
             RuntimeError: Raised when database read fails.
         """
 
+    def db_ledger_fx_rate_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+    ) -> list[LedgerFxRateRecord]:
+        """List conversion rates through a report date in fallback order."""
+
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
 
@@ -943,6 +972,14 @@ class LedgerSnapshotRepositoryPort(Protocol):
             ValueError: Raised when request values are invalid.
             RuntimeError: Raised when persistence fails.
         """
+
+    def db_position_lot_reconcile_open(
+        self,
+        account_id: str,
+        closed_at_utc: datetime,
+        requests: list[PositionLotUpsertRequest],
+    ) -> None:
+        """Replace the account's open-lot projection and close stale rows."""
 
     def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
         """UPSERT daily snapshot rows in one batch operation.
@@ -986,4 +1023,3 @@ class LedgerSnapshotRepositoryPort(Protocol):
             ValueError: Raised when input values are invalid.
             RuntimeError: Raised when database read fails.
         """
-

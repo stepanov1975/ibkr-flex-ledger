@@ -64,7 +64,7 @@ def _upsert_resolve_reachable_base_url() -> str:
     )
 
     for candidate_url in candidate_urls:
-        probe_engine = create_engine(candidate_url)
+        probe_engine = create_engine(candidate_url, connect_args={"connect_timeout": 1})
         try:
             with probe_engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
@@ -330,6 +330,12 @@ def test_db_raw_record_insert_many_returns_correct_counts() -> None:
     raw_persistence_service = SQLAlchemyRawPersistenceService(engine=engine)
     ingestion_run_id = str(uuid.uuid4())
     account_id = f"U_TEST_{uuid.uuid4().hex[:8]}"
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        pytest.skip("PostgreSQL is not reachable for raw persistence integration test")
 
     try:
         with engine.begin() as connection:

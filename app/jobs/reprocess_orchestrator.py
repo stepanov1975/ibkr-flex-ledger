@@ -200,8 +200,9 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             )
 
             timeline.append(domain_build_stage_event(stage="run", status="success"))
-            if run_record is not None:
-                self._ingestion_repository.db_ingestion_run_finalize(
+            ingestion_repository = self._ingestion_repository
+            if run_record is not None and ingestion_repository is not None:
+                ingestion_repository.db_ingestion_run_finalize(
                     ingestion_run_id=run_record.ingestion_run_id,
                     status="success",
                     error_code=None,
@@ -238,8 +239,9 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     },
                 )
             )
-            if run_record is not None:
-                self._ingestion_repository.db_ingestion_run_finalize(
+            ingestion_repository = self._ingestion_repository
+            if run_record is not None and ingestion_repository is not None:
+                ingestion_repository.db_ingestion_run_finalize(
                     ingestion_run_id=run_record.ingestion_run_id,
                     status="failed",
                     error_code=error_code,

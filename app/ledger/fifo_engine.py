@@ -109,7 +109,7 @@ class _OpenFifoLot:
     realized_pnl_to_date: Decimal
 
 
-def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedgerComputationResult:  # pylint: disable=too-many-statements
+def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedgerComputationResult:
     """Compute FIFO realized and unrealized PnL for one instrument.
 
     Args:
@@ -213,16 +213,16 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
             )
 
     open_quantity = sum(
-        (lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity)
-        for lot in open_lots
+        ((lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity) for lot in open_lots),
+        Decimal("0"),
     )
     unrealized_pnl = sum(
-        (
+        ((
             (request.mark_price - lot.unit_basis) * lot.remaining_quantity
             if lot.direction == "long"
             else (lot.unit_basis - request.mark_price) * lot.remaining_quantity
-        )
-        for lot in open_lots
+        ) for lot in open_lots),
+        Decimal("0"),
     )
 
     return FifoLedgerComputationResult(
@@ -270,4 +270,3 @@ def _fifo_parse_timestamp_utc(timestamp_value: str) -> datetime:
         raise ValueError("trade_timestamp_utc must be offset-aware")
 
     return parsed_timestamp
-

@@ -1,5 +1,4 @@
 """Job-layer ingestion orchestrator with deterministic stage timeline persistence."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -7,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import traceback
+from typing import Protocol
 
 from app.adapters import (
     FlexAdapterConnectionError,
@@ -25,18 +25,24 @@ from app.db import (
     RawRecordReadRepositoryPort,
     RawPersistenceRepositoryPort,
     RawRecordPersistRequest,
+    IngestionRunRecord,
 )
 from app.domain import domain_build_stage_event
-from app.ledger import StockLedgerSnapshotService
+from app.ledger import StockLedgerSnapshotService, snapshot_resolve_report_date_local
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import job_raw_extract_payload_rows
 from .canonical_pipeline import job_canonical_map_and_persist
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
+    SectionPreflightResult,
     job_section_preflight_build_missing_required_diagnostics,
     job_section_preflight_validate_required_sections,
 )
+
+
+class CanonicalIngestionRepositoryPort(CanonicalPersistenceRepositoryPort, RawRecordReadRepositoryPort, Protocol):
+    """Combined canonical read/write contract required by ingestion."""
 
 
 @dataclass(frozen=True)
@@ -69,7 +75,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         raw_persistence_repository: RawPersistenceRepositoryPort,
         flex_adapter: FlexAdapterPort,
         config: IngestionOrchestratorConfig,
-        canonical_repository: CanonicalPersistenceRepositoryPort | RawRecordReadRepositoryPort | None = None,
+        canonical_repository: CanonicalIngestionRepositoryPort | None = None,
         snapshot_service: StockLedgerSnapshotService | None = None,
     ):
         """Initialize ingestion orchestrator dependencies.
@@ -139,7 +145,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         if normalized_job_name != self._INGESTION_JOB_NAME:
             raise ValueError(f"unsupported job_name={normalized_job_name}")
 
-        period_key = datetime.now(timezone.utc).date().isoformat()
+        period_key = snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat())
         timeline: list[dict[str, object]] = []
         timeline.append(domain_build_stage_event(stage="run", status="started"))
 
@@ -267,6 +273,11 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
             self._job_append_snapshot_stage_timeline(
                 run_record_id=str(run_record.ingestion_run_id),
+                report_date_local=(
+                    extraction_result.report_date_local.isoformat()
+                    if extraction_result.report_date_local is not None
+                    else period_key
+                ),
                 timeline=timeline,
             )
 
@@ -304,8 +315,8 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
     def _job_handle_preflight_failure(
         self,
-        run_record,
-        preflight_result,
+        run_record: IngestionRunRecord,
+        preflight_result: SectionPreflightResult,
         timeline: list[dict[str, object]],
         normalized_job_name: str,
     ) -> JobExecutionResult:
@@ -380,11 +391,17 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             return "INGESTION_CONTRACT_ERROR"
         return "INGESTION_UNEXPECTED_ERROR"
 
-    def _job_append_snapshot_stage_timeline(self, run_record_id: str, timeline: list[dict[str, object]]) -> None:
+    def _job_append_snapshot_stage_timeline(
+        self,
+        run_record_id: str,
+        report_date_local: str,
+        timeline: list[dict[str, object]],
+    ) -> None:
         """Append snapshot stage timeline events for automatic Task 7 execution.
 
         Args:
             run_record_id: Ingestion run identifier.
+            report_date_local: Flex statement business date.
             timeline: Mutable timeline payload being persisted.
 
         Returns:
@@ -409,7 +426,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
             account_id=self._config.account_id,
             ingestion_run_id=run_record_id,
-            run_completed_at_utc=datetime.now(timezone.utc).isoformat(),
+            report_date_local=report_date_local,
         )
         snapshot_duration_ms = max(
             0,

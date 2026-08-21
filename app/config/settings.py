@@ -1,6 +1,6 @@
 """Typed runtime settings with dotenv support and startup validation."""
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,7 +65,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("api_max_limit")
     @classmethod
-    def _validate_limit_bounds(cls, value: int, info) -> int:
+    def _validate_limit_bounds(cls, value: int, info: ValidationInfo) -> int:
         default_limit = info.data.get("api_default_limit", 50)
         if value < default_limit:
             raise ValueError("api_max_limit must be greater than or equal to api_default_limit")
@@ -73,7 +73,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("ibkr_flex_backoff_max_seconds")
     @classmethod
-    def _validate_backoff_cap_bounds(cls, value: float, info) -> float:
+    def _validate_backoff_cap_bounds(cls, value: float, info: ValidationInfo) -> float:
         backoff_base_seconds = float(info.data.get("ibkr_flex_backoff_base_seconds", 10.0))
         if value < backoff_base_seconds:
             raise ValueError("ibkr_flex_backoff_max_seconds must be greater than or equal to ibkr_flex_backoff_base_seconds")
@@ -81,7 +81,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("ibkr_flex_jitter_max_multiplier")
     @classmethod
-    def _validate_jitter_bounds(cls, value: float, info) -> float:
+    def _validate_jitter_bounds(cls, value: float, info: ValidationInfo) -> float:
         jitter_min_multiplier = float(info.data.get("ibkr_flex_jitter_min_multiplier", 0.5))
         if value < jitter_min_multiplier:
             raise ValueError(
@@ -122,7 +122,8 @@ def config_load_settings() -> AppSettings:
     """
 
     try:
-        return AppSettings()
+        # Pydantic Settings supplies required fields from the environment at runtime.
+        return AppSettings()  # type: ignore[call-arg]
     except ValidationError as error:
         raise SettingsLoadError(
             f"Startup configuration validation failed. Update .env or environment variables. Details: {error}"

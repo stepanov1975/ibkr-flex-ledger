@@ -140,6 +140,9 @@ The Task 1 runtime foundation now includes:
 docker compose up -d
 ```
 
+The app container applies Alembic migrations before starting the API. PostgreSQL
+data is stored in the named `postgres_data` volume.
+
 Service endpoints:
 
 - App: `http://127.0.0.1:8000`
@@ -330,6 +333,15 @@ Task 5 implementation modules:
 - `app/jobs/canonical_pipeline.py`
 - `app/jobs/reprocess_orchestrator.py`
 
+## Valuation and FX fallback engine (Task 6)
+
+Snapshot accounting follows the frozen deterministic hierarchies:
+
+- EOD mark: `OpenPositions.markPrice` -> same-day `Trades.closePrice` -> last known trade price
+- Execution FX: `Trades.fxRateToBase` -> derived net-cash ratio -> exact/nearest-previous `ConversionRates`
+- Base-currency events use `1.0`; missing non-base FX marks the snapshot provisional rather than labeling native amounts as USD
+- Flex statement `reportDate` drives the snapshot business date, including delayed imports
+
 ## Stocks-first FIFO ledger and daily snapshots (Task 7)
 
 Task 7 adds the first project-native stocks FIFO ledger computation flow and persists daily snapshot outputs.
@@ -337,10 +349,11 @@ Task 7 adds the first project-native stocks FIFO ledger computation flow and per
 Included behavior:
 
 - Deterministic FIFO lot matching for stock trades with stable tie-break ordering (`trade_timestamp_utc` then source row id)
-- Realized and unrealized PnL computation with fee/withholding impacts applied in Task 7 snapshot aggregation
+- Base-currency realized and unrealized PnL computation with cashflow, fee, and withholding impacts
 - Automatic snapshot stage execution after successful ingestion runs (`snapshot` timeline stage persisted in run diagnostics)
-- Day-level snapshot persistence into `pnl_snapshot_daily` and open-lot persistence into `position_lot` via db-layer-only interfaces
-- UTC timestamp handling with Asia/Jerusalem business-date boundary conversion for snapshot report dates
+- Day-level snapshot persistence into `pnl_snapshot_daily` and reconciled open-lot persistence into `position_lot`
+- Stale open lots are closed when deterministic replay no longer produces them
+- UTC timestamps are retained while Flex statement dates drive daily snapshot boundaries
 
 API endpoint additions:
 

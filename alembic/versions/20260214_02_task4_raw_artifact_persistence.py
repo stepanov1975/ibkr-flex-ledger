@@ -4,7 +4,6 @@ Revision ID: 20260214_02
 Revises: 20260214_01
 Create Date: 2026-02-14
 """
-# pylint: disable=no-member,invalid-name,wrong-import-order
 
 from typing import Sequence, Union
 

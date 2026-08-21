@@ -8,7 +8,7 @@ from datetime import date
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .interfaces import (
@@ -296,7 +296,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("failed to list ingestion runs") from error
 
-    def _db_fetch_run_by_id_or_raise(self, connection, ingestion_run_id: UUID) -> IngestionRunRecord:
+    def _db_fetch_run_by_id_or_raise(self, connection: Connection, ingestion_run_id: UUID) -> IngestionRunRecord:
         """Fetch one run inside active transaction and raise when missing.
 
         Args:

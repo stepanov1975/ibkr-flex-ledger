@@ -22,6 +22,7 @@ from app.jobs import (
     IngestionOrchestratorConfig,
 )
 from app.ledger import StockLedgerSnapshotService
+from app.ledger import snapshot_resolve_report_date_local
 
 
 def bootstrap_create_application() -> FastAPI:
@@ -71,7 +72,7 @@ def bootstrap_create_application() -> FastAPI:
         ingestion_repository=ingestion_repository,
         config=CanonicalReprocessOrchestratorConfig(
             account_id=settings.account_id,
-            period_key=datetime.now(timezone.utc).date().isoformat(),
+            period_key=snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat()),
             flex_query_id=settings.ibkr_flex_query_id,
             functional_currency="USD",
         ),
@@ -142,7 +143,8 @@ def bootstrap_create_reprocess_orchestrator(
     """
 
     settings = config_load_settings()
-    resolved_period_key = (period_key or datetime.now(timezone.utc).date().isoformat()).strip()
+    default_period_key = snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat())
+    resolved_period_key = (period_key or default_period_key).strip()
     resolved_flex_query_id = (flex_query_id or settings.ibkr_flex_query_id).strip()
     engine = db_create_engine(database_url=settings.database_url)
     ingestion_repository = SQLAlchemyIngestionRunService(engine=engine)

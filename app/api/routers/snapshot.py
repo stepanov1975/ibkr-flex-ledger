@@ -1,5 +1,4 @@
 """Snapshot API router composition for Task 7 daily snapshot reads."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
@@ -90,7 +89,7 @@ def api_create_snapshot_router(
             report_date_to=report_date_to,
         )
 
-        payload = {
+        response_payload: dict[str, object] = {
             "items": [api_serialize_pnl_snapshot_daily_row(snapshot_row) for snapshot_row in snapshot_rows],
             "page": {
                 "limit": limit,
@@ -107,7 +106,7 @@ def api_create_snapshot_router(
                 "report_date_to": report_date_to,
             },
         }
-        return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
+        return JSONResponse(content=response_payload, status_code=status.HTTP_200_OK)
 
     return router
 

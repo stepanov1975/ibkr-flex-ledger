@@ -9,7 +9,9 @@ COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app app
+COPY alembic alembic
+COPY alembic.ini alembic.ini
 
 EXPOSE 8000
 
-CMD ["python", "-m", "app.main"]
+CMD ["sh", "-c", "alembic upgrade head && exec python -m app.main"]

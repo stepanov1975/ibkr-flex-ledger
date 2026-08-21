@@ -5,7 +5,7 @@ from __future__ import annotations
 from .section_preflight import MISSING_REQUIRED_SECTION_CODE
 
 
-def job_extract_missing_sections_from_diagnostics(diagnostics) -> dict[str, list[str]]:
+def job_extract_missing_sections_from_diagnostics(diagnostics: object) -> dict[str, list[str]]:
     """Extract missing-section lists from run diagnostics timeline.
 
     Args:

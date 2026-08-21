@@ -27,7 +27,7 @@
    * Use ASCII characters only in code and comments. **Strictly No Emojis** or non-standard symbols in code/comments.
    * Non-ASCII symbols are allowed in UI-facing HTML/Jinja content and Markdown files.
 4. **Completion Gate:**
-   * The task is NOT complete until you run the linting commands (`pylint`, `ruff`) and resolve all new errors. Do not present code as "finished" if it has red squiggles.
+   * The task is NOT complete until you run the quality commands (`ruff`, `mypy`) and resolve all new errors. Do not present code as "finished" if it has red squiggles.
 5. **Dates**: Use `YYYY-MM-DD` format in all comments, docstrings, and documentation. Use today's date; do not hallucinate past/future dates.
 
 ## NAMING & DISCOVERABILITY

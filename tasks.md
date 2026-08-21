@@ -47,9 +47,9 @@ Implement Task 7 from `implementation_task_list.md`: deliver a stocks-first FIFO
 7. **Run full verification and lint gates for Task 7 changes** — `status: done`
 	- **Description:** Validate Task 7 behavior and quality gates before documentation updates.
 	- [ ] Run targeted Task 7 tests first, then broader project tests relevant to touched modules.
-	- [ ] Run `ruff` and `pylint` according to `linting.md` and resolve all new issues in changed code.
+	- [ ] Run `ruff` and `mypy` according to `linting.md` and resolve all issues in changed code.
 	- [ ] Confirm no runtime imports from `references/` and no SQL outside `app/db`.
-	- **Summary:** Validation and lint gates completed successfully: (1) targeted Task 7 tests pass, including new regressions (`tests/test_ledger_fifo_snapshot.py`, `tests/test_api_snapshot.py`, and ingestion orchestrator snapshot-stage coverage), (2) broader suite passes (`pytest -q` => 83 passed, 5 skipped), (3) `ruff check app/ --ignore=E501,W293,W291` passes, and (4) `pylint app/ --disable=C0303,R0913,R0914,R0917,C0301,R0911,R0912,C0302,C0305,R0902` passes with 10.00/10.
+	- **Summary:** Task 7 originally passed its targeted tests and Ruff gate. The active quality gates are now Ruff and MyPy; current verification results are reported by the latest change.
 
 8. **Update README and memory** — `status: done`
 	- **Description:** revise `README.md` and `ai_memory.md` to reflect changes

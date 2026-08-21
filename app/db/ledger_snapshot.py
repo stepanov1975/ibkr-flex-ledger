@@ -1,9 +1,8 @@
 """Database service for Task 7 ledger inputs and snapshot persistence."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
+    LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
     LedgerTradeFillRecord,
@@ -122,13 +122,20 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 rows = connection.execute(
                     text(
                         "SELECT "
-                        "event_trade_fill_id, account_id, instrument_id, source_raw_record_id, trade_timestamp_utc, "
-                        "report_date_local, side, quantity, price, fees, commission, functional_currency "
-                        "FROM event_trade_fill "
-                        "WHERE account_id = :account_id "
+                        "etf.event_trade_fill_id, etf.account_id, etf.instrument_id, etf.source_raw_record_id, "
+                        "etf.trade_timestamp_utc, etf.report_date_local, etf.side, etf.quantity, etf.price, "
+                        "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
+                        "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
+                        "NULLIF(rr.source_payload->>'closePrice', '') AS close_price "
+                        "FROM event_trade_fill etf "
+                        "LEFT JOIN raw_record rr ON rr.raw_record_id = etf.source_raw_record_id "
+                        "WHERE etf.account_id = :account_id "
                         "AND (CAST(:through_report_date_local AS date) IS NULL "
-                        "OR report_date_local <= CAST(:through_report_date_local AS date)) "
-                        "ORDER BY trade_timestamp_utc asc, source_raw_record_id asc, event_trade_fill_id asc"
+                        "OR etf.report_date_local <= CAST(:through_report_date_local AS date)) "
+                        "ORDER BY etf.trade_timestamp_utc asc, "
+                        "CASE WHEN etf.transaction_id ~ '^[0-9]+$' THEN CAST(etf.transaction_id AS numeric) END asc NULLS FIRST, "
+                        "etf.transaction_id asc NULLS FIRST, "
+                        "etf.source_raw_record_id asc, etf.event_trade_fill_id asc"
                     ),
                     {
                         "account_id": normalized_account_id,
@@ -152,6 +159,12 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 fees=None if row["fees"] is None else str(row["fees"]),
                 commission=None if row["commission"] is None else str(row["commission"]),
                 functional_currency=row["functional_currency"],
+                currency=row["currency"],
+                transaction_id=row["transaction_id"],
+                net_cash=None if row["net_cash"] is None else str(row["net_cash"]),
+                net_cash_in_base=None if row["net_cash_in_base"] is None else str(row["net_cash_in_base"]),
+                fx_rate_to_base=None if row["fx_rate_to_base"] is None else str(row["fx_rate_to_base"]),
+                close_price=None if row["close_price"] is None else str(row["close_price"]),
             )
             for row in rows
         ]
@@ -186,7 +199,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 rows = connection.execute(
                     text(
                         "SELECT "
-                        "event_cashflow_id, account_id, instrument_id, report_date_local, withholding_tax, fees, functional_currency "
+                        "event_cashflow_id, account_id, instrument_id, report_date_local, withholding_tax, fees, "
+                        "functional_currency, amount, amount_in_base, currency "
                         "FROM event_cashflow "
                         "WHERE account_id = :account_id "
                         "AND (CAST(:through_report_date_local AS date) IS NULL "
@@ -210,6 +224,9 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 withholding_tax=None if row["withholding_tax"] is None else str(row["withholding_tax"]),
                 fees=None if row["fees"] is None else str(row["fees"]),
                 functional_currency=row["functional_currency"],
+                amount=str(row["amount"]),
+                amount_in_base=None if row["amount_in_base"] is None else str(row["amount_in_base"]),
+                currency=row["currency"],
             )
             for row in rows
         ]
@@ -244,7 +261,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "SELECT i.instrument_id, rr.raw_record_id, "
                         "CAST(rr.source_payload->>'position' AS numeric) AS position_qty, "
                         "CAST(rr.source_payload->>'markPrice' AS numeric) AS mark_price, "
-                        "CAST(rr.source_payload->>'fifoPnlUnrealized' AS numeric) AS broker_unrealized_pnl, "
+                        "CAST(NULLIF(rr.source_payload->>'fifoPnlUnrealized', '') AS numeric) AS broker_unrealized_pnl, "
                         "CASE "
                         "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
                         "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
@@ -257,8 +274,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "AND rr.section_name = 'OpenPositions' "
                         "AND COALESCE(rr.source_payload->>'assetCategory', '') = 'STK' "
                         "AND rr.source_payload ? 'position' "
-                        "AND rr.source_payload ? 'markPrice' "
-                        "AND rr.source_payload ? 'fifoPnlUnrealized'"
+                        "AND rr.source_payload ? 'markPrice'"
                         "), ranked AS ("
                         "SELECT instrument_id, position_qty, mark_price, broker_unrealized_pnl, report_date_local, "
                         "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
@@ -280,8 +296,56 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 instrument_id=row["instrument_id"],
                 position_qty=str(row["position_qty"]),
                 mark_price=str(row["mark_price"]),
-                broker_unrealized_pnl=str(row["broker_unrealized_pnl"]),
+                broker_unrealized_pnl=None
+                if row["broker_unrealized_pnl"] is None
+                else str(row["broker_unrealized_pnl"]),
                 report_date_local=row["report_date_local"],
+            )
+            for row in rows
+        ]
+
+    def db_ledger_fx_rate_list_for_account(
+        self,
+        account_id: str,
+        through_report_date_local: str,
+    ) -> list[LedgerFxRateRecord]:
+        """List usable canonical conversion rates through one report date."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        normalized_through_date = self._db_ledger_validate_optional_date_text(
+            through_report_date_local,
+            "through_report_date_local",
+        )
+        if normalized_through_date is None:
+            raise ValueError("through_report_date_local must not be blank")
+
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT report_date_local, currency, functional_currency, fx_rate, fx_source, "
+                        "ingestion_run_id, source_raw_record_id "
+                        "FROM event_fx WHERE account_id = :account_id "
+                        "AND report_date_local <= CAST(:through_report_date_local AS date) "
+                        "ORDER BY report_date_local asc, ingestion_run_id asc, source_raw_record_id asc"
+                    ),
+                    {
+                        "account_id": normalized_account_id,
+                        "through_report_date_local": normalized_through_date,
+                    },
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger FX-rate read failed") from error
+
+        return [
+            LedgerFxRateRecord(
+                report_date_local=row["report_date_local"],
+                currency=row["currency"],
+                functional_currency=row["functional_currency"],
+                fx_rate=None if row["fx_rate"] is None else str(row["fx_rate"]),
+                fx_source=row["fx_source"],
+                ingestion_run_id=row["ingestion_run_id"],
+                source_raw_record_id=row["source_raw_record_id"],
             )
             for row in rows
         ]
@@ -331,6 +395,53 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 )
         except SQLAlchemyError as error:
             raise RuntimeError("position lot upsert failed") from error
+
+    def db_position_lot_reconcile_open(
+        self,
+        account_id: str,
+        closed_at_utc: datetime,
+        requests: list[PositionLotUpsertRequest],
+    ) -> None:
+        """Close stale open lots and upsert the recomputed open-lot projection."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        if closed_at_utc.tzinfo is None or closed_at_utc.utcoffset() is None:
+            raise ValueError("closed_at_utc must be offset-aware")
+        if requests is None:
+            raise ValueError("requests must not be None")
+        normalized_requests = [self._db_ledger_validate_position_lot_upsert_request(request) for request in requests]
+
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE position_lot SET remaining_quantity = 0, status = 'closed', "
+                        "closed_at_utc = :closed_at_utc, updated_at_utc = now() "
+                        "WHERE account_id = :account_id AND status = 'open'"
+                    ),
+                    {"account_id": normalized_account_id, "closed_at_utc": closed_at_utc},
+                )
+                if normalized_requests:
+                    connection.execute(
+                        text(
+                            "INSERT INTO position_lot ("
+                            "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, "
+                            "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, "
+                            "realized_pnl_to_date, status) VALUES ("
+                            "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
+                            "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
+                            "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
+                            "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), "
+                            "CAST(:cost_basis_open AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
+                            "ON CONFLICT (position_lot_id) DO UPDATE SET "
+                            "remaining_quantity = EXCLUDED.remaining_quantity, closed_at_utc = EXCLUDED.closed_at_utc, "
+                            "realized_pnl_to_date = EXCLUDED.realized_pnl_to_date, status = EXCLUDED.status, "
+                            "updated_at_utc = now()"
+                        ),
+                        normalized_requests,
+                    )
+        except SQLAlchemyError as error:
+            raise RuntimeError("position lot reconciliation failed") from error
 
     def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
         """UPSERT daily snapshot rows in one batch operation.

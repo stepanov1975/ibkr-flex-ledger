@@ -170,7 +170,7 @@ def api_create_ingestion_router(
             sort_by=normalized_sort_by,
             sort_dir=normalized_sort_dir,
         )
-        payload = {
+        response_payload: dict[str, object] = {
             "items": [api_serialize_ingestion_run_record(run_record) for run_record in run_rows],
             "page": {
                 "limit": limit,
@@ -184,7 +184,7 @@ def api_create_ingestion_router(
             },
             "filters": {},
         }
-        return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
+        return JSONResponse(content=response_payload, status_code=status.HTTP_200_OK)
 
     @router.get("/runs/{ingestion_run_id}")
     def api_ingestion_run_detail(ingestion_run_id: UUID) -> JSONResponse:
@@ -238,7 +238,7 @@ def api_create_ingestion_router(
         missing_sections_payload = job_extract_missing_sections_from_diagnostics(
             diagnostics=run_record.state.diagnostics,
         )
-        payload = {
+        response_payload: dict[str, object] = {
             "ingestion_run_id": str(run_record.ingestion_run_id),
             "status": run_record.state.status,
             "error_code": run_record.state.error_code,
@@ -246,7 +246,7 @@ def api_create_ingestion_router(
             "missing_hard_required": missing_sections_payload["missing_hard_required"],
             "missing_reconciliation_required": missing_sections_payload["missing_reconciliation_required"],
         }
-        return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
+        return JSONResponse(content=response_payload, status_code=status.HTTP_200_OK)
 
     return router
 

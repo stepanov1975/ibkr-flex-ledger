@@ -123,7 +123,7 @@ def job_section_preflight_validate_required_sections(
     detected_sections = job_section_preflight_extract_section_names(payload_bytes=payload_bytes)
 
     missing_hard_required = tuple(sorted(set(HARD_REQUIRED_FLEX_SECTIONS) - detected_sections))
-    missing_reconciliation_required = tuple()
+    missing_reconciliation_required: tuple[str, ...] = tuple()
     if reconciliation_enabled:
         missing_reconciliation_required = tuple(sorted(set(RECONCILIATION_REQUIRED_FLEX_SECTIONS) - detected_sections))
 

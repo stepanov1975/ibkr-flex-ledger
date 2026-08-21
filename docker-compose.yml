@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -12,6 +13,8 @@ services:
       retries: 10
     ports:
       - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   app:
     build:
@@ -20,14 +23,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
     environment:
       ENVIRONMENT_NAME: ${ENVIRONMENT_NAME}
       APPLICATION_HOST: ${APPLICATION_HOST}
-      APPLICATION_PORT: ${APPLICATION_PORT}
-      DATABASE_URL: ${DATABASE_URL}
+      APPLICATION_PORT: 8000
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      ACCOUNT_ID: ${ACCOUNT_ID:-DEFAULT_ACCOUNT}
       IBKR_FLEX_TOKEN: ${IBKR_FLEX_TOKEN}
       IBKR_FLEX_QUERY_ID: ${IBKR_FLEX_QUERY_ID}
       API_DEFAULT_LIMIT: ${API_DEFAULT_LIMIT}
       API_MAX_LIMIT: ${API_MAX_LIMIT}
     ports:
       - "${APPLICATION_PORT}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  postgres_data:

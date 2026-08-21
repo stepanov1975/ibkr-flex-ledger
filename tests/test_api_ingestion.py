@@ -1,5 +1,4 @@
 """Regression tests for ingestion API trigger and run detail/list behavior."""
-# pylint: disable=duplicate-code
 
 from __future__ import annotations
 
