@@ -167,6 +167,17 @@ class RawArtifactPersistResult:
 
 
 @dataclass(frozen=True)
+class RawArtifactReplayCandidate:
+    """Successful immutable artifact eligible for canonical replay."""
+
+    raw_artifact_id: UUID
+    ingestion_run_id: UUID
+    report_date_local: date
+    created_at_utc: datetime
+    open_positions_present: bool
+
+
+@dataclass(frozen=True)
 class RawRecordPersistRequest:
     """Input payload for one raw row persistence operation.
 
@@ -634,6 +645,14 @@ class RawRecordReadRepositoryPort(Protocol):
             RuntimeError: Raised when read operation fails.
         """
 
+    def db_raw_artifact_replay_candidate_list(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+    ) -> list[RawArtifactReplayCandidate]:
+        """List successful raw artifacts eligible for deterministic replay."""
+
 
 class CanonicalPersistenceRepositoryPort(Protocol):
     """Port definition for canonical event and instrument UPSERT operations."""
@@ -981,6 +1000,14 @@ class PnlSnapshotDailyRecord:
     created_at_utc: datetime
 
 
+@dataclass(frozen=True)
+class SnapshotCleanupCandidate:
+    """Unsupported snapshot date and its scoped row count."""
+
+    report_date_local: date
+    row_count: int
+
+
 class LedgerSnapshotRepositoryPort(Protocol):
     """Port definition for Task 7 ledger inputs and snapshot persistence."""
 
@@ -1110,6 +1137,24 @@ class LedgerSnapshotRepositoryPort(Protocol):
             ValueError: Raised when request values are invalid.
             RuntimeError: Raised when persistence fails.
         """
+
+    def db_pnl_snapshot_daily_unsupported_list(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+        supported_report_dates: tuple[str, ...],
+    ) -> list[SnapshotCleanupCandidate]:
+        """List unsupported snapshot dates within one explicit replay scope."""
+
+    def db_pnl_snapshot_daily_unsupported_delete(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+        supported_report_dates: tuple[str, ...],
+    ) -> int:
+        """Delete unsupported snapshots within one explicit replay scope."""
 
     def db_pnl_snapshot_daily_list(
         self,

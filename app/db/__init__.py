@@ -46,11 +46,13 @@ from .interfaces import (
 	RawRecordReadRepositoryPort,
 	RawArtifactPersistRequest,
 	RawArtifactPersistResult,
+	RawArtifactReplayCandidate,
 	RawArtifactRecord,
 	RawArtifactReference,
 	RawPersistenceRepositoryPort,
 	RawRecordPersistRequest,
 	RawRecordPersistResult,
+	SnapshotCleanupCandidate,
 )
 from .session import db_create_engine, db_create_session_factory
 
@@ -84,8 +86,10 @@ __all__ = [
 	"RawArtifactPersistRequest",
 	"RawArtifactRecord",
 	"RawArtifactPersistResult",
+	"RawArtifactReplayCandidate",
 	"RawRecordPersistRequest",
 	"RawRecordPersistResult",
+	"SnapshotCleanupCandidate",
 	"SQLAlchemyDatabaseHealthService",
 	"SQLAlchemyIngestionRunService",
 	"SQLAlchemyCanonicalPersistenceService",

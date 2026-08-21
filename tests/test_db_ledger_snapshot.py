@@ -6,13 +6,20 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from app.db.interfaces import LedgerOpenPositionValuationRecord, PositionLotUpsertRequest
+import pytest
+
+from app.db.interfaces import (
+    LedgerOpenPositionValuationRecord,
+    PositionLotUpsertRequest,
+    SnapshotCleanupCandidate,
+)
 from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
 class _ResultStub:
-    def __init__(self, rows: list[dict]) -> None:
+    def __init__(self, rows: list[dict], rowcount: int = 0) -> None:
         self._rows = rows
+        self.rowcount = rowcount
 
     def mappings(self) -> _ResultStub:
         return self
@@ -22,8 +29,9 @@ class _ResultStub:
 
 
 class _ConnectionStub:
-    def __init__(self, rows: list[dict] | None = None) -> None:
+    def __init__(self, rows: list[dict] | None = None, rowcount: int = 0) -> None:
         self.rows = rows or []
+        self.rowcount = rowcount
         self.executed_queries: list[str] = []
         self.executed_parameters: list[object] = []
 
@@ -37,7 +45,7 @@ class _ConnectionStub:
     def execute(self, statement, parameters=None) -> _ResultStub:
         self.executed_queries.append(str(statement))
         self.executed_parameters.append(parameters)
-        return _ResultStub(self.rows)
+        return _ResultStub(self.rows, rowcount=self.rowcount)
 
 
 class _EngineStub:
@@ -49,6 +57,62 @@ class _EngineStub:
 
     def begin(self) -> _ConnectionStub:
         return self.connection
+
+
+def test_unsupported_snapshot_cleanup_is_account_period_query_scoped() -> None:
+    """Discover only unsupported snapshots owned by the requested replay scope."""
+
+    connection = _ConnectionStub(rows=[{
+        "report_date_local": date(2026, 2, 21),
+        "row_count": 44,
+    }])
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+
+    candidates = repository.db_pnl_snapshot_daily_unsupported_list(
+        account_id="U1",
+        period_key="2026-02-20",
+        flex_query_id="query",
+        supported_report_dates=("2026-02-19",),
+    )
+
+    assert candidates == [SnapshotCleanupCandidate(date(2026, 2, 21), 44)]
+    query = connection.executed_queries[0]
+    assert "raw_artifact" in query
+    assert "account_id = :account_id" in query
+    assert "period_key = :period_key" in query
+    assert "flex_query_id = :flex_query_id" in query
+    assert "supported_report_dates" in query
+
+
+def test_unsupported_snapshot_delete_returns_scoped_row_count() -> None:
+    """Return the count deleted from the requested replay scope only."""
+
+    connection = _ConnectionStub(rowcount=44)
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(connection))
+
+    deleted = repository.db_pnl_snapshot_daily_unsupported_delete(
+        account_id="U1",
+        period_key="2026-02-20",
+        flex_query_id="query",
+        supported_report_dates=("2026-02-19",),
+    )
+
+    assert deleted == 44
+    assert "DELETE FROM pnl_snapshot_daily" in connection.executed_queries[0]
+
+
+def test_unsupported_snapshot_cleanup_rejects_empty_supported_dates() -> None:
+    """Prevent an upstream selection bug from deleting an entire replay scope."""
+
+    repository = SQLAlchemyLedgerSnapshotService(_EngineStub(_ConnectionStub()))
+
+    with pytest.raises(ValueError, match="^supported_report_dates must not be empty$"):
+        repository.db_pnl_snapshot_daily_unsupported_delete(
+            account_id="U1",
+            period_key="2026-02-20",
+            flex_query_id="query",
+            supported_report_dates=(),
+        )
 
 
 def test_scope_lookup_uses_conid_currency_union_and_normalizes_ids() -> None:

@@ -17,6 +17,7 @@ from app.db.interfaces import (
     CanonicalInstrumentUpsertRequest,
     CanonicalPersistenceRepositoryPort,
     CanonicalTradeFillUpsertRequest,
+    RawArtifactReplayCandidate,
     RawRecordForCanonicalMapping,
     RawRecordReadRepositoryPort,
 )
@@ -74,6 +75,24 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         "OR current.source_payload IS DISTINCT FROM prior.source_payload) "
         "ORDER BY current.created_at_utc ASC, current.raw_record_id ASC"
     )
+    _RAW_ARTIFACT_REPLAY_CANDIDATE_QUERY = (
+        "SELECT artifact.raw_artifact_id, artifact.ingestion_run_id, artifact.report_date_local, "
+        "artifact.created_at_utc, EXISTS ("
+        "SELECT 1 FROM raw_record position_row "
+        "WHERE position_row.raw_artifact_id = artifact.raw_artifact_id "
+        "AND position_row.section_name = 'OpenPositions'"
+        ") AS open_positions_present "
+        "FROM raw_artifact artifact "
+        "JOIN ingestion_run owner ON owner.ingestion_run_id = artifact.ingestion_run_id "
+        "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id = artifact.completed_ingestion_run_id "
+        "WHERE artifact.account_id = :account_id "
+        "AND artifact.period_key = :period_key "
+        "AND artifact.flex_query_id = :flex_query_id "
+        "AND artifact.report_date_local IS NOT NULL "
+        "AND ((artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success') "
+        "OR (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')) "
+        "ORDER BY artifact.report_date_local ASC, artifact.created_at_utc ASC, artifact.raw_artifact_id ASC"
+    )
 
     def __init__(self, engine: Engine):
         """Initialize canonical persistence service.
@@ -126,6 +145,39 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 "flex_query_id": normalized_flex_query_id,
             },
         )
+
+    def db_raw_artifact_replay_candidate_list(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+    ) -> list[RawArtifactReplayCandidate]:
+        """List successful immutable raw artifacts eligible for replay."""
+
+        parameters = {
+            "account_id": self._db_canonical_validate_non_empty_text(account_id, "account_id"),
+            "period_key": self._db_canonical_validate_non_empty_text(period_key, "period_key"),
+            "flex_query_id": self._db_canonical_validate_non_empty_text(flex_query_id, "flex_query_id"),
+        }
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(self._RAW_ARTIFACT_REPLAY_CANDIDATE_QUERY),
+                    parameters,
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("raw artifact replay candidate read failed") from error
+
+        return [
+            RawArtifactReplayCandidate(
+                raw_artifact_id=row["raw_artifact_id"],
+                ingestion_run_id=row["ingestion_run_id"],
+                report_date_local=row["report_date_local"],
+                created_at_utc=row["created_at_utc"],
+                open_positions_present=row["open_positions_present"],
+            )
+            for row in rows
+        ]
 
     def db_raw_record_list_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
         """List raw rows for one ingestion run identity.

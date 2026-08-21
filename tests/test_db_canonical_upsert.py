@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import date, datetime, timezone
 from types import TracebackType
 from typing import Literal
 
@@ -23,7 +24,12 @@ from app.db.canonical_persistence import (
 )
 from app.config import config_load_settings
 from app.db.raw_persistence import SQLAlchemyRawPersistenceService
-from app.db.interfaces import RawArtifactPersistRequest, RawArtifactReference, RawRecordPersistRequest
+from app.db.interfaces import (
+    RawArtifactPersistRequest,
+    RawArtifactReference,
+    RawArtifactReplayCandidate,
+    RawRecordPersistRequest,
+)
 
 
 class _InstrumentBatchResultSpy:
@@ -94,6 +100,54 @@ class _InstrumentBatchEngineSpy:
         return self._connection
 
 
+class _ReplayReadResult:
+    """Expose configured mapping rows through the SQLAlchemy result chain."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> _ReplayReadResult:
+        return self
+
+    def all(self) -> list[dict[str, object]]:
+        return self._rows
+
+
+class _ReplayReadConnection:
+    """Capture replay discovery SQL without requiring a database connection."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+        self.executed_queries: list[str] = []
+
+    def __enter__(self) -> _ReplayReadConnection:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        _ = (exc_type, exc_value, traceback)
+        return False
+
+    def execute(self, statement: object, parameters: object) -> _ReplayReadResult:
+        _ = parameters
+        self.executed_queries.append(str(statement))
+        return _ReplayReadResult(self._rows)
+
+
+class _ReplayReadEngine:
+    """Return the configured replay-read connection."""
+
+    def __init__(self, connection: _ReplayReadConnection) -> None:
+        self._connection = connection
+
+    def connect(self) -> _ReplayReadConnection:
+        return self._connection
+
+
 def _instrument_upsert_request(
     account_id: str,
     conid: str,
@@ -119,6 +173,60 @@ def _instrument_upsert_request(
         currency="USD",
         description=description,
     )
+
+
+def test_replay_candidate_query_returns_successful_artifacts_in_source_order() -> None:
+    """Expose successful replay artifacts in deterministic source order."""
+
+    older_artifact_id = uuid.uuid4()
+    older_owner_id = uuid.uuid4()
+    newer_artifact_id = uuid.uuid4()
+    newer_owner_id = uuid.uuid4()
+    connection = _ReplayReadConnection([
+        {
+            "raw_artifact_id": older_artifact_id,
+            "ingestion_run_id": older_owner_id,
+            "report_date_local": date(2026, 2, 19),
+            "created_at_utc": datetime(2026, 2, 20, tzinfo=timezone.utc),
+            "open_positions_present": True,
+        },
+        {
+            "raw_artifact_id": newer_artifact_id,
+            "ingestion_run_id": newer_owner_id,
+            "report_date_local": date(2026, 8, 20),
+            "created_at_utc": datetime(2026, 8, 21, tzinfo=timezone.utc),
+            "open_positions_present": True,
+        },
+    ])
+    repository = SQLAlchemyCanonicalPersistenceService(_ReplayReadEngine(connection))
+
+    candidates = repository.db_raw_artifact_replay_candidate_list(
+        account_id="U1",
+        period_key="2026-02-20",
+        flex_query_id="query",
+    )
+
+    assert candidates == [
+        RawArtifactReplayCandidate(
+            raw_artifact_id=older_artifact_id,
+            ingestion_run_id=older_owner_id,
+            report_date_local=date(2026, 2, 19),
+            created_at_utc=datetime(2026, 2, 20, tzinfo=timezone.utc),
+            open_positions_present=True,
+        ),
+        RawArtifactReplayCandidate(
+            raw_artifact_id=newer_artifact_id,
+            ingestion_run_id=newer_owner_id,
+            report_date_local=date(2026, 8, 20),
+            created_at_utc=datetime(2026, 8, 21, tzinfo=timezone.utc),
+            open_positions_present=True,
+        ),
+    ]
+    query = connection.executed_queries[0]
+    assert "completed_ingestion_run_id" in query
+    assert "completion.status = 'success'" in query
+    assert "owner.status = 'success'" in query
+    assert "section_name = 'OpenPositions'" in query
 
 
 def test_batch_instrument_upsert_preserves_optional_metadata_when_later_request_omits_it() -> None:

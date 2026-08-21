@@ -19,6 +19,7 @@ from app.db.interfaces import (
     PnlSnapshotDailyRecord,
     PnlSnapshotDailyUpsertRequest,
     PositionLotUpsertRequest,
+    SnapshotCleanupCandidate,
 )
 
 
@@ -75,6 +76,32 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         + "AND (CAST(:report_date_to AS date) IS NULL OR report_date_local <= CAST(:report_date_to AS date)) "
         + "ORDER BY created_at_utc desc, pnl_snapshot_daily_id desc LIMIT :limit OFFSET :offset",
     }
+    _SNAPSHOT_UNSUPPORTED_SCOPE_CTE = (
+        "WITH scoped_owner_runs AS ("
+        "SELECT DISTINCT artifact.ingestion_run_id "
+        "FROM raw_artifact artifact "
+        "WHERE artifact.account_id = :account_id "
+        "AND artifact.period_key = :period_key "
+        "AND artifact.flex_query_id = :flex_query_id"
+        ") "
+    )
+    _SNAPSHOT_UNSUPPORTED_LIST_QUERY = (
+        _SNAPSHOT_UNSUPPORTED_SCOPE_CTE
+        + "SELECT snapshot.report_date_local, count(*) AS row_count "
+        "FROM pnl_snapshot_daily snapshot "
+        "WHERE snapshot.account_id = :account_id "
+        "AND snapshot.ingestion_run_id IN (SELECT ingestion_run_id FROM scoped_owner_runs) "
+        "AND NOT (snapshot.report_date_local = ANY(CAST(:supported_report_dates AS date[]))) "
+        "GROUP BY snapshot.report_date_local "
+        "ORDER BY snapshot.report_date_local"
+    )
+    _SNAPSHOT_UNSUPPORTED_DELETE_QUERY = (
+        _SNAPSHOT_UNSUPPORTED_SCOPE_CTE
+        + "DELETE FROM pnl_snapshot_daily snapshot "
+        "WHERE snapshot.account_id = :account_id "
+        "AND snapshot.ingestion_run_id IN (SELECT ingestion_run_id FROM scoped_owner_runs) "
+        "AND NOT (snapshot.report_date_local = ANY(CAST(:supported_report_dates AS date[])))"
+    )
 
     def __init__(self, engine: Engine):
         """Initialize ledger/snapshot database service.
@@ -693,6 +720,60 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("daily snapshot upsert failed") from error
 
+    def db_pnl_snapshot_daily_unsupported_list(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+        supported_report_dates: tuple[str, ...],
+    ) -> list[SnapshotCleanupCandidate]:
+        """List unsupported snapshot dates within one immutable replay scope."""
+
+        parameters = self._db_ledger_unsupported_snapshot_parameters(
+            account_id,
+            period_key,
+            flex_query_id,
+            supported_report_dates,
+        )
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(self._SNAPSHOT_UNSUPPORTED_LIST_QUERY),
+                    parameters,
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("unsupported daily snapshot list failed") from error
+
+        return [
+            SnapshotCleanupCandidate(
+                report_date_local=row["report_date_local"],
+                row_count=int(row["row_count"]),
+            )
+            for row in rows
+        ]
+
+    def db_pnl_snapshot_daily_unsupported_delete(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+        supported_report_dates: tuple[str, ...],
+    ) -> int:
+        """Delete unsupported snapshots within one immutable replay scope."""
+
+        parameters = self._db_ledger_unsupported_snapshot_parameters(
+            account_id,
+            period_key,
+            flex_query_id,
+            supported_report_dates,
+        )
+        try:
+            with self._engine.begin() as connection:
+                result = connection.execute(text(self._SNAPSHOT_UNSUPPORTED_DELETE_QUERY), parameters)
+        except SQLAlchemyError as error:
+            raise RuntimeError("unsupported daily snapshot delete failed") from error
+        return int(result.rowcount)
+
     def db_pnl_snapshot_daily_list(
         self,
         account_id: str,
@@ -781,6 +862,28 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("daily snapshot count failed") from error
         return int(value)
+
+    def _db_ledger_unsupported_snapshot_parameters(
+        self,
+        account_id: str,
+        period_key: str,
+        flex_query_id: str,
+        supported_report_dates: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Validate and prepare the shared unsupported-snapshot scope parameters."""
+
+        if not supported_report_dates:
+            raise ValueError("supported_report_dates must not be empty")
+
+        return {
+            "account_id": self._db_ledger_validate_non_empty_text(account_id, "account_id"),
+            "period_key": self._db_ledger_validate_non_empty_text(period_key, "period_key"),
+            "flex_query_id": self._db_ledger_validate_non_empty_text(flex_query_id, "flex_query_id"),
+            "supported_report_dates": [
+                self._db_ledger_validate_date_text(value, "supported_report_dates")
+                for value in supported_report_dates
+            ],
+        }
 
     def _db_ledger_validate_position_lot_upsert_request(self, request: PositionLotUpsertRequest) -> dict[str, Any]:
         """Validate one position-lot upsert request.
