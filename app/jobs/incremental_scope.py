@@ -23,7 +23,8 @@ def job_build_incremental_snapshot_scope(
     currencies: set[str] = set()
     for row in rows:
         if row.section_name in {"Trades", "CashTransactions", "CorporateActions", "OpenPositions"}:
-            conid = str(row.source_payload.get("conid", "")).strip()
+            raw_conid = row.source_payload.get("conid")
+            conid = raw_conid.strip() if isinstance(raw_conid, str) else ""
             if not conid:
                 return IncrementalSnapshotScope(
                     frozenset(),
@@ -32,7 +33,8 @@ def job_build_incremental_snapshot_scope(
                 )
             conids.add(conid)
         elif row.section_name == "ConversionRates":
-            currency = str(row.source_payload.get("fromCurrency", "")).strip().upper()
+            raw_currency = row.source_payload.get("fromCurrency")
+            currency = raw_currency.strip().upper() if isinstance(raw_currency, str) else ""
             if not currency:
                 return IncrementalSnapshotScope(
                     frozenset(),

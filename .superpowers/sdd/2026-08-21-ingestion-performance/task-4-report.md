@@ -31,3 +31,12 @@
 ## Concerns
 
 None.
+
+## Review fix round
+
+- Added focused coverage for non-string/null `conid` and `fromCurrency` values.
+- RED: the focused suite failed 2 tests because the existing `str()` coercion produced `"None"`/`"NONE"` and did not request a rebuild.
+- GREEN: required fields are now accepted only when they are strings; non-strings fail closed with the existing exact reasons and empty scope.
+- `set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_jobs_incremental_scope.py` → `5 passed in 0.28s`
+- `set -a; source /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q` → `127 passed in 3.92s`
+- `git diff --check` → clean.

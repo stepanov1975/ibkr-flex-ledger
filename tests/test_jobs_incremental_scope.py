@@ -7,7 +7,7 @@ from app.db.interfaces import RawRecordForCanonicalMapping
 from app.jobs.incremental_scope import IncrementalSnapshotScope, job_build_incremental_snapshot_scope
 
 
-def _raw_row(section_name: str, source_payload: dict[str, str]) -> RawRecordForCanonicalMapping:
+def _raw_row(section_name: str, source_payload: dict[str, object]) -> RawRecordForCanonicalMapping:
     run_id = uuid4()
     return RawRecordForCanonicalMapping(
         raw_record_id=uuid4(),
@@ -38,6 +38,20 @@ def test_scope_unions_event_conids_and_fx_source_currencies() -> None:
 def test_scope_requests_full_rebuild_when_relevant_key_is_missing() -> None:
     scope = job_build_incremental_snapshot_scope([_raw_row("Trades", {"symbol": "AAA"})])
     assert scope.full_rebuild_reason == "unscopable_changed_row:Trades:missing_conid"
+
+
+def test_scope_requests_full_rebuild_when_conid_is_not_a_string() -> None:
+    scope = job_build_incremental_snapshot_scope([_raw_row("Trades", {"conid": None})])
+    assert scope == IncrementalSnapshotScope(
+        frozenset(), frozenset(), "unscopable_changed_row:Trades:missing_conid"
+    )
+
+
+def test_scope_requests_full_rebuild_when_fx_source_currency_is_not_a_string() -> None:
+    scope = job_build_incremental_snapshot_scope([_raw_row("ConversionRates", {"fromCurrency": None})])
+    assert scope == IncrementalSnapshotScope(
+        frozenset(), frozenset(), "unscopable_changed_row:ConversionRates:missing_fromCurrency"
+    )
 
 
 def test_scope_is_empty_for_snapshot_irrelevant_sections() -> None:
