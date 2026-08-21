@@ -130,6 +130,88 @@ def _upsert_drop_database(admin_url: str, database_name: str) -> None:
         admin_engine.dispose()
 
 
+def _upsert_insert_delta_run_and_artifact(
+    connection,
+    *,
+    ingestion_run_id: str,
+    raw_artifact_id: str,
+    account_id: str,
+    flex_query_id: str,
+    created_at_utc: str,
+) -> None:
+    """Insert one delta-read ingestion run and its raw artifact fixture."""
+
+    payload_sha256 = f"sha-{raw_artifact_id}"
+    connection.execute(
+        text(
+            "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, "
+            "period_key, flex_query_id, started_at_utc, ended_at_utc) VALUES "
+            "(CAST(:run_id AS uuid), :account_id, 'manual', 'success', '2026-08', :flex_query_id, "
+            "CAST(:created AS timestamptz), CAST(:created AS timestamptz))"
+        ),
+        {
+            "run_id": ingestion_run_id,
+            "account_id": account_id,
+            "flex_query_id": flex_query_id,
+            "created": created_at_utc,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO raw_artifact (raw_artifact_id, ingestion_run_id, account_id, period_key, "
+            "flex_query_id, payload_sha256, report_date_local, source_payload, created_at_utc) VALUES "
+            "(CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), :account_id, '2026-08', :flex_query_id, :sha, "
+            "DATE '2026-08-21', CAST(:source_payload AS bytea), CAST(:created AS timestamptz))"
+        ),
+        {
+            "artifact_id": raw_artifact_id,
+            "run_id": ingestion_run_id,
+            "account_id": account_id,
+            "flex_query_id": flex_query_id,
+            "sha": payload_sha256,
+            "source_payload": payload_sha256,
+            "created": created_at_utc,
+        },
+    )
+
+
+def _upsert_insert_delta_raw_record(
+    connection,
+    *,
+    raw_record_id: str,
+    raw_artifact_id: str,
+    ingestion_run_id: str,
+    account_id: str,
+    flex_query_id: str,
+    source_row_ref: str,
+    source_payload: str,
+    created_at_utc: str,
+) -> None:
+    """Insert one raw-row fixture for delta-read tests."""
+
+    connection.execute(
+        text(
+            "INSERT INTO raw_record (raw_record_id, raw_artifact_id, ingestion_run_id, account_id, "
+            "period_key, flex_query_id, payload_sha256, report_date_local, section_name, "
+            "source_row_ref, source_payload, created_at_utc) VALUES "
+            "(CAST(:raw_record_id AS uuid), CAST(:artifact_id AS uuid), CAST(:run_id AS uuid), :account_id, "
+            "'2026-08', :flex_query_id, :sha, DATE '2026-08-21', 'Trades', :source_row_ref, "
+            "CAST(:source_payload AS jsonb), CAST(:created AS timestamptz))"
+        ),
+        {
+            "raw_record_id": raw_record_id,
+            "artifact_id": raw_artifact_id,
+            "run_id": ingestion_run_id,
+            "account_id": account_id,
+            "flex_query_id": flex_query_id,
+            "sha": f"sha-{raw_artifact_id}",
+            "source_row_ref": source_row_ref,
+            "source_payload": source_payload,
+            "created": created_at_utc,
+        },
+    )
+
+
 def _upsert_seed_dependencies(engine) -> tuple[str, str, str, str, str]:
     """Insert required foreign-key dependencies for canonical event rows.
 
@@ -592,6 +674,166 @@ def test_changed_rows_compare_with_immediate_predecessor() -> None:
         assert len(repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[1]))) == 1
         assert len(repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[2]))) == 1
         assert repository.db_raw_record_list_changed_for_run(uuid.UUID(run_ids[3])) == []
+
+        multiple_prior_run_id = str(uuid.uuid4())
+        multiple_current_run_id = str(uuid.uuid4())
+        multiple_prior_artifact_id = str(uuid.uuid4())
+        multiple_current_artifact_id = str(uuid.uuid4())
+        with engine.begin() as connection:
+            _upsert_insert_delta_run_and_artifact(
+                connection,
+                ingestion_run_id=multiple_prior_run_id,
+                raw_artifact_id=multiple_prior_artifact_id,
+                account_id="U_MULTIPLE",
+                flex_query_id="query-multiple",
+                created_at_utc="2026-08-21T00:01:00+00:00",
+            )
+            _upsert_insert_delta_run_and_artifact(
+                connection,
+                ingestion_run_id=multiple_current_run_id,
+                raw_artifact_id=multiple_current_artifact_id,
+                account_id="U_MULTIPLE",
+                flex_query_id="query-multiple",
+                created_at_utc="2026-08-21T00:02:00+00:00",
+            )
+            for source_row_ref, source_payload in (("trade-changed", '{"price":"10"}'), ("trade-unchanged", '{"price":"20"}')):
+                _upsert_insert_delta_raw_record(
+                    connection,
+                    raw_record_id=str(uuid.uuid4()),
+                    raw_artifact_id=multiple_prior_artifact_id,
+                    ingestion_run_id=multiple_prior_run_id,
+                    account_id="U_MULTIPLE",
+                    flex_query_id="query-multiple",
+                    source_row_ref=source_row_ref,
+                    source_payload=source_payload,
+                    created_at_utc="2026-08-21T00:01:00+00:00",
+                )
+            _upsert_insert_delta_raw_record(
+                connection,
+                raw_record_id=str(uuid.uuid4()),
+                raw_artifact_id=multiple_current_artifact_id,
+                ingestion_run_id=multiple_current_run_id,
+                account_id="U_MULTIPLE",
+                flex_query_id="query-multiple",
+                source_row_ref="trade-changed",
+                source_payload='{"price":"11"}',
+                created_at_utc="2026-08-21T00:02:00+00:00",
+            )
+            _upsert_insert_delta_raw_record(
+                connection,
+                raw_record_id=str(uuid.uuid4()),
+                raw_artifact_id=multiple_current_artifact_id,
+                ingestion_run_id=multiple_current_run_id,
+                account_id="U_MULTIPLE",
+                flex_query_id="query-multiple",
+                source_row_ref="trade-unchanged",
+                source_payload='{"price":"20"}',
+                created_at_utc="2026-08-21T00:02:00+00:00",
+            )
+
+        multiple_current_rows = repository.db_raw_record_list_changed_for_run(uuid.UUID(multiple_current_run_id))
+        assert [row.source_row_ref for row in multiple_current_rows] == ["trade-changed"]
+
+        tie_prior_run_id = str(uuid.uuid4())
+        tie_current_run_id = str(uuid.uuid4())
+        tie_prior_artifact_id = str(uuid.uuid4())
+        tie_current_artifact_id = str(uuid.uuid4())
+        with engine.begin() as connection:
+            _upsert_insert_delta_run_and_artifact(
+                connection,
+                ingestion_run_id=tie_prior_run_id,
+                raw_artifact_id=tie_prior_artifact_id,
+                account_id="U_TIE",
+                flex_query_id="query-tie",
+                created_at_utc="2026-08-21T00:03:00+00:00",
+            )
+            _upsert_insert_delta_run_and_artifact(
+                connection,
+                ingestion_run_id=tie_current_run_id,
+                raw_artifact_id=tie_current_artifact_id,
+                account_id="U_TIE",
+                flex_query_id="query-tie",
+                created_at_utc="2026-08-21T00:03:00+00:00",
+            )
+            _upsert_insert_delta_raw_record(
+                connection,
+                raw_record_id="00000000-0000-0000-0000-000000000001",
+                raw_artifact_id=tie_prior_artifact_id,
+                ingestion_run_id=tie_prior_run_id,
+                account_id="U_TIE",
+                flex_query_id="query-tie",
+                source_row_ref="trade-tie",
+                source_payload='{"price":"30"}',
+                created_at_utc="2026-08-21T00:03:00+00:00",
+            )
+            _upsert_insert_delta_raw_record(
+                connection,
+                raw_record_id="00000000-0000-0000-0000-000000000002",
+                raw_artifact_id=tie_current_artifact_id,
+                ingestion_run_id=tie_current_run_id,
+                account_id="U_TIE",
+                flex_query_id="query-tie",
+                source_row_ref="trade-tie",
+                source_payload='{"price":"30"}',
+                created_at_utc="2026-08-21T00:03:00+00:00",
+            )
+
+        assert repository.db_raw_record_list_changed_for_run(uuid.UUID(tie_current_run_id)) == []
+
+        partition_other_account_run_id = str(uuid.uuid4())
+        partition_other_query_run_id = str(uuid.uuid4())
+        partition_current_run_id = str(uuid.uuid4())
+        partition_other_account_artifact_id = str(uuid.uuid4())
+        partition_other_query_artifact_id = str(uuid.uuid4())
+        partition_current_artifact_id = str(uuid.uuid4())
+        with engine.begin() as connection:
+            for run_id, artifact_id, account_id, flex_query_id, created_at_utc in (
+                (
+                    partition_other_account_run_id,
+                    partition_other_account_artifact_id,
+                    "U_OTHER",
+                    "query-isolated",
+                    "2026-08-21T00:04:00+00:00",
+                ),
+                (
+                    partition_other_query_run_id,
+                    partition_other_query_artifact_id,
+                    "U_PARTITION",
+                    "query-other",
+                    "2026-08-21T00:05:00+00:00",
+                ),
+                (
+                    partition_current_run_id,
+                    partition_current_artifact_id,
+                    "U_PARTITION",
+                    "query-isolated",
+                    "2026-08-21T00:06:00+00:00",
+                ),
+            ):
+                _upsert_insert_delta_run_and_artifact(
+                    connection,
+                    ingestion_run_id=run_id,
+                    raw_artifact_id=artifact_id,
+                    account_id=account_id,
+                    flex_query_id=flex_query_id,
+                    created_at_utc=created_at_utc,
+                )
+                _upsert_insert_delta_raw_record(
+                    connection,
+                    raw_record_id=str(uuid.uuid4()),
+                    raw_artifact_id=artifact_id,
+                    ingestion_run_id=run_id,
+                    account_id=account_id,
+                    flex_query_id=flex_query_id,
+                    source_row_ref="trade-isolated",
+                    source_payload='{"price":"40"}',
+                    created_at_utc=created_at_utc,
+                )
+
+        partition_current_rows = repository.db_raw_record_list_changed_for_run(uuid.UUID(partition_current_run_id))
+        assert len(partition_current_rows) == 1
+        assert partition_current_rows[0].account_id == "U_PARTITION"
+        assert partition_current_rows[0].flex_query_id == "query-isolated"
     finally:
         if engine is not None:
             engine.dispose()

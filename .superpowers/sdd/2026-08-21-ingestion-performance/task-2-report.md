@@ -114,3 +114,55 @@ Output:
 ## Concerns
 
 No functional concerns. The supplied migration test's name did not match the required `-k ingestion_indexes` command, so the test name was extended to make that required command execute it. The supplied raw-artifact fixture reused `:sha` as text and `bytea`, which PostgreSQL rejects; both fixture uses are cast to `bytea` without changing the test's behavior.
+
+## Review fix round
+
+### Root cause and implementation
+
+The original delta regression created one row per ingestion run, used strictly increasing timestamps, and kept every row in a single account/query partition. It therefore did not exercise the required current-run cardinality, UUID tie-break, or partition predicates.
+
+`raw_record` has the concrete unique constraint `uq_raw_record_artifact_section_source_ref` on `(raw_artifact_id, section_name, source_row_ref)`. Multiple current-run rows are valid when they use distinct `source_row_ref` values under the same artifact, so the fix seeds exactly that valid shape.
+
+Added fixtures and assertions for:
+
+- a current run containing changed and unchanged rows with distinct source-row references, asserting that only the changed row is returned;
+- equal `created_at_utc` values with explicit ascending raw-record UUIDs, asserting the later UUID sees and excludes its same-payload predecessor;
+- earlier same-payload rows in another account and another query, asserting the first row in the current account/query partition is still returned.
+
+Production code was unchanged because all new cases pass the existing lateral predecessor query.
+
+### Files changed
+
+- `tests/test_db_canonical_upsert.py`
+- `.superpowers/sdd/2026-08-21-ingestion-performance/task-2-report.md`
+
+### Focused verification
+
+Command (loads `/stock_app/.env` without printing it):
+
+```bash
+set -a; . /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q tests/test_db_canonical_upsert.py
+```
+
+Output:
+
+```text
+.....                                                                    [100%]
+5 passed in 1.42s
+```
+
+### Full-suite verification
+
+Command (loads `/stock_app/.env` without printing it):
+
+```bash
+set -a; . /stock_app/.env; set +a; /stock_app/.venv/bin/pytest -q
+```
+
+Output:
+
+```text
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 3.94s
+```
