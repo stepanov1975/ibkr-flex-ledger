@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
 from app.adapters import AdapterFetchResult, FlexTokenInvalidError
@@ -15,6 +15,7 @@ from app.db.interfaces import (
     RawArtifactPersistResult,
     RawArtifactRecord,
     RawArtifactReference,
+    RawRecordForCanonicalMapping,
     RawRecordPersistResult,
 )
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
@@ -200,7 +201,7 @@ class _AdapterStub:
 class _RawPersistenceStub:
     """Raw persistence stub returning deterministic artifact and row counters."""
 
-    def __init__(self):
+    def __init__(self, artifact_deduplicated: bool = False):
         """Initialize deterministic raw persistence stub state.
 
         Returns:
@@ -211,6 +212,8 @@ class _RawPersistenceStub:
         """
 
         self.raw_artifact_id = uuid4()
+        self.artifact_deduplicated = artifact_deduplicated
+        self.raw_insert_calls = 0
 
     def db_raw_artifact_upsert(self, request) -> RawArtifactPersistResult:
         """Return deterministic artifact upsert result.
@@ -239,7 +242,7 @@ class _RawPersistenceStub:
                 source_payload=request.source_payload,
                 created_at_utc=datetime.now(timezone.utc),
             ),
-            deduplicated=False,
+            deduplicated=self.artifact_deduplicated,
         )
 
     def db_raw_record_insert_many(self, requests) -> RawRecordPersistResult:
@@ -255,6 +258,7 @@ class _RawPersistenceStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
+        self.raw_insert_calls += 1
         return RawRecordPersistResult(inserted_count=len(requests), deduplicated_count=0)
 
 
@@ -271,13 +275,18 @@ class _SnapshotServiceStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
-        self.calls: list[dict[str, str | None]] = []
+        self.calls: list[dict[str, object]] = []
+        self.build_calls = 0
+        self.affected_conids: frozenset[str] | None = None
+        self.affected_currencies: frozenset[str] | None = None
 
     def ledger_snapshot_build_and_persist(
         self,
         account_id: str,
         ingestion_run_id: str | None,
         report_date_local: str,
+        affected_conids: frozenset[str] | None = None,
+        affected_currencies: frozenset[str] | None = None,
     ):
         """Capture snapshot trigger parameters and return deterministic result.
 
@@ -293,11 +302,16 @@ class _SnapshotServiceStub:
             RuntimeError: This stub does not raise runtime errors.
         """
 
+        self.build_calls += 1
+        self.affected_conids = affected_conids
+        self.affected_currencies = affected_currencies
         self.calls.append(
             {
                 "account_id": account_id,
                 "ingestion_run_id": ingestion_run_id,
                 "report_date_local": report_date_local,
+                "affected_conids": affected_conids,
+                "affected_currencies": affected_currencies,
             }
         )
         return type(
@@ -586,8 +600,64 @@ def test_jobs_ingestion_orchestrator_canonical_stage_contains_duration_details()
     assert details["canonical_duration_ms"] >= 0
 
 
+def _raw_row(section_name: str, source_payload: dict[str, str]) -> RawRecordForCanonicalMapping:
+    """Build one deterministic raw row for orchestrator scope tests."""
+
+    run_id = uuid4()
+    return RawRecordForCanonicalMapping(
+        raw_record_id=uuid4(),
+        ingestion_run_id=run_id,
+        account_id="U1",
+        period_key="2026-08",
+        flex_query_id="query",
+        report_date_local=date(2026, 8, 21),
+        section_name=section_name,
+        source_row_ref=f"{section_name}:row-1",
+        source_payload=source_payload,
+    )
+
+
 class _CanonicalRepositoryStub:
     """Canonical repository stub implementing read and upsert behaviors."""
+
+    def __init__(self, changed_rows: list[RawRecordForCanonicalMapping] | None = None):
+        """Initialize deterministic changed rows and call counters."""
+
+        self.changed_rows = changed_rows if changed_rows is not None else [
+            RawRecordForCanonicalMapping(
+                raw_record_id=uuid4(),
+                ingestion_run_id=uuid4(),
+                account_id="U1",
+                period_key="2026-02",
+                flex_query_id="query",
+                report_date_local=date(2026, 2, 14),
+                section_name="Trades",
+                source_row_ref="Trades:Trade:transactionID=T1",
+                source_payload={
+                    "ibExecID": "EXEC-1",
+                    "transactionID": "T1",
+                    "conid": "265598",
+                    "buySell": "BUY",
+                    "quantity": "1",
+                    "tradePrice": "100",
+                    "currency": "USD",
+                    "reportDate": "2026-02-14",
+                    "dateTime": "2026-02-14T10:00:00+00:00",
+                },
+            )
+        ]
+        self.changed_read_calls = 0
+        self.bulk_upsert_calls = 0
+
+    def db_raw_record_list_changed_for_run(
+        self,
+        ingestion_run_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """Return configured changed rows and record the delta read."""
+
+        _ = ingestion_run_id
+        self.changed_read_calls += 1
+        return self.changed_rows
 
     def db_raw_record_list_for_run(self, ingestion_run_id):
         """Return one deterministic trade row for canonical mapping.
@@ -603,30 +673,7 @@ class _CanonicalRepositoryStub:
         """
 
         _ = ingestion_run_id
-        return [
-            type(
-                "RawRow",
-                (),
-                {
-                    "raw_record_id": uuid4(),
-                    "ingestion_run_id": uuid4(),
-                    "section_name": "Trades",
-                    "source_row_ref": "Trades:Trade:transactionID=T1",
-                    "report_date_local": None,
-                    "source_payload": {
-                        "ibExecID": "EXEC-1",
-                        "transactionID": "T1",
-                        "conid": "265598",
-                        "buySell": "BUY",
-                        "quantity": "1",
-                        "tradePrice": "100",
-                        "currency": "USD",
-                        "reportDate": "2026-02-14",
-                        "dateTime": "2026-02-14T10:00:00+00:00",
-                    },
-                },
-            )()
-        ]
+        return self.changed_rows
 
     def db_canonical_instrument_upsert_many(
         self, requests: list[CanonicalInstrumentUpsertRequest]
@@ -669,10 +716,26 @@ class _CanonicalRepositoryStub:
         """
 
         _ = (trade_requests, cashflow_requests, fx_requests, corp_action_requests)
+        self.bulk_upsert_calls += 1
 
 
 class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
     """Canonical repository stub returning no run-scoped rows."""
+
+    def __init__(self):
+        """Initialize with an empty changed-row result."""
+
+        super().__init__(changed_rows=[])
+
+    def db_raw_record_list_changed_for_run(
+        self,
+        ingestion_run_id: UUID,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """Return no changed rows for normal ingestion."""
+
+        _ = ingestion_run_id
+        self.changed_read_calls += 1
+        return []
 
     def db_raw_record_list_for_run(self, ingestion_run_id):
         """Return no rows for run-scoped canonical mapping.
@@ -689,6 +752,224 @@ class _CanonicalRepositoryEmptyRunStub(_CanonicalRepositoryStub):
 
         _ = ingestion_run_id
         return []
+
+
+def _build_orchestrator(
+    ingestion_repository: _RepositoryStub,
+    raw: _RawPersistenceStub | None = None,
+    canonical: _CanonicalRepositoryStub | None = None,
+    snapshot: _SnapshotServiceStub | None = None,
+) -> IngestionJobOrchestrator:
+    """Build an orchestrator with all semantic services configured."""
+
+    payload = (
+        b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
+        b'<Trades><Trade ibExecID="DUP" /></Trades>'
+        b"<OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    return IngestionJobOrchestrator(
+        ingestion_repository=ingestion_repository,
+        raw_persistence_repository=raw or _RawPersistenceStub(),
+        flex_adapter=_AdapterStub(payload),
+        config=IngestionOrchestratorConfig(account_id="U1", flex_query_id="query"),
+        canonical_repository=canonical or _CanonicalRepositoryStub(),
+        snapshot_service=snapshot or _SnapshotServiceStub(),
+    )
+
+
+def _completed_stage_details(repository: _RepositoryStub) -> dict[str, dict[str, object]]:
+    """Index completed stage detail payloads by stage name."""
+
+    diagnostics = repository.finalize_calls[-1]["diagnostics"]
+    assert isinstance(diagnostics, list)
+    return {
+        str(event["stage"]): event["details"]
+        for event in diagnostics
+        if event.get("status") == "completed" and isinstance(event.get("details"), dict)
+    }
+
+
+def test_exact_duplicate_skips_raw_canonical_and_snapshot_work() -> None:
+    """Stop semantic work after an existing artifact identity is returned."""
+
+    repository = _RepositoryStub()
+    raw = _RawPersistenceStub(artifact_deduplicated=True)
+    canonical = _CanonicalRepositoryStub()
+    snapshot = _SnapshotServiceStub()
+    orchestrator = _build_orchestrator(repository, raw=raw, canonical=canonical, snapshot=snapshot)
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    assert result.status == "success"
+    assert raw.raw_insert_calls == 0
+    assert canonical.changed_read_calls == 0
+    assert canonical.bulk_upsert_calls == 0
+    assert snapshot.build_calls == 0
+    details = _completed_stage_details(repository)
+    assert details["persist"]["raw_persistence_skip_reason"] == "exact_duplicate_artifact"
+    assert details["persist"]["raw_record_count"] == 0
+    assert details["persist"]["raw_record_deduplicated_count"] == 7
+    assert details["canonical_mapping"]["canonical_skip_reason"] == "exact_duplicate_artifact"
+    assert details["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
+
+
+def test_distinct_artifact_reads_changed_rows_and_passes_incremental_scope() -> None:
+    """Map only changed rows and pass their immutable scope to snapshots."""
+
+    repository = _RepositoryStub()
+    canonical = _CanonicalRepositoryStub(
+        changed_rows=[
+            _raw_row("Trades", {"conid": "100"}),
+            _raw_row("ConversionRates", {"fromCurrency": "EUR"}),
+        ]
+    )
+    snapshot = _SnapshotServiceStub()
+
+    _build_orchestrator(repository, canonical=canonical, snapshot=snapshot).job_execute("ingestion_run")
+
+    assert canonical.changed_read_calls == 1
+    assert snapshot.affected_conids == frozenset({"100"})
+    assert snapshot.affected_currencies == frozenset({"EUR"})
+    assert _completed_stage_details(repository)["snapshot"]["snapshot_scope_mode"] == "incremental"
+
+
+def test_unscopable_changed_row_falls_back_to_full_snapshot() -> None:
+    """Use an explicit full rebuild when a changed semantic row is unsafe to scope."""
+
+    repository = _RepositoryStub()
+    canonical = _CanonicalRepositoryStub(changed_rows=[_raw_row("Trades", {"symbol": "AAA"})])
+    snapshot = _SnapshotServiceStub()
+
+    _build_orchestrator(repository, canonical=canonical, snapshot=snapshot).job_execute("ingestion_run")
+
+    assert snapshot.affected_conids is None
+    assert snapshot.affected_currencies is None
+    details = _completed_stage_details(repository)["snapshot"]
+    assert details["snapshot_scope_mode"] == "full_fallback"
+    assert details["snapshot_full_rebuild_reason"] == "unscopable_changed_row:Trades:missing_conid"
+
+
+def test_ingestion_completed_stages_include_all_monotonic_durations() -> None:
+    """Expose every new orchestrator duration as a non-negative integer."""
+
+    repository = _RepositoryStub()
+
+    _build_orchestrator(repository).job_execute("ingestion_run")
+
+    details = _completed_stage_details(repository)
+    expected = {
+        "preflight": "preflight_duration_ms",
+        "xml_extraction": "xml_extraction_duration_ms",
+        "persist": "raw_persistence_duration_ms",
+        "canonical_mapping": "canonical_duration_ms",
+        "snapshot": "snapshot_duration_ms",
+    }
+    for stage, key in expected.items():
+        duration_ms = details[stage][key]
+        assert isinstance(duration_ms, int)
+        assert duration_ms >= 0
+    artifact_persistence_duration_ms = details["persist"]["artifact_persistence_duration_ms"]
+    canonical_raw_read_duration_ms = details["canonical_mapping"]["canonical_raw_read_duration_ms"]
+    assert isinstance(artifact_persistence_duration_ms, int)
+    assert artifact_persistence_duration_ms >= 0
+    assert isinstance(canonical_raw_read_duration_ms, int)
+    assert canonical_raw_read_duration_ms >= 0
+
+
+def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_absent() -> None:
+    """Keep the established full snapshot call when canonical wiring is omitted."""
+
+    repository = _RepositoryStub()
+    snapshot = _SnapshotServiceStub()
+    payload = (
+        b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository,
+        raw_persistence_repository=_RawPersistenceStub(),
+        flex_adapter=_AdapterStub(payload),
+        config=IngestionOrchestratorConfig(account_id="U1", flex_query_id="query"),
+        snapshot_service=snapshot,
+    )
+
+    result = orchestrator.job_execute("ingestion_run")
+
+    assert result.status == "success"
+    assert snapshot.build_calls == 1
+    assert snapshot.affected_conids is None
+    assert snapshot.affected_currencies is None
+
+
+def test_exact_duplicate_skips_snapshot_when_canonical_repository_is_absent() -> None:
+    """Skip configured snapshot work without requiring canonical wiring."""
+
+    repository = _RepositoryStub()
+    raw = _RawPersistenceStub(artifact_deduplicated=True)
+    snapshot = _SnapshotServiceStub()
+    payload = (
+        b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository,
+        raw_persistence_repository=raw,
+        flex_adapter=_AdapterStub(payload),
+        config=IngestionOrchestratorConfig(account_id="U1", flex_query_id="query"),
+        snapshot_service=snapshot,
+    )
+
+    result = orchestrator.job_execute("ingestion_run")
+
+    assert result.status == "success"
+    assert raw.raw_insert_calls == 0
+    assert snapshot.build_calls == 0
+    assert _completed_stage_details(repository)["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
+
+
+def test_empty_changed_row_scope_skips_configured_snapshot_service() -> None:
+    """Complete with a no-op when no changed row affects snapshot state."""
+
+    repository = _RepositoryStub()
+    canonical = _CanonicalRepositoryStub(changed_rows=[])
+    snapshot = _SnapshotServiceStub()
+
+    result = _build_orchestrator(repository, canonical=canonical, snapshot=snapshot).job_execute("ingestion_run")
+
+    assert result.status == "success"
+    assert snapshot.build_calls == 0
+    assert _completed_stage_details(repository)["snapshot"]["snapshot_scope_mode"] == "skipped"
+
+
+def test_absent_snapshot_service_retains_skip_diagnostic() -> None:
+    """Keep the established skip reason for a duplicate when snapshot wiring is omitted."""
+
+    repository = _RepositoryStub()
+    payload = (
+        b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
+        b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"</FlexStatement></FlexStatements></FlexQueryResponse>"
+    )
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository,
+        raw_persistence_repository=_RawPersistenceStub(artifact_deduplicated=True),
+        flex_adapter=_AdapterStub(payload),
+        config=IngestionOrchestratorConfig(account_id="U1", flex_query_id="query"),
+        canonical_repository=_CanonicalRepositoryStub(),
+    )
+
+    result = orchestrator.job_execute("ingestion_run")
+
+    assert result.status == "success"
+    details = _completed_stage_details(repository)["snapshot"]
+    assert details["snapshot_skip_reason"] == "snapshot_service_not_configured"
 
 
 def test_jobs_ingestion_orchestrator_canonical_stage_skips_when_run_has_no_new_raw_rows() -> None:
