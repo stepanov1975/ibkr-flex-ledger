@@ -194,16 +194,31 @@ class StockLedgerSnapshotService:
         instrument_keys = set(trades_by_instrument) | set(cashflows_by_instrument) | set(open_position_valuation_map)
         if instrument_ids is not None:
             instrument_keys.intersection_update(instrument_ids)
+        instrument_asset_categories = self._repository.db_ledger_instrument_asset_category_map(
+            account_id=normalized_account_id,
+            instrument_ids=tuple(sorted(instrument_keys)),
+        )
+        missing_metadata = instrument_keys - set(instrument_asset_categories)
+        if missing_metadata:
+            raise RuntimeError(
+                "missing instrument asset-category metadata for "
+                f"instrument_ids={sorted(missing_metadata)}"
+            )
 
         for instrument_id in sorted(instrument_keys):
             instrument_trades = trades_by_instrument.get(instrument_id, [])
             instrument_cashflows = cashflows_by_instrument.get(instrument_id, [])
             valuation_record = open_position_valuation_map.get(instrument_id)
             has_canonical_history = bool(instrument_trades or instrument_cashflows)
+            broker_eligible = instrument_asset_categories[instrument_id].strip().upper() not in {
+                "CASH",
+                "FX",
+            }
             converted_trades: list[FifoTradeFillInput] = []
             fx_sources: set[str] = set()
             missing_fx = False
             for trade in instrument_trades:
+                contract_multiplier = self._trade_contract_multiplier(trade)
                 adjustment_factor = self._trade_adjustment_factor(
                     trade,
                     corporate_actions_by_instrument.get(instrument_id, []),
@@ -226,7 +241,12 @@ class StockLedgerSnapshotService:
                         trade_timestamp_utc=trade.trade_timestamp_utc.isoformat(),
                         side=trade.side,
                         quantity=Decimal(trade.quantity) * adjustment_factor,
-                        price=Decimal(trade.price) * trade_fx_rate / adjustment_factor,
+                        price=(
+                            Decimal(trade.price)
+                            * contract_multiplier
+                            * trade_fx_rate
+                            / adjustment_factor
+                        ),
                         fees=self._trade_fee_total(trade) * trade_fx_rate,
                         withholding_tax=Decimal("0"),
                     )
@@ -283,7 +303,7 @@ class StockLedgerSnapshotService:
             missing_valuation = False
             valuation_source = "no_open_position"
 
-            if ingestion_run_id is None:
+            if ingestion_run_id is None or not broker_eligible:
                 local_mark_price, valuation_source = self._resolve_mark_price(
                     trades=instrument_trades,
                     valuation_record=None,
@@ -365,12 +385,28 @@ class StockLedgerSnapshotService:
                     )
 
                     broker_unrealized = self._decimal_or_none(valuation_record.broker_unrealized_pnl)
-                    if broker_unrealized is not None and valuation_fx_rate is not None:
-                        unrealized_pnl = broker_unrealized * valuation_fx_rate
-                        valuation_source = "openpositions_unrealized_pnl"
-                    elif broker_position_quantity == Decimal("0"):
+                    if broker_position_quantity == Decimal("0"):
                         unrealized_pnl = Decimal("0")
                         valuation_source = "no_open_position"
+                    elif quantities_match:
+                        mark_price = self._decimal_or_none(valuation_record.mark_price)
+                        multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
+                        cost_basis = self._decimal_or_none(fifo_cost_basis)
+                        if (
+                            mark_price is not None
+                            and multiplier is not None
+                            and cost_basis is not None
+                            and valuation_fx_rate is not None
+                        ):
+                            market_value = broker_position_quantity * mark_price * multiplier * valuation_fx_rate
+                            unrealized_pnl = market_value - cost_basis
+                            valuation_source = "openpositions_mark_price"
+                        else:
+                            missing_valuation = True
+                            valuation_source = "EOD_MARK_MISSING_ALL_SOURCES"
+                    elif broker_unrealized is not None and valuation_fx_rate is not None:
+                        unrealized_pnl = broker_unrealized * valuation_fx_rate
+                        valuation_source = "openpositions_unrealized_pnl"
                     else:
                         mark_price = self._decimal_or_none(valuation_record.mark_price)
                         multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
@@ -520,11 +556,12 @@ class StockLedgerSnapshotService:
             return Decimal("0"), "no_open_position"
         if valuation_record is not None and Decimal(valuation_record.position_qty) == position_quantity:
             mark_price = self._positive_decimal_or_none(valuation_record.mark_price)
-            if mark_price is not None:
-                return mark_price, "openpositions_mark_price"
+            multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
+            if mark_price is not None and multiplier is not None:
+                return mark_price * multiplier, "openpositions_mark_price"
 
         same_day_close_prices = [
-            Decimal(trade.close_price)
+            Decimal(trade.close_price) * self._trade_contract_multiplier(trade)
             for trade in trades
             if trade.report_date_local == report_date_local and trade.close_price is not None
         ]
@@ -533,7 +570,11 @@ class StockLedgerSnapshotService:
 
         eligible_trades = [trade for trade in trades if trade.report_date_local <= report_date_local]
         if eligible_trades:
-            return Decimal(eligible_trades[-1].price), "trades_last_trade_price"
+            selected_trade = eligible_trades[-1]
+            return (
+                Decimal(selected_trade.price) * self._trade_contract_multiplier(selected_trade),
+                "trades_last_trade_price",
+            )
         return None, "EOD_MARK_MISSING_ALL_SOURCES"
 
     def _resolve_fx_rate(
@@ -662,6 +703,20 @@ class StockLedgerSnapshotService:
                     raise ValueError("corporate-action adjustment_factor must be positive")
                 factor *= action_factor
         return factor
+
+    def _trade_contract_multiplier(self, trade: LedgerTradeFillRecord) -> Decimal:
+        """Resolve a validated raw contract multiplier for FIFO unit economics."""
+
+        multiplier = self._positive_decimal_or_none(trade.multiplier)
+        if trade.asset_category.strip().upper() == "OPT":
+            if multiplier is None:
+                raise ValueError("OPT trade multiplier must be positive")
+            return multiplier
+        if trade.multiplier is None:
+            return Decimal("1")
+        if multiplier is None:
+            raise ValueError("trade multiplier must be positive")
+        return multiplier
 
     def _trade_fee_total(self, trade_row: LedgerTradeFillRecord) -> Decimal:
         """Build combined trade-fee impact from fees and commission fields.

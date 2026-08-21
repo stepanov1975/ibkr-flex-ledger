@@ -25,10 +25,38 @@ The backup command runs `pg_basebackup`, verifies its manifest with `pg_verifyba
 ## Broker position repair by immutable replay
 
 Explicit reprocess rebuilds canonical events and daily snapshots from stored raw artifacts;
-it does not contact IBKR. Unlike normal replay, an explicit target may delete derived
-snapshot dates that are not backed by a selected artifact in that exact
-account/period/query scope. Complete the verified backup step before running any explicit
-repair.
+it does not contact IBKR. The ordinary scoped HTTP reprocess endpoint is deliberately
+non-cleanup. Only the operator CLI path below may remove derived snapshot dates that are not
+backed by a selected artifact in the exact account/period/query scope, and it may be used only
+after the backup and cleanup-candidate report have been recorded.
+
+### 0. Pin the reviewed checkout and Compose project
+
+Run the entire repair from one shell. This wrapper always addresses the existing `stock_app`
+Compose project, loads `/stock_app/.env`, and builds from the reviewed worktree rather than
+from the main checkout. Replace `REVIEWED_COMMIT` with the commit approved for the repair and
+do not continue unless every check succeeds:
+
+```bash
+REPAIR_WORKTREE=/stock_app/.worktrees/broker-position-reconciliation
+REVIEWED_COMMIT='replace-with-reviewed-commit-sha'
+
+test "$(git -C "$REPAIR_WORKTREE" branch --show-current)" = 'codex/broker-position-reconciliation'
+test "$(git -C "$REPAIR_WORKTREE" rev-parse HEAD)" = "$REVIEWED_COMMIT"
+
+repair_compose() {
+    docker compose \
+        --project-name stock_app \
+        --env-file /stock_app/.env \
+        --file "$REPAIR_WORKTREE/docker-compose.yml" \
+        "$@"
+}
+
+repair_compose config --quiet
+```
+
+If a new shell is opened, redefine and revalidate the wrapper before issuing another command.
+Do not run a bare `docker compose` command during this repair.
 
 ### 1. Create and verify the repair backup
 
@@ -37,7 +65,7 @@ read its catalog, and record its checksum and exact path:
 
 ```bash
 repair_stamp=$(date -u +%Y%m%dT%H%M%SZ)
-docker compose exec -T -e REPAIR_STAMP="$repair_stamp" postgres sh -eu -c '
+repair_compose exec -T -e REPAIR_STAMP="$repair_stamp" postgres sh -eu -c '
 dump="/backups/broker-position-repair-$REPAIR_STAMP.dump"
 pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --file="$dump"
 pg_restore --list "$dump" >/dev/null
@@ -48,13 +76,13 @@ printf "%s\n" "$dump"
 
 Do not continue if `pg_dump`, `pg_restore --list`, or checksum creation fails.
 
-### 2. Record immutable counts before repair
+### 2. Record immutable counts, selected artifacts, and cleanup candidates
 
 Run this query before reprocess and again after each replay. The two counts must remain
 identical; explicit reprocess must not insert, update, or delete raw history.
 
 ```bash
-docker compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
+repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
 SELECT 'raw_artifact' AS relation, count(*) AS row_count FROM raw_artifact
 UNION ALL
 SELECT 'raw_record', count(*) FROM raw_record
@@ -62,113 +90,226 @@ ORDER BY relation;
 SQL
 ```
 
-Also record the target scopes and actual artifact dates before choosing commands. Select an
-exact `account_id`, `period_key`, and `flex_query_id` tuple from this output; do not infer the
-account from the dates:
-
-```sql
-SELECT account_id, period_key, flex_query_id, report_date_local, count(*) AS artifacts
-FROM raw_artifact
-GROUP BY account_id, period_key, flex_query_id, report_date_local
-ORDER BY account_id, period_key, flex_query_id, report_date_local;
-```
-
-### 3. Reprocess each scope explicitly
-
-Run known scopes in chronological period order. Set `REPAIR_ACCOUNT_ID` and `TARGET_QUERY` to
-the exact values recorded in step 2. The CLI deliberately retains its existing period/query
-contract, so each command first verifies that the app container's ambient
-`ACCOUNT_ID` equals the explicit `REPAIR_ACCOUNT_ID` and aborts before cleanup on any mismatch.
-These commands use only PostgreSQL raw artifacts and do not invoke the Flex adapter:
+Discover scopes from exactly the artifacts production can replay. A non-null completion
+pointer is eligible only when that completion run succeeded; a legacy null pointer is
+eligible only when the immutable owner run succeeded. The final ranking exactly matches
+production's newest-artifact-per-report-date selection. Record this output and require
+`open_positions_present = true` for every selected row:
 
 ```bash
-REPAIR_ACCOUNT_ID='replace-with-recorded-account-id'
-TARGET_QUERY='replace-with-recorded-flex-query-id'
-
-docker compose exec -T -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" -e TARGET_QUERY="$TARGET_QUERY" app sh -eu -c '
-if ! test "$ACCOUNT_ID" = "$REPAIR_ACCOUNT_ID"; then
-    printf "account mismatch: configured=%s expected=%s\n" "$ACCOUNT_ID" "$REPAIR_ACCOUNT_ID" >&2
-    exit 1
-fi
-python -m app.main reprocess-run --period-key 2026-02-20 --flex-query-id "$TARGET_QUERY"
-'
-
-docker compose exec -T -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" -e TARGET_QUERY="$TARGET_QUERY" app sh -eu -c '
-if ! test "$ACCOUNT_ID" = "$REPAIR_ACCOUNT_ID"; then
-    printf "account mismatch: configured=%s expected=%s\n" "$ACCOUNT_ID" "$REPAIR_ACCOUNT_ID" >&2
-    exit 1
-fi
-python -m app.main reprocess-run --period-key 2026-08-21 --flex-query-id "$TARGET_QUERY"
-'
+repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
+WITH eligible_artifact AS (
+    SELECT artifact.raw_artifact_id, artifact.ingestion_run_id,
+           artifact.completed_ingestion_run_id, artifact.account_id,
+           artifact.period_key, artifact.flex_query_id, artifact.report_date_local,
+           artifact.created_at_utc,
+           count(*) OVER (
+               PARTITION BY artifact.account_id, artifact.period_key,
+                            artifact.flex_query_id, artifact.report_date_local
+           ) AS eligible_artifact_count,
+           row_number() OVER (
+               PARTITION BY artifact.account_id, artifact.period_key,
+                            artifact.flex_query_id, artifact.report_date_local
+               ORDER BY artifact.created_at_utc DESC, artifact.raw_artifact_id DESC
+           ) AS report_date_rank
+    FROM raw_artifact artifact
+    JOIN ingestion_run owner
+      ON owner.ingestion_run_id = artifact.ingestion_run_id
+    LEFT JOIN ingestion_run completion
+      ON completion.ingestion_run_id = artifact.completed_ingestion_run_id
+    WHERE artifact.report_date_local IS NOT NULL
+      AND (
+          (artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success')
+          OR
+          (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')
+      )
+)
+SELECT eligible.account_id, eligible.period_key, eligible.flex_query_id,
+       eligible.report_date_local, eligible.raw_artifact_id,
+       eligible.ingestion_run_id, eligible.completed_ingestion_run_id,
+       eligible.eligible_artifact_count,
+       EXISTS (
+           SELECT 1
+           FROM raw_record position_row
+           WHERE position_row.raw_artifact_id = eligible.raw_artifact_id
+             AND position_row.section_name = 'OpenPositions'
+       ) AS open_positions_present
+FROM eligible_artifact eligible
+WHERE eligible.report_date_rank = 1
+ORDER BY eligible.account_id, eligible.period_key, eligible.flex_query_id,
+         eligible.report_date_local;
+SQL
 ```
 
-For another scope, replace the expected account, `--period-key`, and query with all three
-values from one row of the scope query; never mix values from different rows, use an inferred
-date, or omit one side of the CLI's explicit period/query pair. Require the account guard to
-pass before every cleanup-capable command. Rerun the raw-count query after the commands and
-require exact equality with the recorded before-state.
-
-Inspect the new reprocess diagnostics. Snapshot events expose
-`broker_position_match_count`, `broker_position_mismatch_count`,
-`broker_only_position_count`, and `broker_absent_nonzero_fifo_count`; raw-read events list
-the selected actual report dates, and cleanup events list candidates and deleted rows. Run
-this query with the same three `psql -v` account/period/query bindings shown in step 4.
-
-```sql
-SELECT run.ingestion_run_id, event->>'stage' AS stage, event->'details' AS details
-FROM ingestion_run run
-CROSS JOIN LATERAL jsonb_array_elements(run.diagnostics) AS event
-WHERE run.run_type = 'reprocess'
-  AND run.account_id = :'account_id'
-  AND run.period_key = :'period_key'
-  AND run.flex_query_id = :'flex_query_id'
-  AND event->>'stage' IN ('raw_read', 'snapshot', 'snapshot_cleanup')
-ORDER BY run.started_at_utc DESC, run.ingestion_run_id, event->>'at_utc';
-```
-
-### 4. Verify broker authority and replay idempotence
-
-For each repaired scope, set all three explicit values and run the verification query. It
-selects the newest successful artifact for every actual report date within that exact scope,
-not one globally newest artifact. Each selected date must return all three discrepancy rows,
-and every count must be zero.
+Choose one exact tuple from that output, never values inferred from dates, then generate the
+pre-delete report with the same selection and cleanup predicates as production. This report
+uses every raw-artifact owner run in the explicit scope for cleanup discovery, while supported
+dates come only from the eligible selected artifacts. Save the complete output. A status of
+`ABORT_EMPTY_SELECTION` is a hard stop; an empty selection must never be treated as success.
 
 ```bash
 REPAIR_ACCOUNT_ID='replace-with-recorded-account-id'
 TARGET_PERIOD='replace-with-recorded-period-key'
 TARGET_QUERY='replace-with-recorded-flex-query-id'
 
-docker compose exec -T \
-  -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" \
-  -e TARGET_PERIOD="$TARGET_PERIOD" \
-  -e TARGET_QUERY="$TARGET_QUERY" \
-  postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
-    -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
-WITH ranked_artifact AS (
-    SELECT artifact.raw_artifact_id,
-           artifact.account_id,
-           artifact.report_date_local,
+repair_compose exec -T -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" app sh -eu -c '
+test "$ACCOUNT_ID" = "$REPAIR_ACCOUNT_ID" || {
+    printf "account mismatch: configured=%s expected=%s\n" "$ACCOUNT_ID" "$REPAIR_ACCOUNT_ID" >&2
+    exit 1
+}
+'
+
+repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+  -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
+CREATE TEMP TABLE repair_selected_artifact AS
+WITH eligible_artifact AS (
+    SELECT artifact.raw_artifact_id, artifact.ingestion_run_id,
+           artifact.report_date_local, artifact.created_at_utc,
            row_number() OVER (
                PARTITION BY artifact.report_date_local
                ORDER BY artifact.created_at_utc DESC, artifact.raw_artifact_id DESC
-           ) AS artifact_rank
+           ) AS report_date_rank
     FROM raw_artifact artifact
-    JOIN ingestion_run completed
-      ON completed.ingestion_run_id = artifact.completed_ingestion_run_id
-     AND completed.status = 'success'
+    JOIN ingestion_run owner
+      ON owner.ingestion_run_id = artifact.ingestion_run_id
+    LEFT JOIN ingestion_run completion
+      ON completion.ingestion_run_id = artifact.completed_ingestion_run_id
     WHERE artifact.account_id = :'account_id'
       AND artifact.period_key = :'period_key'
       AND artifact.flex_query_id = :'flex_query_id'
       AND artifact.report_date_local IS NOT NULL
-), selected_artifact AS (
-    SELECT raw_artifact_id, account_id, report_date_local
-    FROM ranked_artifact
-    WHERE artifact_rank = 1
-), broker AS (
+      AND (
+          (artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success')
+          OR
+          (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')
+      )
+)
+SELECT eligible.raw_artifact_id, eligible.ingestion_run_id,
+       eligible.report_date_local,
+       EXISTS (
+           SELECT 1
+           FROM raw_record position_row
+           WHERE position_row.raw_artifact_id = eligible.raw_artifact_id
+             AND position_row.section_name = 'OpenPositions'
+       ) AS open_positions_present
+FROM eligible_artifact eligible
+WHERE eligible.report_date_rank = 1;
+
+CREATE TEMP TABLE repair_cleanup_candidate AS
+WITH scoped_owner_run AS (
+    SELECT DISTINCT artifact.ingestion_run_id
+    FROM raw_artifact artifact
+    WHERE artifact.account_id = :'account_id'
+      AND artifact.period_key = :'period_key'
+      AND artifact.flex_query_id = :'flex_query_id'
+)
+SELECT snapshot.report_date_local, count(*) AS row_count
+FROM pnl_snapshot_daily snapshot
+WHERE snapshot.account_id = :'account_id'
+  AND snapshot.ingestion_run_id IN (SELECT ingestion_run_id FROM scoped_owner_run)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM repair_selected_artifact selected
+      WHERE selected.report_date_local = snapshot.report_date_local
+  )
+GROUP BY snapshot.report_date_local;
+
+SELECT :'account_id' AS account_id, :'period_key' AS period_key,
+       :'flex_query_id' AS flex_query_id,
+       count(*) AS selected_artifact_count,
+       CASE WHEN count(*) = 0 THEN 'ABORT_EMPTY_SELECTION'
+            WHEN NOT bool_and(selected.open_positions_present)
+                THEN 'ABORT_MISSING_OPENPOSITIONS'
+            ELSE 'READY_FOR_OPERATOR_CLI' END AS operator_status
+FROM repair_selected_artifact selected;
+
+SELECT selected.report_date_local, selected.raw_artifact_id,
+       selected.ingestion_run_id, selected.open_positions_present
+FROM repair_selected_artifact selected
+ORDER BY selected.report_date_local;
+
+SELECT report_date_local AS unsupported_date, row_count
+FROM repair_cleanup_candidate
+ORDER BY report_date_local;
+SQL
+```
+
+### 3. Deploy reviewed code and run the operator-only replay
+
+Build and replace only the `app` service in the pinned project. This uses the Compose file's
+worktree-relative build context, so it cannot build stale code from the main checkout:
+
+```bash
+repair_compose up -d --build app
+repair_compose ps
+curl --fail --silent http://127.0.0.1:8000/health
+```
+
+For each recorded scope, in chronological period order, rerun the account guard and then the
+CLI. This is the only cleanup-capable entry point. Do not substitute the ordinary HTTP
+reprocess route; that route intentionally replays without deletion. The CLI reads PostgreSQL
+raw artifacts only and does not invoke the Flex adapter:
+
+```bash
+repair_compose exec -T -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" -e TARGET_PERIOD="$TARGET_PERIOD" -e TARGET_QUERY="$TARGET_QUERY" app sh -eu -c '
+if ! test "$ACCOUNT_ID" = "$REPAIR_ACCOUNT_ID"; then
+    printf "account mismatch: configured=%s expected=%s\n" "$ACCOUNT_ID" "$REPAIR_ACCOUNT_ID" >&2
+    exit 1
+fi
+python -m app.main reprocess-run --period-key "$TARGET_PERIOD" --flex-query-id "$TARGET_QUERY"
+'
+```
+
+Do not run another scope until the command exits zero. Rerun the immutable-count query and
+require exact equality with step 2. Retain the new reprocess run identifier and its `raw_read`,
+`snapshot`, and `snapshot_cleanup` diagnostics.
+
+### 4. Verify the exact repaired scope
+
+Run this verification with the same explicit account/period/query values. It repeats the
+production eligibility rule, so legacy successful-owner artifacts remain included. It reports
+the expected non-cash broker OpenPositions count for every selected report date, three final
+snapshot discrepancies for every selected date (including zero rows), and all four production
+reconciliation counters from the newest successful reprocess. During Task 8, the latest
+selected report date must have exactly **105** broker OpenPositions rows. Require a nonempty
+selected set, three zero discrepancy rows per selected date, and one four-counter diagnostic
+row per selected date.
+
+```bash
+repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+  -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
+CREATE TEMP TABLE repair_selected_artifact AS
+WITH eligible_artifact AS (
+    SELECT artifact.raw_artifact_id, artifact.ingestion_run_id,
+           artifact.account_id, artifact.report_date_local,
+           row_number() OVER (
+               PARTITION BY artifact.report_date_local
+               ORDER BY artifact.created_at_utc DESC, artifact.raw_artifact_id DESC
+           ) AS report_date_rank
+    FROM raw_artifact artifact
+    JOIN ingestion_run owner
+      ON owner.ingestion_run_id = artifact.ingestion_run_id
+    LEFT JOIN ingestion_run completion
+      ON completion.ingestion_run_id = artifact.completed_ingestion_run_id
+    WHERE artifact.account_id = :'account_id'
+      AND artifact.period_key = :'period_key'
+      AND artifact.flex_query_id = :'flex_query_id'
+      AND artifact.report_date_local IS NOT NULL
+      AND (
+          (artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success')
+          OR
+          (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')
+      )
+)
+SELECT raw_artifact_id, ingestion_run_id, account_id, report_date_local
+FROM eligible_artifact
+WHERE report_date_rank = 1;
+
+CREATE TEMP TABLE repair_broker AS
     SELECT selected.report_date_local,
            instrument.instrument_id,
-           (record.source_payload->>'position')::numeric AS position_qty
-    FROM selected_artifact selected
+           REPLACE(BTRIM(record.source_payload->>'position'), ',', '')::numeric AS position_qty
+    FROM repair_selected_artifact selected
     JOIN raw_record record
       ON record.raw_artifact_id = selected.raw_artifact_id
      AND record.section_name = 'OpenPositions'
@@ -176,14 +317,37 @@ WITH ranked_artifact AS (
     JOIN instrument
       ON instrument.account_id = selected.account_id
      AND instrument.conid = record.source_payload->>'conid'
-    WHERE UPPER(record.source_payload->>'assetCategory') NOT IN ('CASH', 'FX')
-), snapshot AS (
+    WHERE UPPER(BTRIM(record.source_payload->>'assetCategory')) NOT IN ('CASH', 'FX');
+
+CREATE TEMP TABLE repair_snapshot AS
     SELECT selected.report_date_local, daily.instrument_id, daily.position_qty
-    FROM selected_artifact selected
+    FROM repair_selected_artifact selected
     JOIN pnl_snapshot_daily daily
       ON daily.account_id = selected.account_id
-     AND daily.report_date_local = selected.report_date_local
-), discrepancy_type AS (
+     AND daily.report_date_local = selected.report_date_local;
+
+SELECT count(*) AS selected_artifact_count,
+       CASE WHEN count(*) = 0 THEN 'ABORT_EMPTY_SELECTION'
+            ELSE 'VERIFY_SELECTED_DATES' END AS verification_status
+FROM repair_selected_artifact;
+
+WITH broker_count AS (
+    SELECT selected.report_date_local,
+           count(broker.instrument_id) AS expected_broker_open_positions_count
+    FROM repair_selected_artifact selected
+    LEFT JOIN repair_broker broker USING (report_date_local)
+    GROUP BY selected.report_date_local
+)
+SELECT report_date_local, expected_broker_open_positions_count,
+       CASE WHEN report_date_local = max(report_date_local) OVER ()
+            THEN CASE WHEN expected_broker_open_positions_count = 105
+                      THEN 'LATEST_COUNT_105_CONFIRMED'
+                      ELSE 'ABORT_LATEST_COUNT_NOT_105' END
+            ELSE 'NON_LATEST_SELECTED_DATE' END AS task_8_count_status
+FROM broker_count
+ORDER BY report_date_local;
+
+WITH discrepancy_type AS (
     SELECT discrepancy
     FROM (VALUES
         ('broker_missing_snapshot'),
@@ -192,19 +356,19 @@ WITH ranked_artifact AS (
     ) AS value(discrepancy)
 ), discrepancy AS (
     SELECT broker.report_date_local, 'broker_missing_snapshot' AS discrepancy
-    FROM broker
-    LEFT JOIN snapshot USING (report_date_local, instrument_id)
+    FROM repair_broker broker
+    LEFT JOIN repair_snapshot snapshot USING (report_date_local, instrument_id)
     WHERE snapshot.instrument_id IS NULL
     UNION ALL
     SELECT broker.report_date_local, 'broker_quantity_mismatch'
-    FROM broker
-    JOIN snapshot USING (report_date_local, instrument_id)
+    FROM repair_broker broker
+    JOIN repair_snapshot snapshot USING (report_date_local, instrument_id)
     WHERE broker.position_qty IS DISTINCT FROM snapshot.position_qty
     UNION ALL
     SELECT snapshot.report_date_local, 'nonzero_snapshot_absent_from_broker'
-    FROM snapshot
+    FROM repair_snapshot snapshot
     JOIN instrument USING (instrument_id)
-    LEFT JOIN broker USING (report_date_local, instrument_id)
+    LEFT JOIN repair_broker broker USING (report_date_local, instrument_id)
     WHERE broker.instrument_id IS NULL
       AND snapshot.position_qty <> 0
       AND UPPER(instrument.asset_category) NOT IN ('CASH', 'FX')
@@ -212,44 +376,80 @@ WITH ranked_artifact AS (
 SELECT selected.report_date_local,
        kind.discrepancy,
        count(found.discrepancy) AS row_count
-FROM selected_artifact selected
+FROM repair_selected_artifact selected
 CROSS JOIN discrepancy_type kind
 LEFT JOIN discrepancy found
   ON found.report_date_local = selected.report_date_local
  AND found.discrepancy = kind.discrepancy
 GROUP BY selected.report_date_local, kind.discrepancy
 ORDER BY selected.report_date_local, kind.discrepancy;
+
+WITH ranked_reprocess AS (
+    SELECT run.ingestion_run_id, run.diagnostics,
+           row_number() OVER (
+               ORDER BY run.started_at_utc DESC, run.ingestion_run_id DESC
+           ) AS run_rank
+    FROM ingestion_run run
+    WHERE run.run_type = 'reprocess'
+      AND run.status = 'success'
+      AND run.account_id = :'account_id'
+      AND run.period_key = :'period_key'
+      AND run.flex_query_id = :'flex_query_id'
+), snapshot_diagnostic AS (
+    SELECT event->'details' AS details
+    FROM ranked_reprocess run
+    CROSS JOIN LATERAL jsonb_array_elements(run.diagnostics) AS event
+    WHERE run.run_rank = 1
+      AND event->>'stage' = 'snapshot'
+      AND event->>'status' = 'completed'
+)
+SELECT :'account_id' AS account_id, :'period_key' AS period_key,
+       :'flex_query_id' AS flex_query_id,
+       selected.report_date_local,
+       details->>'broker_position_match_count' AS broker_position_match_count,
+       details->>'broker_position_mismatch_count' AS broker_position_mismatch_count,
+       details->>'broker_only_position_count' AS broker_only_position_count,
+       details->>'broker_absent_nonzero_fifo_count' AS broker_absent_nonzero_fifo_count,
+       CASE WHEN details IS NULL THEN 'ABORT_MISSING_SNAPSHOT_DIAGNOSTIC'
+            ELSE 'DIAGNOSTIC_PRESENT' END AS diagnostic_status
+FROM repair_selected_artifact selected
+LEFT JOIN snapshot_diagnostic diagnostic
+  ON (diagnostic.details->>'report_date_local')::date = selected.report_date_local
+ORDER BY selected.report_date_local;
 SQL
 ```
 
-Compare the returned dates with the scope-discovery output to prove every selected actual
-report date was checked. Record a scope-specific snapshot checksum, rerun the same guarded
-explicit command once, and require the second checksum to match the first. The JSONB array
-preserves the position of SQL `NULL` values; unlike `concat_ws`, it cannot collapse distinct
-nullable-column layouts into the same serialization.
+Record provisional reasons and a scope-specific checksum with the same selected dates. The
+provisional summary is restricted to the explicit account and selected dates; it cannot mix
+another account or a globally latest date. The JSONB checksum preserves SQL `NULL` positions.
 
-Run the checksum query through the same parameterized `psql` wrapper and with the same three
-scope values used for the mismatch query.
-
-```sql
-WITH ranked_artifact AS (
+```bash
+repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+  -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
+WITH eligible_artifact AS (
     SELECT artifact.report_date_local,
            row_number() OVER (
                PARTITION BY artifact.report_date_local
                ORDER BY artifact.created_at_utc DESC, artifact.raw_artifact_id DESC
-           ) AS artifact_rank
+           ) AS report_date_rank
     FROM raw_artifact artifact
-    JOIN ingestion_run completed
-      ON completed.ingestion_run_id = artifact.completed_ingestion_run_id
-     AND completed.status = 'success'
+    JOIN ingestion_run owner
+      ON owner.ingestion_run_id = artifact.ingestion_run_id
+    LEFT JOIN ingestion_run completion
+      ON completion.ingestion_run_id = artifact.completed_ingestion_run_id
     WHERE artifact.account_id = :'account_id'
       AND artifact.period_key = :'period_key'
       AND artifact.flex_query_id = :'flex_query_id'
       AND artifact.report_date_local IS NOT NULL
+      AND (
+          (artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success')
+          OR
+          (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')
+      )
 ), selected_date AS (
     SELECT report_date_local
-    FROM ranked_artifact
-    WHERE artifact_rank = 1
+    FROM eligible_artifact
+    WHERE report_date_rank = 1
 )
 SELECT md5(COALESCE(string_agg(
     jsonb_build_array(
@@ -264,23 +464,54 @@ SELECT md5(COALESCE(string_agg(
 FROM pnl_snapshot_daily daily
 JOIN selected_date USING (report_date_local)
 WHERE daily.account_id = :'account_id';
-```
 
-Review remaining provisional rows by reason rather than treating every provisional row as
-a failed repair:
-
-```sql
-SELECT valuation_source, fx_source, (cost_basis IS NULL) AS cost_basis_missing,
+WITH eligible_artifact AS (
+    SELECT artifact.report_date_local,
+           row_number() OVER (
+               PARTITION BY artifact.report_date_local
+               ORDER BY artifact.created_at_utc DESC, artifact.raw_artifact_id DESC
+           ) AS report_date_rank
+    FROM raw_artifact artifact
+    JOIN ingestion_run owner
+      ON owner.ingestion_run_id = artifact.ingestion_run_id
+    LEFT JOIN ingestion_run completion
+      ON completion.ingestion_run_id = artifact.completed_ingestion_run_id
+    WHERE artifact.account_id = :'account_id'
+      AND artifact.period_key = :'period_key'
+      AND artifact.flex_query_id = :'flex_query_id'
+      AND artifact.report_date_local IS NOT NULL
+      AND (
+          (artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success')
+          OR
+          (artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success')
+      )
+), selected_date AS (
+    SELECT report_date_local
+    FROM eligible_artifact
+    WHERE report_date_rank = 1
+)
+SELECT daily.report_date_local, daily.valuation_source, daily.fx_source,
+       (daily.cost_basis IS NULL) AS cost_basis_missing,
        count(*) AS row_count
-FROM pnl_snapshot_daily
-WHERE provisional
-GROUP BY valuation_source, fx_source, (cost_basis IS NULL)
-ORDER BY valuation_source, fx_source, cost_basis_missing;
+FROM pnl_snapshot_daily daily
+JOIN selected_date USING (report_date_local)
+WHERE daily.account_id = :'account_id'
+  AND daily.provisional
+GROUP BY daily.report_date_local, daily.valuation_source, daily.fx_source,
+         (daily.cost_basis IS NULL)
+ORDER BY daily.report_date_local, daily.valuation_source, daily.fx_source,
+         cost_basis_missing;
+SQL
 ```
+
+Rerun the same guarded CLI command once, repeat both queries, and require an identical checksum
+and identical discrepancy results. Explain every remaining provisional group; it is not
+automatically a repair failure. Never continue from an empty selected set or a latest Task 8
+broker count other than 105.
 
 ### 5. Roll back if verification fails
 
-1. Stop the application with `docker compose stop app`; do not run ingestion or another
+1. Stop the application with `repair_compose stop app`; do not run ingestion or another
    repair against the failed state.
 2. Recheck the saved dump with `pg_restore --list` and `sha256sum --check` using the exact
    dump and checksum paths recorded in step 1.

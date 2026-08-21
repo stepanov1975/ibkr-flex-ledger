@@ -172,6 +172,41 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             raise RuntimeError("ledger instrument currency read failed") from error
         return [row["currency"] for row in rows]
 
+    def db_ledger_instrument_asset_category_map(
+        self,
+        account_id: str,
+        instrument_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        """Map selected account instruments to canonical asset categories."""
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        normalized_instrument_ids = tuple(
+            self._db_ledger_validate_uuid_text(instrument_id, "instrument_ids")
+            for instrument_id in instrument_ids
+        )
+        if not normalized_instrument_ids:
+            return {}
+        try:
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT instrument_id, asset_category FROM instrument "
+                        "WHERE account_id = :account_id "
+                        "AND instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
+                        "ORDER BY instrument_id"
+                    ),
+                    {
+                        "account_id": normalized_account_id,
+                        "instrument_ids": list(normalized_instrument_ids),
+                    },
+                ).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("ledger instrument asset-category read failed") from error
+        return {
+            str(row["instrument_id"]): row["asset_category"]
+            for row in rows
+        }
+
     def db_ledger_trade_fill_list_for_account(
         self,
         account_id: str,
@@ -204,8 +239,13 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "etf.trade_timestamp_utc, etf.report_date_local, etf.side, etf.quantity, etf.price, "
             "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
             "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
-            "NULLIF(rr.source_payload->>'closePrice', '') AS close_price "
+            "i.asset_category, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'closePrice'), ',', '')::numeric END AS close_price "
             "FROM event_trade_fill etf "
+            "JOIN instrument i ON i.instrument_id = etf.instrument_id AND i.account_id = etf.account_id "
             "LEFT JOIN raw_record rr ON rr.raw_record_id = etf.source_raw_record_id "
             "WHERE etf.account_id = :account_id "
             "AND (CAST(:through_report_date_local AS date) IS NULL "
@@ -257,6 +297,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 net_cash_in_base=None if row["net_cash_in_base"] is None else str(row["net_cash_in_base"]),
                 fx_rate_to_base=None if row["fx_rate_to_base"] is None else str(row["fx_rate_to_base"]),
                 close_price=None if row["close_price"] is None else str(row["close_price"]),
+                asset_category=row["asset_category"],
+                multiplier=None if row["multiplier"] is None else str(row["multiplier"]),
             )
             for row in rows
         ]
@@ -359,14 +401,20 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement = (
             "WITH parsed AS ("
             "SELECT i.instrument_id, rr.raw_record_id, "
-            "UPPER(rr.source_payload->>'assetCategory') AS asset_category, "
-            "UPPER(rr.source_payload->>'currency') AS currency, "
-            "(rr.source_payload->>'position')::numeric AS position_qty, "
-            "NULLIF(rr.source_payload->>'markPrice', '')::numeric AS mark_price, "
-            "NULLIF(rr.source_payload->>'costBasisMoney', '')::numeric AS cost_basis_money, "
-            "NULLIF(rr.source_payload->>'fifoPnlUnrealized', '')::numeric AS broker_unrealized_pnl, "
-            "NULLIF(rr.source_payload->>'fxRateToBase', '')::numeric AS fx_rate_to_base, "
-            "NULLIF(rr.source_payload->>'multiplier', '')::numeric AS multiplier, "
+            "UPPER(BTRIM(rr.source_payload->>'assetCategory')) AS asset_category, "
+            "UPPER(BTRIM(rr.source_payload->>'currency')) AS currency, "
+            "REPLACE(BTRIM(COALESCE(rr.source_payload->>'position', '')), ',', '')::numeric AS position_qty, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'markPrice', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'markPrice'), ',', '')::numeric END AS mark_price, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'costBasisMoney', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'costBasisMoney'), ',', '')::numeric END AS cost_basis_money, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fifoPnlUnrealized', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fifoPnlUnrealized'), ',', '')::numeric END "
+            "AS broker_unrealized_pnl, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fxRateToBase', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fxRateToBase'), ',', '')::numeric END AS fx_rate_to_base, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
             "CASE "
             "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
             "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
@@ -378,7 +426,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "AND rr.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
             "AND rr.section_name = 'OpenPositions' "
             "AND rr.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
-            "AND UPPER(rr.source_payload->>'assetCategory') NOT IN ('CASH', 'FX')"
+            "AND UPPER(BTRIM(rr.source_payload->>'assetCategory')) NOT IN ('CASH', 'FX')"
         )
         parameters: dict[str, Any] = {
             "account_id": normalized_account_id,

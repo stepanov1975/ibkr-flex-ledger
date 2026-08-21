@@ -161,7 +161,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         )
 
     def job_execute_reprocess_target(self, period_key: str, flex_query_id: str) -> JobExecutionResult:
-        """Execute canonical reprocess for one explicit period/query target.
+        """Execute non-cleanup canonical reprocess for one explicit target.
 
         Args:
             period_key: Ingestion period identity key for replay scope.
@@ -175,20 +175,40 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             RuntimeError: Raised for unexpected execution failures after finalization.
         """
 
+        return self._job_reprocess_execute_with_config(
+            config=self._job_reprocess_scoped_config(period_key, flex_query_id),
+            allow_unsupported_snapshot_cleanup=False,
+        )
+
+    def job_execute_reprocess_target_with_cleanup(
+        self,
+        period_key: str,
+        flex_query_id: str,
+    ) -> JobExecutionResult:
+        """Execute the operator-only cleanup-capable explicit reprocess path."""
+
+        return self._job_reprocess_execute_with_config(
+            config=self._job_reprocess_scoped_config(period_key, flex_query_id),
+            allow_unsupported_snapshot_cleanup=True,
+        )
+
+    def _job_reprocess_scoped_config(
+        self,
+        period_key: str,
+        flex_query_id: str,
+    ) -> CanonicalReprocessOrchestratorConfig:
+        """Validate explicit replay scope values without granting cleanup authority."""
+
         normalized_period_key = self._job_reprocess_validate_period_key(period_key)
         if not isinstance(flex_query_id, str):
             raise ValueError("flex_query_id must be a string")
         normalized_flex_query_id = flex_query_id.strip()
         if not normalized_flex_query_id:
             raise ValueError("flex_query_id must not be blank")
-        scoped_config = replace(
+        return replace(
             self._config,
             period_key=normalized_period_key,
             flex_query_id=normalized_flex_query_id,
-        )
-        return self._job_reprocess_execute_with_config(
-            config=scoped_config,
-            allow_unsupported_snapshot_cleanup=True,
         )
 
     def _job_reprocess_execute_with_config(

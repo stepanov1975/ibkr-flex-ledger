@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
+import re
+import subprocess
 import uuid
 from collections.abc import Mapping
 from datetime import date
@@ -62,11 +66,11 @@ _ALEX_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <Trades>
     <Trade levelOfDetail="EXECUTION" ibExecID="OPEN-OPT" transactionID="1"
       conid="815232555" symbol="ALEX  260821P00010000" assetCategory="OPT"
-      currency="USD" buySell="SELL" quantity="-2" tradePrice="0.60"
+      currency="USD" buySell="SELL" quantity="-2" tradePrice="0.60" multiplier="100"
       reportDate="20260820" dateTime="20260820;100000" />
     <Trade levelOfDetail="EXECUTION" transactionID="2" tradeID="2002"
       conid="815232555" symbol="ALEX  260821P00010000" assetCategory="OPT"
-      currency="USD" buySell="BUY" quantity="2" tradePrice="0"
+      currency="USD" buySell="BUY" quantity="2" tradePrice="0" multiplier="100"
       reportDate="20260820" dateTime="20260820;110000" />
     <Trade levelOfDetail="EXECUTION" transactionID="3" tradeID="2003"
       conid="108670127" symbol="ALEX" assetCategory="STK"
@@ -77,6 +81,20 @@ _ALEX_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
       currency="USD" buySell="SELL" quantity="-200" tradePrice="11"
       reportDate="20260820" dateTime="20260820;120000" />
   </Trades>
+  <OpenPositions />
+  <CashTransactions />
+  <CorporateActions />
+  <ConversionRates />
+  <SecuritiesInfo />
+  <AccountInformation />
+</FlexStatement></FlexStatements></FlexQueryResponse>"""
+
+_CASH_EVENT_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
+<FlexStatement reportDate="20260820">
+  <Trades><Trade levelOfDetail="EXECUTION" ibExecID="CASH-EVENT" transactionID="1"
+    conid="990001" symbol="USD.CASH" assetCategory="CASH" currency="USD"
+    buySell="BUY" quantity="2" tradePrice="10" reportDate="20260820"
+    dateTime="20260820;100000" /></Trades>
   <OpenPositions />
   <CashTransactions />
   <CorporateActions />
@@ -262,7 +280,8 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             initial_snapshot = dict(
                 connection.execute(
                     text(
-                        "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees "
+                        "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees, "
+                        "provisional, valuation_source "
                         "FROM pnl_snapshot_daily WHERE account_id='SEEDED_ACCOUNT'"
                     )
                 ).mappings().one()
@@ -365,7 +384,8 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             ).mappings().one()
             corrected_snapshot = connection.execute(
                 text(
-                    "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees "
+                    "SELECT position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees, "
+                    "provisional, valuation_source "
                     "FROM pnl_snapshot_daily WHERE account_id='SEEDED_ACCOUNT'"
                 )
             ).mappings().one()
@@ -384,9 +404,11 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
                 "position_qty": Decimal("2"),
                 "cost_basis": Decimal("223"),
                 "realized_pnl": Decimal("0"),
-                "unrealized_pnl": Decimal("20"),
-                "total_pnl": Decimal("20"),
+                "unrealized_pnl": Decimal("0"),
+                "total_pnl": Decimal("0"),
                 "fees": Decimal("1"),
+                "provisional": True,
+                "valuation_source": "EOD_MARK_MISSING_ALL_SOURCES",
             }
             assert dict(corrected_snapshot) != initial_snapshot
             assert corrected_lot["position_lot_id"] == initial_lot["position_lot_id"]
@@ -476,9 +498,285 @@ def test_postgresql_alex_assignment_rows_close_with_broker_authority() -> None:
                 ("815232555", Decimal("0")),
                 ("108670127", Decimal("0")),
             }
+            option_realized = connection.execute(
+                text(
+                    "SELECT s.realized_pnl FROM pnl_snapshot_daily s "
+                    "JOIN instrument i USING (instrument_id) "
+                    "WHERE s.account_id='U_ALEX' AND i.conid='815232555'"
+                )
+            ).scalar_one()
+            assert option_realized == Decimal("120")
     finally:
         if engine is not None:
             engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_postgresql_completed_artifact_preserves_cash_event_snapshot() -> None:
+    """Keep CASH event-derived quantity outside OpenPositions absence authority."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_cash_event_e2e_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        ingestion_repository = SQLAlchemyIngestionRunService(engine)
+        raw_repository = SQLAlchemyRawPersistenceService(engine)
+        canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
+        snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
+        orchestrator = IngestionJobOrchestrator(
+            ingestion_repository=ingestion_repository,
+            raw_persistence_repository=raw_repository,
+            flex_adapter=_SeededAdapter(_CASH_EVENT_PAYLOAD),
+            config=IngestionOrchestratorConfig(
+                account_id="U_CASH_EVENT",
+                flex_query_id="seeded-query",
+            ),
+            canonical_repository=canonical_repository,
+            snapshot_service=StockLedgerSnapshotService(snapshot_repository),
+        )
+
+        assert orchestrator.job_execute("ingestion_run").status == "success"
+
+        with engine.connect() as connection:
+            snapshot = connection.execute(
+                text(
+                    "SELECT s.position_qty, s.provisional FROM pnl_snapshot_daily s "
+                    "JOIN instrument i USING (instrument_id) "
+                    "WHERE s.account_id='U_CASH_EVENT' AND i.conid='990001'"
+                )
+            ).mappings().one()
+            assert dict(snapshot) == {
+                "position_qty": Decimal("2"),
+                "provisional": False,
+            }
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM raw_artifact "
+                    "WHERE account_id='U_CASH_EVENT' AND completed_ingestion_run_id IS NOT NULL"
+                )
+            ).scalar_one() == 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_postgresql_open_position_numeric_normalization_matches_mapping() -> None:
+    """Normalize Flex sentinels/commas while rejecting malformed stored numerics."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_open_position_numeric_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        run_id = uuid.uuid4()
+        good_instrument_id = uuid.uuid4()
+        malformed_instrument_id = uuid.uuid4()
+        missing_position_instrument_id = uuid.uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run ("
+                    "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                    "report_date_local, started_at_utc, ended_at_utc) VALUES ("
+                    ":run_id, 'U_NUMERIC', 'manual', 'success', '2026-08-21', 'query', "
+                    "DATE '2026-08-20', now(), now())"
+                ),
+                {"run_id": run_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO instrument ("
+                    "instrument_id, account_id, conid, symbol, asset_category, currency) VALUES ("
+                    ":instrument_id, 'U_NUMERIC', :conid, :symbol, 'STK', 'USD')"
+                ),
+                [
+                    {"instrument_id": good_instrument_id, "conid": "1001", "symbol": "GOOD"},
+                    {"instrument_id": malformed_instrument_id, "conid": "1002", "symbol": "BAD"},
+                    {
+                        "instrument_id": missing_position_instrument_id,
+                        "conid": "1003",
+                        "symbol": "MISSING",
+                    },
+                ],
+            )
+            payloads = [
+                {
+                    "conid": "1001",
+                    "assetCategory": " STK ",
+                    "currency": " USD ",
+                    "position": " 1,234.5 ",
+                    "markPrice": " N/A ",
+                    "costBasisMoney": " -- ",
+                    "fifoPnlUnrealized": " - ",
+                    "fxRateToBase": " 1,000.25 ",
+                    "multiplier": " 100 ",
+                    "reportDate": "20260820",
+                },
+                {
+                    "conid": "1002",
+                    "assetCategory": "STK",
+                    "currency": "USD",
+                    "position": "1",
+                    "markPrice": "malformed",
+                    "reportDate": "20260820",
+                },
+                {
+                    "conid": "1003",
+                    "assetCategory": "STK",
+                    "currency": "USD",
+                    "reportDate": "20260820",
+                },
+            ]
+            connection.execute(
+                text(
+                    "INSERT INTO raw_record ("
+                    "raw_record_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                    "payload_sha256, report_date_local, section_name, source_row_ref, source_payload) VALUES ("
+                    ":raw_record_id, :run_id, 'U_NUMERIC', '2026-08-21', 'query', :sha, "
+                    "DATE '2026-08-20', 'OpenPositions', :source_row_ref, CAST(:payload AS jsonb))"
+                ),
+                [
+                    {
+                        "raw_record_id": uuid.uuid4(),
+                        "run_id": run_id,
+                        "sha": f"numeric-{index}",
+                        "source_row_ref": f"OpenPositions:OpenPosition:idx={index}",
+                        "payload": json.dumps(payload),
+                    }
+                    for index, payload in enumerate(payloads, start=1)
+                ],
+            )
+
+        repository = SQLAlchemyLedgerSnapshotService(engine)
+        normalized = repository.db_ledger_open_position_valuation_list_for_run(
+            "U_NUMERIC",
+            str(run_id),
+            (str(good_instrument_id),),
+        )[0]
+        assert normalized.position_qty == "1234.5"
+        assert normalized.mark_price is None
+        assert normalized.cost_basis_money is None
+        assert normalized.broker_unrealized_pnl is None
+        assert normalized.fx_rate_to_base == "1000.25"
+        assert normalized.multiplier == "100"
+
+        for instrument_id in (malformed_instrument_id, missing_position_instrument_id):
+            with pytest.raises(RuntimeError, match="ledger OpenPositions valuation read failed"):
+                repository.db_ledger_open_position_valuation_list_for_run(
+                    "U_NUMERIC",
+                    str(run_id),
+                    (str(instrument_id),),
+                )
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_operations_repair_runbook_shell_and_sql_blocks_parse() -> None:
+    """Keep the pinned Compose workflow and PostgreSQL verification snippets executable."""
+
+    operations_text = Path("docs/operations.md").read_text(encoding="utf-8")
+    repair_section = operations_text.split(
+        "## Broker position repair by immutable replay", maxsplit=1
+    )[1].split("## Restore drill", maxsplit=1)[0]
+
+    bash_blocks = re.findall(r"```bash\n(.*?)\n```", repair_section, flags=re.DOTALL)
+    assert bash_blocks
+    for bash_block in bash_blocks:
+        parsed = subprocess.run(
+            ["bash", "-n"],
+            input=bash_block,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert parsed.returncode == 0, parsed.stderr
+
+    assert repair_section.count("    docker compose \\\n") == 1
+    assert "docker compose exec" not in repair_section
+    assert "docker compose up" not in repair_section
+    assert "docker compose stop" not in repair_section
+    assert "--project-name stock_app" in repair_section
+    assert "--env-file /stock_app/.env" in repair_section
+    assert '--file "$REPAIR_WORKTREE/docker-compose.yml"' in repair_section
+    assert "ABORT_EMPTY_SELECTION" in repair_section
+    assert "ABORT_MISSING_OPENPOSITIONS" in repair_section
+    assert "LATEST_COUNT_105_CONFIRMED" in repair_section
+    assert "ABORT_MISSING_SNAPSHOT_DIAGNOSTIC" in repair_section
+    assert repair_section.count(
+        "artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success'"
+    ) >= 4
+    assert repair_section.count(
+        "artifact.completed_ingestion_run_id IS NULL AND owner.status = 'success'"
+    ) >= 4
+
+    sql_blocks = re.findall(r"<<'SQL'\n(.*?)\nSQL", repair_section, flags=re.DOTALL)
+    assert len(sql_blocks) == 5
+
+    base_url = _reachable_database_url()
+    database_name = f"test_operations_docs_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        psql_url = make_url(test_database_url).set(drivername="postgresql").render_as_string(
+            hide_password=False
+        )
+        for sql_block in sql_blocks:
+            parsed = subprocess.run(
+                [
+                    "psql",
+                    "-X",
+                    psql_url,
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-v",
+                    "account_id=DOC_ACCOUNT",
+                    "-v",
+                    "period_key=2026-08-21",
+                    "-v",
+                    "flex_query_id=doc-query",
+                ],
+                input=sql_block,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert parsed.returncode == 0, parsed.stderr
+    finally:
         if previous_database_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:
@@ -651,7 +949,7 @@ def test_postgresql_deterministic_replay_cleanup_is_scoped_immutable_and_idempot
         other_snapshots_after = []
 
         for _ in range(2):
-            result = reprocess_orchestrator.job_execute_reprocess_target(
+            result = reprocess_orchestrator.job_execute_reprocess_target_with_cleanup(
                 period_key=period_key,
                 flex_query_id="seeded-query",
             )

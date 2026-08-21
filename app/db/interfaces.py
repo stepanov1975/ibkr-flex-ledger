@@ -785,6 +785,8 @@ class LedgerTradeFillRecord:
         fees: Optional fees amount.
         commission: Optional commission amount.
         functional_currency: Functional/base currency code.
+        asset_category: Canonical instrument asset category.
+        multiplier: Optional raw execution contract multiplier.
     """
 
     event_trade_fill_id: UUID
@@ -805,6 +807,8 @@ class LedgerTradeFillRecord:
     net_cash_in_base: str | None = None
     fx_rate_to_base: str | None = None
     close_price: str | None = None
+    asset_category: str = "STK"
+    multiplier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1024,6 +1028,13 @@ class LedgerSnapshotRepositoryPort(Protocol):
         instrument_ids: tuple[str, ...],
     ) -> list[str]:
         """List distinct currencies for selected canonical instruments."""
+
+    def db_ledger_instrument_asset_category_map(
+        self,
+        account_id: str,
+        instrument_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        """Map selected account instruments to canonical asset categories."""
 
     def db_ledger_trade_fill_list_for_account(
         self,

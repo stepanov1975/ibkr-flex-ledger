@@ -318,6 +318,57 @@ def test_mapping_open_position_allows_blank_optional_values() -> None:
     assert len(batch.instrument_upsert_requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fxRateToBase", "0"),
+        ("fxRateToBase", "-1"),
+        ("multiplier", "0"),
+        ("multiplier", "-100"),
+    ],
+)
+def test_mapping_open_position_rejects_non_positive_rate_or_multiplier(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(MappingContractViolationError, match=f"{field} must be positive"):
+        mapping_build_canonical_batch(
+            "U_TEST", "USD", [_open_position(**{field: value})]
+        )
+
+
+@pytest.mark.parametrize("multiplier", [None, "", "N/A", "0", "-100"])
+def test_mapping_option_execution_requires_positive_multiplier(
+    multiplier: str | None,
+) -> None:
+    overrides: dict[str, object] = {"assetCategory": "OPT"}
+    if multiplier is not None:
+        overrides["multiplier"] = multiplier
+
+    with pytest.raises(MappingContractViolationError, match="multiplier must be positive"):
+        mapping_build_canonical_batch(
+            "U_TEST", "USD", [_execution_trade(**overrides)]
+        )
+
+
+@pytest.mark.parametrize("fx_rate", ["0", "-1"])
+def test_mapping_trade_rejects_non_positive_fx_rate(fx_rate: str) -> None:
+    with pytest.raises(MappingContractViolationError, match="fxRateToBase must be positive"):
+        mapping_build_canonical_batch(
+            "U_TEST", "USD", [_execution_trade(fxRateToBase=fx_rate)]
+        )
+
+
+def test_mapping_option_execution_accepts_normalized_positive_multiplier() -> None:
+    batch = mapping_build_canonical_batch(
+        "U_TEST",
+        "USD",
+        [_execution_trade(assetCategory="OPT", multiplier=" 1,000 ")],
+    )
+
+    assert len(batch.trade_fill_requests) == 1
+
+
 @pytest.mark.parametrize("asset_category", ["CASH", "FX"])
 def test_mapping_excludes_cash_and_fx_open_positions(asset_category: str) -> None:
     batch = mapping_build_canonical_batch(

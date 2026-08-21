@@ -180,6 +180,7 @@ class _ScopedReprocessOrchestrator:
         """
 
         self.calls: list[tuple[str, str]] = []
+        self.cleanup_calls: list[tuple[str, str]] = []
 
     def job_supported_names(self) -> tuple[str, ...]:
         """Return supported stub job names.
@@ -224,6 +225,12 @@ class _ScopedReprocessOrchestrator:
         """
 
         self.calls.append((period_key, flex_query_id))
+        return type("Result", (), {"job_name": "reprocess_run", "status": "success"})()
+
+    def job_execute_reprocess_target_with_cleanup(self, period_key: str, flex_query_id: str):
+        """Capture any unsafe cleanup-capable HTTP dispatch."""
+
+        self.cleanup_calls.append((period_key, flex_query_id))
         return type("Result", (), {"job_name": "reprocess_run", "status": "success"})()
 
 
@@ -647,6 +654,7 @@ def test_api_reprocess_trigger_accepts_explicit_scope_overrides() -> None:
 
     assert response.status_code == 200
     assert scoped_orchestrator.calls == [("2026-02-10", "query-override")]
+    assert scoped_orchestrator.cleanup_calls == []
 
 
 def test_api_ingestion_run_detail_exposes_timeout_failure_diagnostics() -> None:

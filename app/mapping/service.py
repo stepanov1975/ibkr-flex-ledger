@@ -267,6 +267,31 @@ class CanonicalMappingService:
         quantity = self._mapping_required_decimal_value(payload, "quantity", raw_record)
         price = self._mapping_required_decimal_value(payload, "tradePrice", raw_record)
         currency = self._mapping_required_value(payload, "currency", raw_record)
+        asset_category = (
+            self._mapping_optional_value(payload, "assetCategory")
+            or self._config.default_asset_category
+        ).upper()
+        multiplier = self._mapping_optional_decimal_value(payload, "multiplier", raw_record)
+        if multiplier is None and asset_category == "OPT":
+            raise MappingContractViolationError(
+                "mapping contract violation: multiplier must be positive "
+                f"source_row_ref={raw_record.source_row_ref}"
+            )
+        if multiplier is not None and Decimal(multiplier) <= Decimal("0"):
+            raise MappingContractViolationError(
+                "mapping contract violation: multiplier must be positive "
+                f"source_row_ref={raw_record.source_row_ref}"
+            )
+        fx_rate_to_base = self._mapping_optional_decimal_value(
+            payload,
+            "fxRateToBase",
+            raw_record,
+        )
+        if fx_rate_to_base is not None and Decimal(fx_rate_to_base) <= Decimal("0"):
+            raise MappingContractViolationError(
+                "mapping contract violation: fxRateToBase must be positive "
+                f"source_row_ref={raw_record.source_row_ref}"
+            )
         trade_timestamp_utc = self._mapping_resolve_trade_timestamp(raw_record)
         report_date_local = self._mapping_resolve_report_date(raw_record, payload)
 
@@ -278,7 +303,7 @@ class CanonicalMappingService:
             isin=self._mapping_optional_value(payload, "isin"),
             cusip=self._mapping_optional_value(payload, "cusip"),
             figi=self._mapping_optional_value(payload, "figi"),
-            asset_category=self._mapping_optional_value(payload, "assetCategory") or self._config.default_asset_category,
+            asset_category=asset_category,
             currency=currency,
             description=self._mapping_optional_value(payload, "description"),
         )
@@ -301,7 +326,7 @@ class CanonicalMappingService:
             realized_pnl=self._mapping_optional_decimal_value(payload, "fifoPnlRealized", raw_record),
             net_cash=self._mapping_optional_decimal_value(payload, "netCash", raw_record),
             net_cash_in_base=self._mapping_optional_decimal_value(payload, "netCashInBase", raw_record),
-            fx_rate_to_base=self._mapping_optional_decimal_value(payload, "fxRateToBase", raw_record),
+            fx_rate_to_base=fx_rate_to_base,
             currency=currency,
             functional_currency=functional_currency,
         )

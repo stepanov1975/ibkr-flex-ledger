@@ -201,6 +201,29 @@ def test_instrument_currency_list_is_scoped_to_selected_ids() -> None:
     assert connection.executed_parameters[0] == {"instrument_ids": [instrument_id]}
 
 
+def test_instrument_asset_category_map_is_account_and_instrument_scoped() -> None:
+    instrument_id = uuid4()
+    connection = _ConnectionStub(rows=[{
+        "instrument_id": instrument_id,
+        "asset_category": "CASH",
+    }])
+    repository = _repository(connection)
+
+    categories = repository.db_ledger_instrument_asset_category_map(
+        "U1",
+        (str(instrument_id),),
+    )
+
+    assert categories == {str(instrument_id): "CASH"}
+    query = connection.executed_queries[0]
+    assert "account_id = :account_id" in query
+    assert "instrument_id = ANY(CAST(:instrument_ids AS uuid[]))" in query
+    assert connection.executed_parameters[0] == {
+        "account_id": "U1",
+        "instrument_ids": [str(instrument_id)],
+    }
+
+
 def test_scoped_ledger_reads_apply_instrument_and_currency_filters() -> None:
     """Constrain every scoped ledger source query at the database boundary."""
 
@@ -225,6 +248,44 @@ def test_scoped_ledger_reads_apply_instrument_and_currency_filters() -> None:
     assert isinstance(currency_parameters, dict)
     assert instrument_parameters["instrument_ids"] == [instrument_id]
     assert currency_parameters["currencies"] == ["EUR", "USD"]
+
+
+def test_trade_read_includes_asset_category_and_raw_multiplier() -> None:
+    instrument_id = uuid4()
+    event_trade_fill_id = uuid4()
+    source_raw_record_id = uuid4()
+    connection = _ConnectionStub(rows=[{
+        "event_trade_fill_id": event_trade_fill_id,
+        "account_id": "U1",
+        "instrument_id": instrument_id,
+        "source_raw_record_id": source_raw_record_id,
+        "trade_timestamp_utc": datetime(2026, 8, 20, tzinfo=timezone.utc),
+        "report_date_local": date(2026, 8, 20),
+        "side": "SELL",
+        "quantity": Decimal("2"),
+        "price": Decimal("0.60"),
+        "fees": None,
+        "commission": None,
+        "functional_currency": "USD",
+        "currency": "USD",
+        "transaction_id": "1",
+        "net_cash": None,
+        "net_cash_in_base": None,
+        "fx_rate_to_base": None,
+        "asset_category": "OPT",
+        "multiplier": Decimal("100"),
+        "close_price": Decimal("0"),
+    }])
+    repository = _repository(connection)
+
+    trade = repository.db_ledger_trade_fill_list_for_account("U1")[0]
+
+    assert trade.asset_category == "OPT"
+    assert trade.multiplier == "100"
+    assert trade.close_price == "0"
+    query = connection.executed_queries[0]
+    assert "JOIN instrument i" in query
+    assert "source_payload->>'multiplier'" in query
 
 
 def test_open_position_read_includes_option_cost_fx_and_multiplier() -> None:
@@ -290,6 +351,31 @@ def test_open_position_read_preserves_blank_optional_values_as_none() -> None:
     assert row.broker_unrealized_pnl is None
     assert row.fx_rate_to_base is None
     assert row.multiplier is None
+
+
+def test_open_position_query_normalizes_flex_numeric_text() -> None:
+    connection = _ConnectionStub()
+    repository = _repository(connection)
+
+    repository.db_ledger_open_position_valuation_list_for_run(
+        "U1",
+        str(uuid4()),
+    )
+
+    query = connection.executed_queries[0]
+    assert (
+        "REPLACE(BTRIM(COALESCE(rr.source_payload->>'position', '')), ',', '')::numeric "
+        "AS position_qty"
+    ) in query
+    for field in (
+        "markPrice",
+        "costBasisMoney",
+        "fifoPnlUnrealized",
+        "fxRateToBase",
+        "multiplier",
+    ):
+        assert f"BTRIM(COALESCE(rr.source_payload->>'{field}', '')) IN ('', '-', '--', 'N/A')" in query
+        assert f"REPLACE(BTRIM(rr.source_payload->>'{field}'), ',', '')::numeric" in query
 
 
 def test_scoped_lot_reconciliation_closes_and_replaces_only_selected_instruments() -> None:

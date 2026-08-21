@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Generic, TypeVar, cast
 from uuid import UUID, uuid4
+
+import pytest
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
@@ -41,6 +43,7 @@ class _RepositoryStub:
         corporate_actions: list[LedgerCorporateActionRecord] | None = None,
         scope_ids: list[str] | None = None,
         instrument_currencies: list[str] | None = None,
+        instrument_asset_categories: dict[str, str] | None = None,
     ) -> None:
         self._trades = trades
         self._valuations = valuations
@@ -49,6 +52,7 @@ class _RepositoryStub:
         self._corporate_actions = corporate_actions or []
         self._scope_ids = list(scope_ids or [])
         self._instrument_currencies = list(instrument_currencies or [])
+        self._instrument_asset_categories = dict(instrument_asset_categories or {})
         self.position_requests: _SnapshotCapture[PositionLotUpsertRequest] = _SnapshotCapture(requests=[])
         self.snapshot_requests: _SnapshotCapture[PnlSnapshotDailyUpsertRequest] = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
@@ -58,6 +62,7 @@ class _RepositoryStub:
         self.open_position_instrument_ids: tuple[str, ...] | None = None
         self.reconciled_instrument_ids: tuple[str, ...] | None = None
         self.fx_currencies: tuple[str, ...] | None = None
+        self.asset_category_instrument_ids: tuple[str, ...] | None = None
         self.read_call_count = 0
 
     def db_ledger_instrument_ids_for_scope(
@@ -76,6 +81,21 @@ class _RepositoryStub:
         _ = instrument_ids
         self.read_call_count += 1
         return self._instrument_currencies
+
+    def db_ledger_instrument_asset_category_map(
+        self,
+        account_id: str,
+        instrument_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        """Return broker-eligibility metadata for selected instruments."""
+
+        _ = account_id
+        self.read_call_count += 1
+        self.asset_category_instrument_ids = instrument_ids
+        return {
+            instrument_id: self._instrument_asset_categories.get(instrument_id, "STK")
+            for instrument_id in instrument_ids
+        }
 
     def db_ledger_trade_fill_list_for_account(
         self,
@@ -177,6 +197,9 @@ def _trade(
     price: str,
     *,
     minute: int = 0,
+    asset_category: str = "STK",
+    multiplier: str | None = None,
+    close_price: str | None = None,
 ) -> LedgerTradeFillRecord:
     return LedgerTradeFillRecord(
         event_trade_fill_id=uuid4(),
@@ -192,6 +215,9 @@ def _trade(
         commission="0",
         functional_currency="USD",
         currency="USD",
+        asset_category=asset_category,
+        multiplier=multiplier,
+        close_price=close_price,
     )
 
 
@@ -257,8 +283,8 @@ def test_snapshot_uses_last_trade_fallback_without_completed_openpositions() -> 
     assert Decimal(snapshot.unrealized_pnl) == Decimal("0")
 
 
-def test_snapshot_uses_openpositions_unrealized_when_position_matches() -> None:
-    """Use broker-reported unrealized PnL when broker and FIFO quantities match."""
+def test_snapshot_uses_broker_mark_when_position_matches() -> None:
+    """Compute exact-match unrealized PnL from broker market value and FIFO cost."""
 
     instrument_id = uuid4()
     trade = LedgerTradeFillRecord(
@@ -282,9 +308,9 @@ def test_snapshot_uses_openpositions_unrealized_when_position_matches() -> None:
         position_qty="10",
         mark_price="120",
         cost_basis_money=None,
-        broker_unrealized_pnl="200",
+        broker_unrealized_pnl="999",
         fx_rate_to_base=None,
-        multiplier=None,
+        multiplier="1",
         report_date_local=date(2026, 2, 20),
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation])
@@ -300,12 +326,12 @@ def test_snapshot_uses_openpositions_unrealized_when_position_matches() -> None:
     assert result.missing_solid_valuation_count == 0
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.provisional is False
-    assert snapshot.valuation_source == "openpositions_unrealized_pnl"
+    assert snapshot.valuation_source == "openpositions_mark_price"
     assert Decimal(snapshot.unrealized_pnl) == Decimal("200")
 
 
-def test_snapshot_converts_foreign_trade_and_broker_unrealized_to_base_currency() -> None:
-    """Apply trade and broker FX before emitting USD-valued snapshot amounts."""
+def test_snapshot_converts_foreign_trade_and_broker_mark_to_base_currency() -> None:
+    """Apply trade and broker-mark FX before emitting USD-valued snapshot amounts."""
 
     instrument_id = uuid4()
     trade = LedgerTradeFillRecord(
@@ -333,7 +359,7 @@ def test_snapshot_converts_foreign_trade_and_broker_unrealized_to_base_currency(
         cost_basis_money=None,
         broker_unrealized_pnl="999",
         fx_rate_to_base=None,
-        multiplier=None,
+        multiplier="1",
         report_date_local=date(2026, 2, 20),
     )
     fx_rate = LedgerFxRateRecord(
@@ -360,7 +386,7 @@ def test_snapshot_converts_foreign_trade_and_broker_unrealized_to_base_currency(
     assert snapshot.cost_basis is not None
     assert snapshot.fx_source is not None
     assert Decimal(snapshot.cost_basis) == Decimal("1201.2")
-    assert Decimal(snapshot.unrealized_pnl) == Decimal("1198.8")
+    assert Decimal(snapshot.unrealized_pnl) == Decimal("118.8")
     assert "trade_fx_rate_to_base" in snapshot.fx_source
     assert "conversion_rates_exact" in snapshot.fx_source
 
@@ -425,7 +451,7 @@ def test_snapshot_restates_pre_split_lots_on_current_quantity_basis() -> None:
     )
     valuation = LedgerOpenPositionValuationRecord(
         instrument_id=instrument_id, asset_category="STK", currency="USD", position_qty="20", mark_price="60",
-        cost_basis_money=None, broker_unrealized_pnl="200", fx_rate_to_base=None, multiplier=None,
+        cost_basis_money=None, broker_unrealized_pnl="200", fx_rate_to_base=None, multiplier="1",
         report_date_local=date(2026, 2, 20),
     )
     repository = _RepositoryStub(trades=[trade], valuations=[valuation], corporate_actions=[action])
@@ -558,6 +584,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     assert repository.cashflow_instrument_ids == expected
     assert repository.corp_action_instrument_ids == expected
     assert repository.open_position_instrument_ids == expected
+    assert repository.asset_category_instrument_ids == expected
     assert repository.reconciled_instrument_ids == expected
     assert repository.fx_currencies == ("AUD", "CHF", "EUR", "GBP", "JPY", "USD")
     assert [request.instrument_id for request in repository.position_requests.requests] == [instrument_id]
@@ -656,6 +683,36 @@ def test_snapshot_treats_broker_absence_as_zero_without_synthetic_lot() -> None:
     assert result.broker_absent_nonzero_fifo_count == 1
 
 
+@pytest.mark.parametrize("asset_category", ["CASH", "FX"])
+def test_snapshot_completed_artifact_preserves_cash_fx_event_position(
+    asset_category: str,
+) -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[_trade(
+            instrument_id,
+            "BUY",
+            "2",
+            "10",
+            asset_category=asset_category,
+        )],
+        valuations=[],
+        instrument_asset_categories={str(instrument_id): asset_category},
+    )
+
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.position_qty == "2"
+    assert snapshot.provisional is False
+    assert result.broker_position_match_count == 0
+    assert result.broker_position_mismatch_count == 0
+    assert result.broker_only_position_count == 0
+    assert result.broker_absent_nonzero_fifo_count == 0
+
+
 def test_snapshot_creates_broker_only_option_with_contract_valuation() -> None:
     instrument_id = uuid4()
     repository = _RepositoryStub(
@@ -683,7 +740,7 @@ def test_snapshot_creates_broker_only_option_with_contract_valuation() -> None:
     assert result.broker_only_position_count == 1
 
 
-def test_snapshot_exact_match_keeps_fifo_cost_and_uses_broker_unrealized() -> None:
+def test_snapshot_exact_match_keeps_fifo_cost_and_uses_economic_unrealized() -> None:
     instrument_id = uuid4()
     repository = _RepositoryStub(
         trades=[_trade(instrument_id, "BUY", "10", "10")],
@@ -697,9 +754,55 @@ def test_snapshot_exact_match_keeps_fifo_cost_and_uses_broker_unrealized() -> No
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.position_qty == "10"
     assert snapshot.cost_basis == "100"
-    assert snapshot.unrealized_pnl == "200"
+    assert snapshot.unrealized_pnl == "20"
+    assert snapshot.valuation_source == "openpositions_mark_price"
     assert snapshot.provisional is False
     assert result.broker_position_match_count == 1
+
+
+@pytest.mark.parametrize(
+    ("currency", "mark", "multiplier", "fx"),
+    [
+        ("USD", None, "1", "1"),
+        ("USD", "12", None, "1"),
+        ("EUR", "12", "1", None),
+    ],
+)
+def test_snapshot_exact_match_with_missing_market_input_is_provisional(
+    currency: str,
+    mark: str | None,
+    multiplier: str | None,
+    fx: str | None,
+) -> None:
+    instrument_id = uuid4()
+    trade = _trade(instrument_id, "BUY", "10", "10")
+    trade = replace(
+        trade,
+        currency=currency,
+        fx_rate_to_base="1" if currency == "EUR" else None,
+    )
+    repository = _RepositoryStub(
+        trades=[trade],
+        valuations=[_broker_position(
+            instrument_id,
+            "10",
+            currency=currency,
+            mark=mark,
+            cost="100",
+            unrealized="200",
+            fx=fx,
+            multiplier=multiplier,
+        )],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.unrealized_pnl == "0"
+    assert snapshot.valuation_source == "EOD_MARK_MISSING_ALL_SOURCES"
+    assert snapshot.provisional is True
 
 
 def test_snapshot_preserves_missing_optional_broker_values() -> None:
@@ -813,6 +916,104 @@ def test_snapshot_option_mark_fallback_applies_contract_multiplier() -> None:
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     assert repository.snapshot_requests.requests[0].unrealized_pnl == "-193.00"
+
+
+def test_snapshot_option_fifo_applies_execution_multiplier_to_realized_pnl() -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[
+            _trade(
+                instrument_id,
+                "SELL",
+                "2",
+                "0.60",
+                asset_category="OPT",
+                multiplier="100",
+            ),
+            _trade(
+                instrument_id,
+                "BUY",
+                "2",
+                "0",
+                minute=1,
+                asset_category="OPT",
+                multiplier="100",
+            ),
+        ],
+        valuations=[],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.realized_pnl == "120.00"
+    assert repository.position_requests.requests == []
+
+
+def test_snapshot_option_close_mark_applies_execution_multiplier() -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[_trade(
+            instrument_id,
+            "BUY",
+            "1",
+            "0.50",
+            asset_category="OPT",
+            multiplier="100",
+            close_price="0.60",
+        )],
+        valuations=[],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", None, "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.cost_basis == "50.00"
+    assert snapshot.unrealized_pnl == "10.00"
+
+
+@pytest.mark.parametrize("multiplier", [None, "0", "-100"])
+def test_snapshot_rejects_missing_or_nonpositive_option_execution_multiplier(
+    multiplier: str | None,
+) -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[_trade(
+            instrument_id,
+            "BUY",
+            "1",
+            "0.50",
+            asset_category="OPT",
+            multiplier=multiplier,
+        )],
+        valuations=[],
+    )
+
+    with pytest.raises(ValueError, match="OPT trade multiplier must be positive"):
+        _snapshot_service(repository).ledger_snapshot_build_and_persist(
+            "U_TEST", None, "2026-08-20", "USD"
+        )
+
+
+def test_snapshot_non_option_fifo_uses_positive_provided_multiplier() -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[
+            _trade(instrument_id, "BUY", "1", "10", multiplier="2"),
+            _trade(instrument_id, "SELL", "1", "12", minute=1, multiplier="2"),
+        ],
+        valuations=[],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", None, "2026-08-20", "USD"
+    )
+
+    assert repository.snapshot_requests.requests[0].realized_pnl == "4"
 
 
 def test_snapshot_exact_short_match_keeps_signed_fifo_cost() -> None:

@@ -402,6 +402,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             account_id: Internal account identifier.
             ingestion_run_id: Ingestion run identifier.
             report_date_local: Flex statement business date.
+            functional_currency: Functional/base reporting currency code.
 
         Returns:
             object: Lightweight snapshot build result.

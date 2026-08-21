@@ -483,6 +483,7 @@ class _CliReprocessOrchestratorStub:
     def __init__(self) -> None:
         self.default_calls: list[str] = []
         self.target_calls: list[tuple[str, str]] = []
+        self.cleanup_target_calls: list[tuple[str, str]] = []
 
     def job_execute(self, job_name: str) -> SimpleNamespace:
         self.default_calls.append(job_name)
@@ -494,6 +495,14 @@ class _CliReprocessOrchestratorStub:
         flex_query_id: str,
     ) -> SimpleNamespace:
         self.target_calls.append((period_key, flex_query_id))
+        return SimpleNamespace(status="success")
+
+    def job_execute_reprocess_target_with_cleanup(
+        self,
+        period_key: str,
+        flex_query_id: str,
+    ) -> SimpleNamespace:
+        self.cleanup_target_calls.append((period_key, flex_query_id))
         return SimpleNamespace(status="success")
 
 
@@ -589,7 +598,7 @@ def test_reprocess_maps_and_snapshots_selected_artifacts_chronologically(
         ingestion_repository=_IngestionRepositoryStub(),
     )
 
-    result = orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
 
     supported_dates = ("2026-02-19", "2026-08-20")
     assert result.status == "success"
@@ -609,7 +618,7 @@ def test_reprocess_maps_and_snapshots_selected_artifacts_chronologically(
 def test_reprocess_failure_never_deletes_unsupported_snapshots() -> None:
     operation_log: list[tuple[object, ...]] = []
     harness = _build_reprocess_harness(operation_log, fail_on_snapshot_call=2)
-    result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = harness.orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
     assert result.status == "failed"
     assert harness.cleanup_repository.delete_calls == []
     assert not any(operation[0] == "list_cleanup" for operation in operation_log)
@@ -623,9 +632,19 @@ def test_default_reprocess_does_not_cleanup_unsupported_dates() -> None:
     assert harness.cleanup_repository.delete_calls == []
 
 
+def test_scoped_reprocess_does_not_cleanup_unsupported_dates() -> None:
+    operation_log: list[tuple[object, ...]] = []
+    harness = _build_reprocess_harness(operation_log)
+
+    result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+
+    assert result.status == "success"
+    assert harness.cleanup_repository.delete_calls == []
+
+
 def test_reprocess_records_cleanup_candidates_before_deleted_count() -> None:
     harness = _build_reprocess_harness([])
-    result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = harness.orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
     assert result.status == "success"
     diagnostics = harness.ingestion_repository.finalize_calls[0]["diagnostics"]
     assert diagnostics is not None
@@ -731,6 +750,7 @@ def test_jobs_reprocess_explicit_scope_override_uses_requested_period_and_query(
 
     assert execution_result.status == "success"
     assert raw_repository.captured_scope == ("U_TEST", "2026-02-12", "query-override")
+    assert cleanup_repository.delete_calls == []
 
 
 def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code(
@@ -863,7 +883,8 @@ def test_reprocess_cli_uses_explicit_cleanup_only_with_complete_scope(
 
     main_module.main()
 
-    assert orchestrator.target_calls == [("2026-02-20", "query")]
+    assert orchestrator.cleanup_target_calls == [("2026-02-20", "query")]
+    assert orchestrator.target_calls == []
     assert orchestrator.default_calls == []
 
 
@@ -891,3 +912,4 @@ def test_reprocess_cli_without_complete_scope_uses_default_execution(
 
     assert orchestrator.default_calls == ["reprocess_run"]
     assert orchestrator.target_calls == []
+    assert orchestrator.cleanup_target_calls == []

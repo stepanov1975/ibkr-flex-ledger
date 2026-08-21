@@ -75,7 +75,7 @@ def main() -> None:
             flex_query_id=parsed_arguments.flex_query_id,
         )
         if parsed_arguments.period_key is not None and parsed_arguments.flex_query_id is not None:
-            execution_result = reprocess_orchestrator.job_execute_reprocess_target(
+            execution_result = reprocess_orchestrator.job_execute_reprocess_target_with_cleanup(
                 period_key=parsed_arguments.period_key,
                 flex_query_id=parsed_arguments.flex_query_id,
             )
