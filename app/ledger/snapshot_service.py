@@ -30,12 +30,20 @@ class SnapshotBuildResult:
         snapshot_row_count: Number of daily snapshot rows persisted.
         position_lot_row_count: Number of position-lot rows persisted.
         missing_solid_valuation_count: Number of rows marked missing due absent solid valuation.
+        broker_position_match_count: Broker rows matching canonical FIFO quantity.
+        broker_position_mismatch_count: Broker rows differing from canonical FIFO quantity.
+        broker_only_position_count: Broker rows without canonical trade or cashflow history.
+        broker_absent_nonzero_fifo_count: Nonzero FIFO positions absent from broker rows.
     """
 
     report_date_local: str
     snapshot_row_count: int
     position_lot_row_count: int
     missing_solid_valuation_count: int
+    broker_position_match_count: int = 0
+    broker_position_mismatch_count: int = 0
+    broker_only_position_count: int = 0
+    broker_absent_nonzero_fifo_count: int = 0
 
 
 class StockLedgerSnapshotService:
@@ -63,6 +71,7 @@ class StockLedgerSnapshotService:
         account_id: str,
         ingestion_run_id: str | None,
         report_date_local: str,
+        functional_currency: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
     ) -> SnapshotBuildResult:
@@ -72,6 +81,7 @@ class StockLedgerSnapshotService:
             account_id: Internal account identifier.
             ingestion_run_id: Optional ingestion run identifier.
             report_date_local: Flex statement business date in YYYY-MM-DD format.
+            functional_currency: Explicit functional/base currency code.
 
         Returns:
             SnapshotBuildResult: Persistence summary for this snapshot build run.
@@ -84,6 +94,9 @@ class StockLedgerSnapshotService:
         normalized_account_id = account_id.strip()
         if not normalized_account_id:
             raise ValueError("account_id must not be blank")
+        normalized_functional_currency = functional_currency.strip().upper()
+        if not normalized_functional_currency:
+            raise ValueError("functional_currency must not be blank")
 
         try:
             parsed_report_date = date.fromisoformat(report_date_local)
@@ -127,15 +140,26 @@ class StockLedgerSnapshotService:
             through_report_date_local=normalized_report_date,
             instrument_ids=instrument_ids,
         )
+        open_position_valuation_rows = (
+            self._repository.db_ledger_open_position_valuation_list_for_run(
+                account_id=normalized_account_id,
+                ingestion_run_id=ingestion_run_id,
+                instrument_ids=instrument_ids,
+            )
+            if ingestion_run_id is not None
+            else []
+        )
 
         fx_currencies: tuple[str, ...] | None = None
         if instrument_ids is not None:
             required_currencies = set(affected_currencies or ())
+            required_currencies.add(normalized_functional_currency)
             required_currencies.update(self._repository.db_ledger_instrument_currency_list(instrument_ids))
             required_currencies.update(row.currency for row in trade_rows)
             required_currencies.update(row.functional_currency for row in trade_rows)
             required_currencies.update(row.currency for row in cashflow_rows)
             required_currencies.update(row.functional_currency for row in cashflow_rows)
+            required_currencies.update(row.currency for row in open_position_valuation_rows)
             fx_currencies = tuple(sorted(required_currencies))
 
         fx_rate_rows = self._repository.db_ledger_fx_rate_list_for_account(
@@ -153,15 +177,7 @@ class StockLedgerSnapshotService:
             if corporate_action_reader is not None
             else []
         )
-        open_position_valuation_map = self._build_open_position_valuation_map(
-            self._repository.db_ledger_open_position_valuation_list_for_run(
-                account_id=normalized_account_id,
-                ingestion_run_id=ingestion_run_id or "00000000-0000-0000-0000-000000000000",
-                instrument_ids=instrument_ids,
-            )
-            if ingestion_run_id is not None
-            else []
-        )
+        open_position_valuation_map = self._build_open_position_valuation_map(open_position_valuation_rows)
 
         trades_by_instrument = self._group_trades_by_instrument(trade_rows)
         cashflows_by_instrument = self._group_cashflows_by_instrument(cashflow_rows)
@@ -170,9 +186,20 @@ class StockLedgerSnapshotService:
         snapshot_requests: list[PnlSnapshotDailyUpsertRequest] = []
         position_lot_requests: list[PositionLotUpsertRequest] = []
         missing_solid_valuation_count = 0
+        broker_position_match_count = 0
+        broker_position_mismatch_count = 0
+        broker_only_position_count = 0
+        broker_absent_nonzero_fifo_count = 0
 
-        for instrument_id, instrument_trades in trades_by_instrument.items():
-            functional_currency = instrument_trades[-1].functional_currency
+        instrument_keys = set(trades_by_instrument) | set(cashflows_by_instrument) | set(open_position_valuation_map)
+        if instrument_ids is not None:
+            instrument_keys.intersection_update(instrument_ids)
+
+        for instrument_id in sorted(instrument_keys):
+            instrument_trades = trades_by_instrument.get(instrument_id, [])
+            instrument_cashflows = cashflows_by_instrument.get(instrument_id, [])
+            valuation_record = open_position_valuation_map.get(instrument_id)
+            has_canonical_history = bool(instrument_trades or instrument_cashflows)
             converted_trades: list[FifoTradeFillInput] = []
             fx_sources: set[str] = set()
             missing_fx = False
@@ -183,7 +210,7 @@ class StockLedgerSnapshotService:
                 )
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
-                    functional_currency=trade.functional_currency,
+                    functional_currency=normalized_functional_currency,
                     report_date_local=trade.report_date_local,
                     fx_rate_rows=fx_rate_rows,
                     trade=trade,
@@ -205,65 +232,41 @@ class StockLedgerSnapshotService:
                     )
                 )
 
-            position_result = fifo_compute_instrument(
+            fifo_result = fifo_compute_instrument(
                 FifoLedgerComputationRequest(
                     account_id=normalized_account_id,
                     instrument_id=instrument_id,
-                    functional_currency=functional_currency,
+                    functional_currency=normalized_functional_currency,
                     mark_price=Decimal("0"),
                     trades=converted_trades,
                 )
             )
-            valuation_record = open_position_valuation_map.get(instrument_id)
-            local_mark_price, valuation_source = self._resolve_mark_price(
-                trades=instrument_trades,
-                valuation_record=valuation_record,
-                position_quantity=position_result.position_quantity,
-                report_date_local=parsed_report_date,
-            )
-            missing_valuation = position_result.position_quantity != Decimal("0") and local_mark_price is None
-            mark_price_base = Decimal("0")
-            if local_mark_price is not None:
-                mark_fx_rate, mark_fx_source = self._resolve_fx_rate(
-                    currency=instrument_trades[-1].currency,
-                    functional_currency=functional_currency,
-                    report_date_local=parsed_report_date,
-                    fx_rate_rows=fx_rate_rows,
-                )
-                fx_sources.add(mark_fx_source)
-                if mark_fx_rate is None:
-                    missing_fx = True
-                else:
-                    mark_price_base = local_mark_price * mark_fx_rate
+            fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
 
-            fifo_request = FifoLedgerComputationRequest(
-                account_id=normalized_account_id,
-                instrument_id=instrument_id,
-                functional_currency=functional_currency,
-                mark_price=mark_price_base,
-                trades=converted_trades,
-            )
-            fifo_result = fifo_compute_instrument(fifo_request)
-
-            instrument_cashflows = cashflows_by_instrument.get(instrument_id, [])
             cashflow_amount_total = Decimal("0")
             cashflow_fees_total = Decimal("0")
             withholding_tax_total = Decimal("0")
             for cashflow in instrument_cashflows:
                 cashflow_fx_rate, cashflow_fx_source = self._resolve_fx_rate(
                     currency=cashflow.currency,
-                    functional_currency=cashflow.functional_currency,
+                    functional_currency=normalized_functional_currency,
                     report_date_local=cashflow.report_date_local,
                     fx_rate_rows=fx_rate_rows,
                 )
+                cashflow_amount_in_base = self._decimal_or_none(cashflow.amount_in_base)
+                amount_in_functional_currency = (
+                    cashflow_amount_in_base is not None
+                    and cashflow.functional_currency.strip().upper() == normalized_functional_currency
+                )
                 if cashflow_fx_rate is None:
-                    if cashflow.amount_in_base is None or Decimal(cashflow.fees or "0") != Decimal("0") or Decimal(
+                    if not amount_in_functional_currency or Decimal(cashflow.fees or "0") != Decimal("0") or Decimal(
                         cashflow.withholding_tax or "0"
                     ) != Decimal("0"):
                         missing_fx = True
                     cashflow_fx_rate = Decimal("0")
-                if cashflow.amount_in_base is not None:
-                    cashflow_amount_total += Decimal(cashflow.amount_in_base)
+                if amount_in_functional_currency:
+                    assert cashflow_amount_in_base is not None
+                    cashflow_amount_total += cashflow_amount_in_base
                     fx_sources.add("cashflow_amount_in_base")
                 else:
                     cashflow_amount_total += Decimal(cashflow.amount) * cashflow_fx_rate
@@ -274,9 +277,136 @@ class StockLedgerSnapshotService:
             trade_fee_total = sum((trade.fees or Decimal("0") for trade in converted_trades), Decimal("0"))
             total_fee_impact = trade_fee_total + cashflow_fees_total
             realized_pnl = fifo_result.realized_pnl + cashflow_amount_total - cashflow_fees_total - withholding_tax_total
-            unrealized_pnl = fifo_result.unrealized_pnl
+            snapshot_position_quantity = fifo_result.position_quantity
+            snapshot_cost_basis = fifo_cost_basis
+            unrealized_pnl = Decimal("0")
+            missing_valuation = False
+            valuation_source = "no_open_position"
+
+            if ingestion_run_id is None:
+                local_mark_price, valuation_source = self._resolve_mark_price(
+                    trades=instrument_trades,
+                    valuation_record=None,
+                    position_quantity=fifo_result.position_quantity,
+                    report_date_local=parsed_report_date,
+                )
+                missing_valuation = fifo_result.position_quantity != Decimal("0") and local_mark_price is None
+                mark_price_base = Decimal("0")
+                if local_mark_price is not None and fifo_result.position_quantity != Decimal("0"):
+                    mark_fx_rate, mark_fx_source = self._resolve_fx_rate(
+                        currency=instrument_trades[-1].currency,
+                        functional_currency=normalized_functional_currency,
+                        report_date_local=parsed_report_date,
+                        fx_rate_rows=fx_rate_rows,
+                    )
+                    fx_sources.add(mark_fx_source)
+                    if mark_fx_rate is None:
+                        missing_fx = True
+                    else:
+                        mark_price_base = local_mark_price * mark_fx_rate
+                marked_fifo_result = fifo_compute_instrument(
+                    FifoLedgerComputationRequest(
+                        account_id=normalized_account_id,
+                        instrument_id=instrument_id,
+                        functional_currency=normalized_functional_currency,
+                        mark_price=mark_price_base,
+                        trades=converted_trades,
+                    )
+                )
+                unrealized_pnl = marked_fifo_result.unrealized_pnl
+            else:
+                broker_position_quantity = (
+                    Decimal(valuation_record.position_qty) if valuation_record is not None else Decimal("0")
+                )
+                snapshot_position_quantity = broker_position_quantity
+                quantities_match = fifo_result.position_quantity == broker_position_quantity
+                if valuation_record is not None and has_canonical_history:
+                    if quantities_match:
+                        broker_position_match_count += 1
+                    else:
+                        broker_position_mismatch_count += 1
+                elif valuation_record is not None:
+                    broker_only_position_count += 1
+                elif fifo_result.position_quantity != Decimal("0"):
+                    broker_absent_nonzero_fifo_count += 1
+
+                if valuation_record is None:
+                    snapshot_cost_basis = fifo_cost_basis if quantities_match else None
+                    unrealized_pnl = Decimal("0")
+                    valuation_source = "broker_position_absent"
+                else:
+                    valuation_currency = valuation_record.currency.strip().upper()
+                    valuation_fx_rate: Decimal | None
+                    valuation_fx_source: str
+                    if valuation_currency == normalized_functional_currency:
+                        valuation_fx_rate = Decimal("1")
+                        valuation_fx_source = "base_currency"
+                    else:
+                        valuation_fx_rate = self._positive_decimal_or_none(valuation_record.fx_rate_to_base)
+                        if valuation_fx_rate is not None:
+                            valuation_fx_source = "openpositions_fx_rate_to_base"
+                        else:
+                            valuation_fx_rate, valuation_fx_source = self._resolve_fx_rate(
+                                currency=valuation_record.currency,
+                                functional_currency=normalized_functional_currency,
+                                report_date_local=parsed_report_date,
+                                fx_rate_rows=fx_rate_rows,
+                            )
+                    fx_sources.add(valuation_fx_source)
+
+                    broker_cost = self._decimal_or_none(valuation_record.cost_basis_money)
+                    converted_broker_cost = (
+                        broker_cost * valuation_fx_rate
+                        if broker_cost is not None and valuation_fx_rate is not None
+                        else None
+                    )
+                    snapshot_cost_basis = fifo_cost_basis if quantities_match else (
+                        str(converted_broker_cost) if converted_broker_cost is not None else None
+                    )
+
+                    broker_unrealized = self._decimal_or_none(valuation_record.broker_unrealized_pnl)
+                    if broker_unrealized is not None and valuation_fx_rate is not None:
+                        unrealized_pnl = broker_unrealized * valuation_fx_rate
+                        valuation_source = "openpositions_unrealized_pnl"
+                    elif broker_position_quantity == Decimal("0"):
+                        unrealized_pnl = Decimal("0")
+                        valuation_source = "no_open_position"
+                    else:
+                        mark_price = self._decimal_or_none(valuation_record.mark_price)
+                        multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
+                        cost_basis = self._decimal_or_none(snapshot_cost_basis)
+                        if (
+                            mark_price is not None
+                            and multiplier is not None
+                            and cost_basis is not None
+                            and valuation_fx_rate is not None
+                        ):
+                            market_value = broker_position_quantity * mark_price * multiplier * valuation_fx_rate
+                            unrealized_pnl = market_value - cost_basis
+                            valuation_source = "openpositions_mark_price"
+                        else:
+                            missing_valuation = True
+                            valuation_source = "EOD_MARK_MISSING_ALL_SOURCES"
+
+                    broker_money_present = any(
+                        value is not None
+                        for value in (
+                            valuation_record.cost_basis_money,
+                            valuation_record.broker_unrealized_pnl,
+                            valuation_record.mark_price,
+                        )
+                    )
+                    if valuation_fx_rate is None and broker_money_present:
+                        missing_fx = True
+                        if snapshot_cost_basis != fifo_cost_basis or not quantities_match:
+                            snapshot_cost_basis = None
+                        if broker_unrealized is not None:
+                            missing_valuation = True
+
             total_pnl = realized_pnl + unrealized_pnl
-            provisional = missing_valuation or missing_fx
+            quantity_mismatch = ingestion_run_id is not None and snapshot_position_quantity != fifo_result.position_quantity
+            broker_only = ingestion_run_id is not None and valuation_record is not None and not has_canonical_history
+            provisional = missing_valuation or missing_fx or quantity_mismatch or broker_only
             fx_source = ",".join(sorted(fx_sources)) if fx_sources else "base_currency"
 
             snapshot_requests.append(
@@ -284,14 +414,14 @@ class StockLedgerSnapshotService:
                     account_id=normalized_account_id,
                     report_date_local=normalized_report_date,
                     instrument_id=instrument_id,
-                    position_qty=str(fifo_result.position_quantity),
-                    cost_basis=self._build_open_cost_basis(fifo_result.open_lots),
+                    position_qty=str(snapshot_position_quantity),
+                    cost_basis=snapshot_cost_basis,
                     realized_pnl=str(realized_pnl),
                     unrealized_pnl=str(unrealized_pnl),
                     total_pnl=str(total_pnl),
                     fees=str(total_fee_impact),
                     withholding_tax=str(withholding_tax_total),
-                    currency=functional_currency,
+                    currency=normalized_functional_currency,
                     provisional=provisional,
                     valuation_source=valuation_source,
                     fx_source=fx_source,
@@ -353,6 +483,10 @@ class StockLedgerSnapshotService:
             snapshot_row_count=len(snapshot_requests),
             position_lot_row_count=len(position_lot_requests),
             missing_solid_valuation_count=missing_solid_valuation_count,
+            broker_position_match_count=broker_position_match_count,
+            broker_position_mismatch_count=broker_position_mismatch_count,
+            broker_only_position_count=broker_only_position_count,
+            broker_absent_nonzero_fifo_count=broker_absent_nonzero_fifo_count,
         )
 
     def _build_open_position_valuation_map(
@@ -385,8 +519,8 @@ class StockLedgerSnapshotService:
         if position_quantity == Decimal("0"):
             return Decimal("0"), "no_open_position"
         if valuation_record is not None and Decimal(valuation_record.position_qty) == position_quantity:
-            mark_price = Decimal(valuation_record.mark_price)
-            if mark_price > Decimal("0"):
+            mark_price = self._positive_decimal_or_none(valuation_record.mark_price)
+            if mark_price is not None:
                 return mark_price, "openpositions_mark_price"
 
         same_day_close_prices = [
@@ -566,7 +700,7 @@ class StockLedgerSnapshotService:
             (
                 (lot.cost_basis_open / lot.open_quantity) * lot.remaining_quantity
                 for lot in open_lots
-                if lot.open_quantity > Decimal("0")
+                if lot.open_quantity != Decimal("0")
             ),
             Decimal("0"),
         )
