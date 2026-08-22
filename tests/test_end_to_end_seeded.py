@@ -25,6 +25,7 @@ from app.adapters import AdapterFetchResult
 from app.api import create_api_application
 from app.config import AppSettings
 from app.db import (
+    CashBalanceReportRecord,
     SQLAlchemyCanonicalPersistenceService,
     SQLAlchemyDatabaseHealthService,
     SQLAlchemyIngestionRunService,
@@ -49,10 +50,19 @@ _SEEDED_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
     currency="USD" reportDate="20260821" dateTime="20260821;120000"
     ibCommission="1" commission="1" fees="0" fifoPnlRealized="0" fxRateToBase="1" /></Trades>
   <OpenPositions><OpenPosition conid="900001" symbol="SEED" assetCategory="STK" currency="USD"
-    reportDate="20260821" position="2" markPrice="110" fifoPnlUnrealized="20" /></OpenPositions>
-  <CashTransactions><CashTransaction transactionID="9002" conid="900001" symbol="SEED"
-    assetCategory="STK" type="DIV" amount="0" amountInBase="0" withholdingTax="0" fees="0"
-    currency="USD" reportDate="20260821" dateTime="20260821;130000" /></CashTransactions>
+    reportDate="20260821" position="2" markPrice="110" positionValue="220" fxRateToBase="1"
+    fifoPnlUnrealized="20" /></OpenPositions>
+  <CashTransactions>
+    <CashTransaction transactionID="9002" conid="900001" symbol="SEED"
+      assetCategory="STK" type="DIV" amount="0" amountInBase="0" withholdingTax="0" fees="0"
+      currency="USD" reportDate="20260821" dateTime="20260821;130000" />
+    <CashTransaction transactionID="9003" type="Deposits/Withdrawals" amount="100" amountInBase="100"
+      currency="USD" reportDate="20260820" dateTime="20260820;130000" description="Seed deposit" />
+  </CashTransactions>
+  <CashReport>
+    <CashReportCurrency currency="BASE_SUMMARY" endingCash="30" />
+    <CashReportCurrency currency="USD" endingCash="30" />
+  </CashReport>
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
@@ -334,6 +344,23 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             assert pnl_items[0]["symbol"] == "SEED"
             assert pnl_items[0]["report_date_local"] == "2026-08-21"
 
+            summary_response = client.get("/reports/portfolio-summary")
+            assert summary_response.status_code == 200
+            summary = summary_response.json()
+            assert summary["cash_balances"] == [{"currency": "USD", "amount": "30"}]
+            assert summary["transfer_summary_by_currency"] == [{
+                "currency": "USD", "net_transfers": "100.00000000", "gross_deposits": "100.00000000",
+                "gross_withdrawals": "0",
+            }]
+            assert summary["transfers"] == [{
+                "report_date_local": "2026-08-20", "type": "Deposit", "amount": "100.00000000",
+                "currency": "USD", "description": "Seed deposit",
+            }]
+            assert summary["net_transfers_usd"] == "100.00000000"
+            assert summary["estimated_net_liquidation_value_usd"] == "250"
+            assert summary["total_profit_usd"] == "150.00000000"
+            assert summary["profit_percent"] == "150.00000000"
+
             reconciliation_response = client.get("/reports/reconciliation/diff")
             assert reconciliation_response.status_code == 200
             reconciliation_items = reconciliation_response.json()["items"]
@@ -429,6 +456,117 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             )
             assert _completed_details(runs[2], "snapshot")["snapshot_scope_mode"] == "incremental"
             assert connection.execute(text("SELECT count(*) FROM pnl_snapshot_daily")).scalar_one() == 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_portfolio_summary_uses_authoritative_section_artifacts() -> None:
+    """Honor removals in corrected broker sections and reject mismatched valuation dates."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_portfolio_summary_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    def insert_artifact(connection, *, report_date: str, created_at: str, suffix: str, rows: list[tuple[str, str, dict]]) -> None:
+        run_id = uuid.uuid4()
+        artifact_id = uuid.uuid4()
+        connection.execute(
+            text(
+                "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, period_key, "
+                "flex_query_id, report_date_local, started_at_utc, ended_at_utc) VALUES "
+                "(:run_id, 'SUMMARY_ACCOUNT', 'manual', 'success', 'summary', 'query', :report_date, "
+                ":created_at, :created_at)"
+            ),
+            {"run_id": run_id, "report_date": report_date, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO raw_artifact (raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                "payload_sha256, report_date_local, source_payload, created_at_utc) VALUES "
+                "(:artifact_id, :run_id, 'SUMMARY_ACCOUNT', 'summary', 'query', :sha, :report_date, "
+                ":payload, :created_at)"
+            ),
+            {
+                "artifact_id": artifact_id, "run_id": run_id, "sha": f"sha-{suffix}",
+                "report_date": report_date, "payload": suffix.encode(), "created_at": created_at,
+            },
+        )
+        for index, (section_name, source_row_ref, payload) in enumerate(rows):
+            connection.execute(
+                text(
+                    "INSERT INTO raw_record (raw_artifact_id, ingestion_run_id, account_id, period_key, "
+                    "flex_query_id, payload_sha256, report_date_local, section_name, source_row_ref, source_payload, "
+                    "created_at_utc) VALUES (:artifact_id, :run_id, 'SUMMARY_ACCOUNT', 'summary', 'query', :sha, "
+                    ":report_date, :section_name, :source_row_ref, CAST(:payload AS jsonb), :created_at)"
+                ),
+                {
+                    "artifact_id": artifact_id, "run_id": run_id, "sha": f"sha-{suffix}",
+                    "report_date": report_date, "section_name": section_name,
+                    "source_row_ref": f"{source_row_ref}:{index}", "payload": json.dumps(payload),
+                    "created_at": created_at,
+                },
+            )
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        with engine.begin() as connection:
+            insert_artifact(
+                connection, report_date="2026-08-21", created_at="2026-08-21T10:00:00+00:00", suffix="old",
+                rows=[
+                    ("CashReport", "CashReport:row", {"currency": "BASE_SUMMARY", "endingCash": "100"}),
+                    ("CashReport", "CashReport:row", {"currency": "EUR", "endingCash": "10"}),
+                    ("CashReport", "CashReport:row", {"currency": "USD", "endingCash": "100"}),
+                    ("OpenPositions", "OpenPositions:row", {
+                        "conid": "1", "assetCategory": "STK", "currency": "USD", "positionValue": "200",
+                    }),
+                ],
+            )
+            insert_artifact(
+                connection, report_date="2026-08-21", created_at="2026-08-21T11:00:00+00:00", suffix="corrected",
+                rows=[
+                    ("CashReport", "CashReport:row", {"currency": "BASE_SUMMARY", "endingCash": "50"}),
+                    ("CashReport", "CashReport:row", {"currency": "GBP", "endingCash": "malformed"}),
+                    ("CashReport", "CashReport:row", {"currency": "USD", "endingCash": "50"}),
+                    ("OpenPositions", "OpenPositions:row", {
+                        "conid": "2", "assetCategory": "CASH", "currency": "USD", "positionValue": "999",
+                    }),
+                ],
+            )
+
+        repository = SQLAlchemyPortfolioService(engine)
+        corrected_summary = repository.db_report_portfolio_summary("SUMMARY_ACCOUNT")
+        assert corrected_summary.cash_balances == (
+            CashBalanceReportRecord("GBP", None),
+            CashBalanceReportRecord("USD", "50"),
+        )
+        assert corrected_summary.estimated_net_liquidation_value_usd == "50"
+
+        with engine.begin() as connection:
+            insert_artifact(
+                connection, report_date="2026-08-22", created_at="2026-08-22T10:00:00+00:00", suffix="positions",
+                rows=[
+                    ("OpenPositions", "OpenPositions:row", {
+                        "conid": "3", "assetCategory": "STK", "currency": "USD", "positionValue": "500",
+                    }),
+                ],
+            )
+
+        mismatched_summary = repository.db_report_portfolio_summary("SUMMARY_ACCOUNT")
+        assert mismatched_summary.report_date_local == date(2026, 8, 21)
+        assert mismatched_summary.estimated_net_liquidation_value_usd is None
+        assert mismatched_summary.total_profit_usd is None
     finally:
         if engine is not None:
             engine.dispose()

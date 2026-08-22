@@ -1,6 +1,6 @@
 # Operations, retention, backup, and recovery
 
-The application exposes ingestion reliability measurements at `GET /operations/slo` and the browser dashboard at `/ui`. The API reports the frozen 30-day success-rate target, p95 duration target, breach thresholds, and consecutive-failure signal.
+The application exposes ingestion reliability measurements at `GET /operations/slo` and the operations dashboard at `/ui/operations`. The portfolio overview remains at `/ui`. The API reports the frozen 30-day success-rate target, p95 duration target, breach thresholds, and consecutive-failure signal.
 
 ## Scheduled operations
 

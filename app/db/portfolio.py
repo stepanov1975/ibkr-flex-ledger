@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .portfolio_interfaces import (
+    CashBalanceReportRecord,
     CorporateActionManualCaseRecord,
     DiagnosticArchiveRecord,
     IngestionSloRecord,
@@ -18,8 +20,11 @@ from .portfolio_interfaces import (
     LabelPnlReportRecord,
     LabelRecord,
     NoteRecord,
+    PortfolioSummaryReportRecord,
     ProvenanceRecord,
     ReconciliationSourceRecord,
+    TransferReportRecord,
+    TransferSummaryReportRecord,
 )
 
 
@@ -388,6 +393,167 @@ class SQLAlchemyPortfolioService:
             for row in rows
         ]
 
+    def db_report_portfolio_summary(self, account_id: str) -> PortfolioSummaryReportRecord:
+        eligible_artifacts = (
+            "SELECT artifact.* FROM raw_artifact artifact "
+            "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
+            "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+            "WHERE artifact.account_id=:account_id AND ((artifact.completed_ingestion_run_id IS NOT NULL "
+            "AND completion.status='success') OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success'))"
+        )
+        cash_query = text(
+            "WITH eligible_artifacts AS (" + eligible_artifacts + "), selected_artifact AS ("
+            "SELECT artifact.raw_artifact_id, artifact.report_date_local FROM eligible_artifacts artifact "
+            "WHERE artifact.report_date_local IS NOT NULL AND EXISTS (SELECT 1 FROM raw_record raw "
+            "WHERE raw.raw_artifact_id=artifact.raw_artifact_id AND raw.section_name='CashReport') "
+            "ORDER BY artifact.report_date_local DESC, artifact.created_at_utc DESC, artifact.raw_artifact_id DESC LIMIT 1"
+            "), ranked AS (SELECT UPPER(BTRIM(raw.source_payload->>'currency')) AS currency, "
+            "BTRIM(raw.source_payload->>'endingCash') AS ending_cash, "
+            "row_number() OVER (PARTITION BY UPPER(BTRIM(raw.source_payload->>'currency')) "
+            "ORDER BY raw.created_at_utc DESC, raw.raw_record_id DESC) AS row_rank "
+            "FROM selected_artifact selected JOIN raw_record raw "
+            "ON raw.raw_artifact_id=selected.raw_artifact_id "
+            "WHERE raw.section_name='CashReport' AND BTRIM(COALESCE(raw.source_payload->>'currency', ''))<>'') "
+            "SELECT selected.report_date_local, ranked.currency, ranked.ending_cash FROM selected_artifact selected "
+            "LEFT JOIN ranked ON ranked.row_rank=1 ORDER BY ranked.currency NULLS LAST"
+        )
+        position_query = text(
+            "WITH eligible_artifacts AS (" + eligible_artifacts + "), selected_artifact AS ("
+            "SELECT artifact.raw_artifact_id, artifact.report_date_local FROM eligible_artifacts artifact "
+            "WHERE artifact.report_date_local IS NOT NULL AND EXISTS (SELECT 1 FROM raw_record raw "
+            "WHERE raw.raw_artifact_id=artifact.raw_artifact_id AND raw.section_name='OpenPositions') "
+            "ORDER BY artifact.report_date_local DESC, artifact.created_at_utc DESC, artifact.raw_artifact_id DESC LIMIT 1"
+            "), latest_positions AS (SELECT DISTINCT ON (raw.source_payload->>'conid') raw.source_payload "
+            "FROM selected_artifact selected JOIN raw_record raw ON raw.raw_artifact_id=selected.raw_artifact_id "
+            "WHERE raw.section_name='OpenPositions' AND BTRIM(COALESCE(raw.source_payload->>'conid', ''))<>'' "
+            "AND UPPER(BTRIM(COALESCE(raw.source_payload->>'assetCategory', ''))) NOT IN ('CASH', 'FX') "
+            "ORDER BY raw.source_payload->>'conid', raw.created_at_utc DESC, raw.raw_record_id DESC), normalized AS ("
+            "SELECT REPLACE(BTRIM(source_payload->>'positionValue'), ',', '') AS position_value_text, "
+            "REPLACE(BTRIM(source_payload->>'fxRateToBase'), ',', '') AS fx_rate_text, "
+            "UPPER(BTRIM(source_payload->>'currency')) AS currency FROM latest_positions), valued AS ("
+            "SELECT CASE WHEN position_value_text ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$' "
+            "THEN position_value_text::numeric ELSE NULL END AS position_value, "
+            "CASE WHEN currency='USD' THEN 1::numeric WHEN fx_rate_text ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$' "
+            "AND fx_rate_text::numeric>0 THEN fx_rate_text::numeric ELSE NULL END AS fx_rate, "
+            "1 AS row_present FROM normalized) "
+            "SELECT selected.report_date_local, true AS open_positions_present, "
+            "CASE WHEN count(*) FILTER (WHERE row_present=1 AND "
+            "(position_value IS NULL OR fx_rate IS NULL))>0 "
+            "THEN NULL ELSE COALESCE(sum(position_value*fx_rate), 0) END AS position_value_usd, "
+            "count(*) FILTER (WHERE row_present=1 AND (position_value IS NULL OR fx_rate IS NULL)) "
+            "AS missing_value_count "
+            "FROM selected_artifact selected LEFT JOIN valued ON true GROUP BY selected.report_date_local"
+        )
+        transfer_query = text(
+            "SELECT event.report_date_local, event.amount, event.amount_in_base, "
+            "UPPER(BTRIM(event.currency)) AS currency, UPPER(BTRIM(event.functional_currency)) AS functional_currency, "
+            "BTRIM(raw.source_payload->>'fxRateToBase') AS fx_rate_to_base, "
+            "NULLIF(BTRIM(raw.source_payload->>'description'), '') AS description "
+            "FROM event_cashflow event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND event.cash_action='Deposits/Withdrawals' "
+            "ORDER BY event.report_date_local DESC, event.event_cashflow_id DESC"
+        )
+        params = {"account_id": self._text(account_id, "account_id")}
+        try:
+            with self._engine.connect() as connection:
+                cash_rows = connection.execute(cash_query, params).mappings().all()
+                position_rows = connection.execute(position_query, params).mappings().all()
+                transfer_rows = connection.execute(transfer_query, params).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("portfolio summary report failed") from error
+
+        report_date_local = None if not cash_rows else cash_rows[0]["report_date_local"]
+        base_cash_usd: Decimal | None = None
+        cash_balances = []
+        for row in cash_rows:
+            currency = row["currency"]
+            if currency is None:
+                continue
+            ending_cash = self._decimal_or_none(row["ending_cash"])
+            if currency == "BASE_SUMMARY":
+                base_cash_usd = ending_cash
+            else:
+                cash_balances.append(CashBalanceReportRecord(
+                    currency=currency, amount=None if ending_cash is None else str(ending_cash)
+                ))
+
+        position_row = None if not position_rows else position_rows[0]
+        estimated_nlv_usd = None
+        if (
+            base_cash_usd is not None
+            and position_row is not None
+            and position_row["report_date_local"] == report_date_local
+            and bool(position_row["open_positions_present"])
+            and int(position_row["missing_value_count"]) == 0
+            and position_row["position_value_usd"] is not None
+        ):
+            estimated_nlv_usd = base_cash_usd + Decimal(position_row["position_value_usd"])
+
+        transfer_totals: dict[str, dict[str, Decimal]] = {}
+        transfers = []
+        net_transfers_usd = Decimal("0")
+        transfers_have_usd_values = True
+        for row in transfer_rows:
+            amount = Decimal(row["amount"])
+            currency = row["currency"]
+            totals = transfer_totals.setdefault(
+                currency,
+                {"net": Decimal("0"), "deposits": Decimal("0"), "withdrawals": Decimal("0")},
+            )
+            totals["net"] += amount
+            transfer_type = "Deposit" if amount >= 0 else "Withdrawal"
+            if amount >= 0:
+                totals["deposits"] += amount
+            else:
+                totals["withdrawals"] += abs(amount)
+            transfers.append(
+                TransferReportRecord(
+                    report_date_local=row["report_date_local"], transfer_type=transfer_type, amount=str(abs(amount)),
+                    currency=currency, description=row["description"],
+                )
+            )
+
+            amount_in_base = row["amount_in_base"]
+            if row["functional_currency"] != "USD":
+                transfers_have_usd_values = False
+            elif amount_in_base is not None:
+                net_transfers_usd += Decimal(amount_in_base)
+            elif currency == "USD":
+                net_transfers_usd += amount
+            elif (fx_rate := self._decimal_or_none(row["fx_rate_to_base"])) is not None and fx_rate > 0:
+                net_transfers_usd += amount * fx_rate
+            else:
+                transfers_have_usd_values = False
+
+        transfer_summaries = tuple(
+            TransferSummaryReportRecord(
+                currency=currency,
+                net_transfers=str(totals["net"]),
+                gross_deposits=str(totals["deposits"]),
+                gross_withdrawals=str(totals["withdrawals"]),
+            )
+            for currency, totals in sorted(transfer_totals.items())
+        )
+        net_transfers_value = net_transfers_usd if transfers_have_usd_values else None
+        total_profit_usd = (
+            None if estimated_nlv_usd is None or net_transfers_value is None
+            else estimated_nlv_usd - net_transfers_value
+        )
+        profit_percent = None
+        if total_profit_usd is not None and net_transfers_value is not None and net_transfers_value > 0:
+            profit_percent = (total_profit_usd / net_transfers_value * Decimal("100")).quantize(Decimal("0.00000001"))
+
+        return PortfolioSummaryReportRecord(
+            report_date_local=report_date_local,
+            cash_balances=tuple(cash_balances),
+            transfer_summary_by_currency=transfer_summaries,
+            transfers=tuple(transfers),
+            net_transfers_usd=None if net_transfers_value is None else str(net_transfers_value),
+            estimated_net_liquidation_value_usd=None if estimated_nlv_usd is None else str(estimated_nlv_usd),
+            total_profit_usd=None if total_profit_usd is None else str(total_profit_usd),
+            profit_percent=None if profit_percent is None else str(profit_percent),
+        )
+
     def db_report_provenance(
         self,
         account_id: str,
@@ -634,6 +800,16 @@ class SQLAlchemyPortfolioService:
     @staticmethod
     def _numeric(value: object | None) -> str | None:
         return None if value is None else str(value)
+
+    @staticmethod
+    def _decimal_or_none(value: object | None) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            parsed = Decimal(str(value).strip().replace(",", ""))
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
 
     @staticmethod
     def _text(value: str, field: str) -> str:

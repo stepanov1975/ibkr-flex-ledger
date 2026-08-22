@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict
 from datetime import date
+from decimal import Decimal
 from io import StringIO
 from uuid import UUID
 
@@ -72,6 +73,44 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
         return JSONResponse(
             content={"schema_version": "v1", "items": [_label_json(row) for row in rows],
                      "filters": _filters(report_date_from, report_date_to, label_id)}
+        )
+
+    @router.get("/portfolio-summary")
+    def portfolio_summary() -> JSONResponse:
+        summary = repository.db_report_portfolio_summary(settings.account_id)
+        return JSONResponse(
+            content={
+                "schema_version": "v1",
+                "report_date_local": (
+                    None if summary.report_date_local is None else summary.report_date_local.isoformat()
+                ),
+                "cash_balances": [
+                    {"currency": row.currency, "amount": row.amount} for row in summary.cash_balances
+                ],
+                "transfer_summary_by_currency": [
+                    {
+                        "currency": row.currency,
+                        "net_transfers": row.net_transfers,
+                        "gross_deposits": row.gross_deposits,
+                        "gross_withdrawals": row.gross_withdrawals,
+                    }
+                    for row in summary.transfer_summary_by_currency
+                ],
+                "transfers": [
+                    {
+                        "report_date_local": row.report_date_local.isoformat(),
+                        "type": row.transfer_type,
+                        "amount": row.amount,
+                        "currency": row.currency,
+                        "description": row.description,
+                    }
+                    for row in summary.transfers
+                ],
+                "net_transfers_usd": summary.net_transfers_usd,
+                "estimated_net_liquidation_value_usd": summary.estimated_net_liquidation_value_usd,
+                "total_profit_usd": summary.total_profit_usd,
+                "profit_percent": summary.profit_percent,
+            }
         )
 
     @router.get("/provenance")
@@ -158,6 +197,16 @@ def _csv_response(filename: str, columns: tuple[str, ...], rows: list[dict[str, 
 
 def _instrument_json(row: InstrumentPnlReportRecord) -> dict[str, object]:
     payload = _instrument_csv(row)
+    position = Decimal(row.position_qty)
+    if position == 0 or row.cost_basis is None:
+        payload.update({"average_cost": None, "total_cost": None, "last_day_value": None})
+    else:
+        total_cost = Decimal(row.cost_basis)
+        payload.update({
+            "average_cost": str(total_cost / position),
+            "total_cost": str(total_cost),
+            "last_day_value": str(total_cost + Decimal(row.unrealized_pnl)),
+        })
     payload["provisional"] = row.provisional
     payload["unresolved_case_count"] = row.unresolved_case_count
     return payload

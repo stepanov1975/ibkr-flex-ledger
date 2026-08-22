@@ -413,7 +413,7 @@ class _RawPersistenceStub:
 class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
     """Snapshot service stub capturing automatic snapshot execution calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, full_rebuild_reason: str | None = None) -> None:
         """Initialize snapshot service call capture state.
 
         Returns:
@@ -427,6 +427,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
         self.build_calls = 0
         self.affected_conids: frozenset[str] | None = None
         self.affected_currencies: frozenset[str] | None = None
+        self.full_rebuild_reason = full_rebuild_reason
 
     def ledger_snapshot_build_and_persist(
         self,
@@ -474,6 +475,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             broker_position_mismatch_count=1,
             broker_only_position_count=1,
             broker_absent_nonzero_fifo_count=1,
+            full_rebuild_reason=self.full_rebuild_reason,
         )
 
 
@@ -1205,6 +1207,49 @@ def test_distinct_artifact_reads_changed_rows_and_passes_incremental_scope() -> 
     assert _completed_stage_details(repository)["snapshot"]["snapshot_scope_mode"] == "incremental"
 
 
+def test_missing_report_date_baseline_is_reported_as_full_fallback() -> None:
+    """Expose a service-widened first-date build in ingestion diagnostics."""
+
+    repository = _RepositoryStub()
+    canonical = _CanonicalRepositoryStub(
+        changed_rows=[_raw_row("Trades", {"conid": "100"})]
+    )
+    snapshot = _SnapshotServiceStub(
+        full_rebuild_reason="missing_report_date_baseline"
+    )
+
+    _build_orchestrator(
+        repository,
+        canonical=canonical,
+        snapshot=snapshot,
+    ).job_execute("ingestion_run")
+
+    details = _completed_stage_details(repository)["snapshot"]
+    assert details["snapshot_scope_mode"] == "full_fallback"
+    assert details["snapshot_full_rebuild_reason"] == "missing_report_date_baseline"
+
+
+def test_empty_delta_can_report_missing_baseline_full_fallback() -> None:
+    """Let the snapshot service decide whether an empty delta needs a baseline."""
+
+    repository = _RepositoryStub()
+    canonical = _CanonicalRepositoryStub(changed_rows=[])
+    snapshot = _SnapshotServiceStub(
+        full_rebuild_reason="missing_report_date_baseline"
+    )
+
+    _build_orchestrator(
+        repository,
+        canonical=canonical,
+        snapshot=snapshot,
+    ).job_execute("ingestion_run")
+
+    details = _completed_stage_details(repository)["snapshot"]
+    assert snapshot.build_calls == 1
+    assert details["snapshot_scope_mode"] == "full_fallback"
+    assert details["snapshot_full_rebuild_reason"] == "missing_report_date_baseline"
+
+
 def test_unscopable_changed_row_falls_back_to_full_snapshot() -> None:
     """Use an explicit full rebuild when a changed semantic row is unsafe to scope."""
 
@@ -1322,8 +1367,8 @@ def test_exact_duplicate_skips_snapshot_when_canonical_repository_is_absent() ->
     assert _completed_stage_details(repository)["snapshot"]["snapshot_skip_reason"] == "exact_duplicate_artifact"
 
 
-def test_empty_changed_row_scope_skips_configured_snapshot_service() -> None:
-    """Complete with a no-op when no changed row affects snapshot state."""
+def test_empty_changed_row_scope_checks_baseline_then_skips_snapshot_work() -> None:
+    """Delegate empty deltas so the snapshot service can check for a baseline."""
 
     repository = _RepositoryStub()
     canonical = _CanonicalRepositoryStub(changed_rows=[])
@@ -1332,7 +1377,9 @@ def test_empty_changed_row_scope_skips_configured_snapshot_service() -> None:
     result = _build_orchestrator(repository, canonical=canonical, snapshot=snapshot).job_execute("ingestion_run")
 
     assert result.status == "success"
-    assert snapshot.build_calls == 0
+    assert snapshot.build_calls == 1
+    assert snapshot.affected_conids == frozenset()
+    assert snapshot.affected_currencies == frozenset()
     assert _completed_stage_details(repository)["snapshot"]["snapshot_scope_mode"] == "skipped"
 
 

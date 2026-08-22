@@ -563,13 +563,16 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 snapshot_scope_mode = "full_fallback"
                 snapshot_full_rebuild_reason = scope.full_rebuild_reason
             elif not scope.conids and not scope.currencies:
-                snapshot_result = SnapshotBuildResult(
+                snapshot_started_ns = perf_counter_ns()
+                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
+                    account_id=self._config.account_id,
+                    ingestion_run_id=run_record_id,
                     report_date_local=report_date_local,
-                    snapshot_row_count=0,
-                    position_lot_row_count=0,
-                    missing_solid_valuation_count=0,
+                    functional_currency=self._config.functional_currency,
+                    affected_conids=scope.conids,
+                    affected_currencies=scope.currencies,
                 )
-                snapshot_duration_ms = 0
+                snapshot_duration_ms = _duration_ms(snapshot_started_ns)
                 snapshot_scope_mode = "skipped"
             else:
                 snapshot_started_ns = perf_counter_ns()
@@ -583,6 +586,10 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 )
                 snapshot_duration_ms = _duration_ms(snapshot_started_ns)
                 snapshot_scope_mode = "incremental"
+
+        if snapshot_result.full_rebuild_reason is not None:
+            snapshot_scope_mode = "full_fallback"
+            snapshot_full_rebuild_reason = snapshot_result.full_rebuild_reason
 
         snapshot_details: dict[str, object] = {
             "report_date_local": snapshot_result.report_date_local,

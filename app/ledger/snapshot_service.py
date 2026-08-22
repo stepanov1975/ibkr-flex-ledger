@@ -34,6 +34,7 @@ class SnapshotBuildResult:
         broker_position_mismatch_count: Broker rows differing from canonical FIFO quantity.
         broker_only_position_count: Broker rows without canonical trade or cashflow history.
         broker_absent_nonzero_fifo_count: Nonzero FIFO positions absent from broker rows.
+        full_rebuild_reason: Reason an incremental request was widened to a full build.
     """
 
     report_date_local: str
@@ -44,6 +45,7 @@ class SnapshotBuildResult:
     broker_position_mismatch_count: int = 0
     broker_only_position_count: int = 0
     broker_absent_nonzero_fifo_count: int = 0
+    full_rebuild_reason: str | None = None
 
 
 class StockLedgerSnapshotService:
@@ -105,6 +107,14 @@ class StockLedgerSnapshotService:
         normalized_report_date = parsed_report_date.isoformat()
 
         is_full_build = affected_conids is None and affected_currencies is None
+        full_rebuild_reason: str | None = None
+        if not is_full_build and self._repository.db_pnl_snapshot_daily_count(
+            account_id=normalized_account_id,
+            report_date_from=normalized_report_date,
+            report_date_to=normalized_report_date,
+        ) == 0:
+            is_full_build = True
+            full_rebuild_reason = "missing_report_date_baseline"
         if not is_full_build and not affected_conids and not affected_currencies:
             return SnapshotBuildResult(
                 report_date_local=normalized_report_date,
@@ -523,6 +533,7 @@ class StockLedgerSnapshotService:
             broker_position_mismatch_count=broker_position_mismatch_count,
             broker_only_position_count=broker_only_position_count,
             broker_absent_nonzero_fifo_count=broker_absent_nonzero_fifo_count,
+            full_rebuild_reason=full_rebuild_reason,
         )
 
     def _build_open_position_valuation_map(
@@ -731,8 +742,8 @@ class StockLedgerSnapshotService:
             RuntimeError: This helper does not raise runtime errors.
         """
 
-        fees = Decimal(trade_row.fees or "0")
-        commission = Decimal(trade_row.commission or "0")
+        fees = abs(Decimal(trade_row.fees or "0"))
+        commission = abs(Decimal(trade_row.commission or "0"))
         return fees + commission
 
     def _build_open_cost_basis(self, open_lots: tuple[FifoOpenLotResult, ...]) -> str | None:

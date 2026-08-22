@@ -149,6 +149,7 @@ Service endpoints:
 - Health: `http://127.0.0.1:8000/health`
 - PostgreSQL host port: `5433` (container port `5432`)
 - Portfolio dashboard: `http://127.0.0.1:8000/ui`
+- Operations dashboard: `http://127.0.0.1:8000/ui/operations`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
 
 ### UI date and time display
@@ -156,7 +157,9 @@ Service endpoints:
 The dashboard displays date-only values as `dd/mm/yy` and timestamps as
 `dd/mm/yy hh:mm`, using zero-padded values and 24-hour time. Timestamp display
 uses the `Asia/Jerusalem` timezone; date-only business values retain their
-reported calendar date. API payloads and persisted timestamps remain ISO/UTC.
+reported calendar date. The portfolio table hides zero-position instruments by
+default; its toggle can reveal them, and unavailable display values use `N/A`.
+API payloads and persisted timestamps remain ISO/UTC.
 
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
@@ -400,9 +403,10 @@ Normal ingestion keeps every distinct Flex artifact and its raw rows. An exact
 duplicate artifact skips raw-row insertion, canonical mapping, and snapshot
 rebuilding only when that artifact has a successfully completed prior processing
 run. A distinct artifact canonicalizes only rows changed from its latest
-successfully processed source version and rebuilds snapshots only for affected
-instruments and FX source currencies. Explicit reprocess commands remain full
-replays.
+successfully processed source version. Snapshot updates for an existing report
+date remain limited to affected instruments and FX source currencies; the first
+snapshot for a report date automatically widens to a full rebuild and records
+`missing_report_date_baseline`. Explicit reprocess commands remain full replays.
 
 Run-detail diagnostics include request transport, polling, cumulative poll wait,
 preflight, XML extraction, artifact persistence, raw persistence, canonical raw
@@ -446,6 +450,7 @@ is available and deterministic fallbacks outside that authority:
 - Same-day `Trades.closePrice` and last known trade price are fallback marks only when
   completed broker-position authority is not being applied.
 - Execution FX: `Trades.fxRateToBase` -> derived net-cash ratio -> exact/nearest-previous `ConversionRates`
+- Signed IBKR trade commissions and fees are normalized to positive FIFO cost impacts.
 - Base-currency events use `1.0`; missing non-base FX marks the snapshot provisional rather than labeling native amounts as USD
 - Flex statement `reportDate` drives the snapshot business date, including delayed imports
 
@@ -533,12 +538,26 @@ The reporting API exposes:
 
 - `GET /reports/pnl/by-instrument`
 - `GET /reports/pnl/by-label`
+- `GET /reports/portfolio-summary`
 - `GET /reports/provenance`
 
 PnL endpoints return JSON by default. Pass `format=csv` for the stable CSV `v1` contract;
 responses include the fixed column order and `X-Schema-Version: v1`. Provenance rows link
 reported values to canonical events, raw-record identities, section names, and immutable
-source payloads.
+source payloads. Instrument PnL JSON also exposes average cost per position unit, total cost,
+and last-day value for open positions. These values use the snapshot's functional currency;
+closed positions or positions without a cost basis return `null` for all three fields.
+
+The portfolio-summary report supplies the `/ui` overview with the latest broker cash
+balance per currency, all canonical deposits and withdrawals in their original currency,
+and net/gross transfer totals per currency. Cash and positions each come from the newest
+successful artifact containing that section, so a corrected same-day report replaces the
+older section instead of being merged with it. USD net transfers use the transaction's IBKR
+base amount or FX rate. Estimated net liquidation value is same-date base-currency cash plus
+position values converted to USD; total profit subtracts net transfers in USD, and profit
+percentage divides that result by positive net transfers. A USD-derived metric is `null`
+when report dates differ or a required FX rate, cash balance, or current position value is
+unavailable.
 
 ## Reconciliation diff mode (Task 11)
 
@@ -549,7 +568,7 @@ identities. Requests fail clearly when required broker reconciliation sections a
 
 ## Operations, alerts, and recovery (Task 12)
 
-`GET /operations/slo` and `/ui` expose the 30-day scheduled-ingestion SLO state. The
+`GET /operations/slo` and `/ui/operations` expose the 30-day scheduled-ingestion SLO state. The
 `alerts-evaluate` CLI sends transition-only alert and recovery notifications through
 independently optional JSON webhook and SMTP channels, with durable per-destination
 deduplication.

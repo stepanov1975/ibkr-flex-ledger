@@ -44,6 +44,7 @@ class _RepositoryStub:
         scope_ids: list[str] | None = None,
         instrument_currencies: list[str] | None = None,
         instrument_asset_categories: dict[str, str] | None = None,
+        existing_snapshot_count: int = 1,
     ) -> None:
         self._trades = trades
         self._valuations = valuations
@@ -53,6 +54,7 @@ class _RepositoryStub:
         self._scope_ids = list(scope_ids or [])
         self._instrument_currencies = list(instrument_currencies or [])
         self._instrument_asset_categories = dict(instrument_asset_categories or {})
+        self._existing_snapshot_count = existing_snapshot_count
         self.position_requests: _SnapshotCapture[PositionLotUpsertRequest] = _SnapshotCapture(requests=[])
         self.snapshot_requests: _SnapshotCapture[PnlSnapshotDailyUpsertRequest] = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
@@ -180,6 +182,18 @@ class _RepositoryStub:
     ) -> None:
         """Capture snapshot upsert payload for assertions."""
         self.snapshot_requests.requests = requests
+
+    def db_pnl_snapshot_daily_count(
+        self,
+        account_id: str,
+        report_date_from: str | None = None,
+        report_date_to: str | None = None,
+    ) -> int:
+        """Return whether the requested report date already has a baseline."""
+
+        _ = (account_id, report_date_from, report_date_to)
+        self.read_call_count += 1
+        return self._existing_snapshot_count
 
 
 def _snapshot_service(repository: _RepositoryStub) -> StockLedgerSnapshotService:
@@ -591,8 +605,143 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
     assert [request.instrument_id for request in repository.snapshot_requests.requests] == [instrument_id]
 
 
+def test_snapshot_first_build_for_report_date_ignores_incremental_scope() -> None:
+    """Build every instrument when the report date has no complete baseline yet."""
+
+    scoped_instrument_id = "00000000-0000-0000-0000-000000000010"
+    closed_instrument_id = "00000000-0000-0000-0000-000000000099"
+    repository = _RepositoryStub(
+        trades=[
+            _trade(cast(UUID, scoped_instrument_id), "BUY", "1", "100"),
+            _trade(cast(UUID, closed_instrument_id), "BUY", "1", "50"),
+            _trade(cast(UUID, closed_instrument_id), "SELL", "1", "60", minute=1),
+        ],
+        valuations=[],
+        scope_ids=[scoped_instrument_id],
+        existing_snapshot_count=0,
+    )
+
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        account_id="U1",
+        ingestion_run_id="00000000-0000-0000-0000-000000000001",
+        report_date_local="2026-08-21",
+        functional_currency="USD",
+        affected_conids=frozenset({"100"}),
+        affected_currencies=frozenset(),
+    )
+
+    assert result.full_rebuild_reason == "missing_report_date_baseline"
+    assert repository.trade_instrument_ids is None
+    assert repository.reconciled_instrument_ids is None
+    assert {request.instrument_id for request in repository.snapshot_requests.requests} == {
+        scoped_instrument_id,
+        closed_instrument_id,
+    }
+    closed_snapshot = next(
+        request
+        for request in repository.snapshot_requests.requests
+        if request.instrument_id == closed_instrument_id
+    )
+    assert Decimal(closed_snapshot.realized_pnl) == Decimal("10")
+
+
+def test_snapshot_empty_scope_builds_full_when_report_date_has_no_baseline() -> None:
+    """Carry closed-instrument P&L onto a new date even without changed rows."""
+
+    closed_instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[
+            _trade(closed_instrument_id, "BUY", "1", "50"),
+            _trade(closed_instrument_id, "SELL", "1", "60", minute=1),
+        ],
+        valuations=[],
+        existing_snapshot_count=0,
+    )
+
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        account_id="U1",
+        ingestion_run_id="00000000-0000-0000-0000-000000000001",
+        report_date_local="2026-08-21",
+        functional_currency="USD",
+        affected_conids=frozenset(),
+        affected_currencies=frozenset(),
+    )
+
+    assert result.full_rebuild_reason == "missing_report_date_baseline"
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.instrument_id == str(closed_instrument_id)
+    assert Decimal(snapshot.realized_pnl) == Decimal("10")
+
+
+@pytest.mark.parametrize(
+    ("fees", "commission"),
+    [("-5", "0"), ("0", "-5")],
+)
+def test_snapshot_normalizes_negative_ibkr_trade_charges_as_cost(
+    fees: str,
+    commission: str,
+) -> None:
+    """Treat IBKR's signed fees and commission as costs in FIFO basis and P&L."""
+
+    instrument_id = uuid4()
+    trade = replace(
+        _trade(instrument_id, "BUY", "10", "100"),
+        fees=fees,
+        commission=commission,
+    )
+    repository = _RepositoryStub(
+        trades=[trade],
+        valuations=[_broker_position(
+            instrument_id,
+            "10",
+            mark="120",
+            cost="1005",
+            unrealized="195",
+        )],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert snapshot.cost_basis is not None
+    assert Decimal(snapshot.cost_basis) == Decimal("1005")
+    assert Decimal(snapshot.unrealized_pnl) == Decimal("195")
+    assert Decimal(snapshot.total_pnl) == Decimal("195")
+    assert Decimal(snapshot.fees) == Decimal("5")
+
+
+def test_snapshot_normalized_trade_charges_reduce_realized_pnl() -> None:
+    """Apply opening and closing IBKR charges as realized economic costs."""
+
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[
+            replace(
+                _trade(instrument_id, "BUY", "10", "100"),
+                commission="-5",
+            ),
+            replace(
+                _trade(instrument_id, "SELL", "10", "110", minute=1),
+                commission="-5",
+            ),
+        ],
+        valuations=[],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", None, "2026-08-20", "USD"
+    )
+
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.realized_pnl) == Decimal("90")
+    assert Decimal(snapshot.total_pnl) == Decimal("90")
+    assert Decimal(snapshot.fees) == Decimal("10")
+
+
 def test_snapshot_build_empty_scope_is_noop() -> None:
-    """Avoid every repository read when both affected scope sets are empty."""
+    """Check for a baseline, then avoid semantic reads for an empty scope."""
 
     repository = _RepositoryStub(trades=[], valuations=[])
 
@@ -607,7 +756,7 @@ def test_snapshot_build_empty_scope_is_noop() -> None:
 
     assert result.snapshot_row_count == 0
     assert result.position_lot_row_count == 0
-    assert repository.read_call_count == 0
+    assert repository.read_call_count == 1
     assert repository.reconcile_call_count == 0
 
 

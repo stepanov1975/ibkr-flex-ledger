@@ -86,6 +86,41 @@ class LabelPnlReportRecord:
 
 
 @dataclass(frozen=True)
+class CashBalanceReportRecord:
+    currency: str
+    amount: str | None
+
+
+@dataclass(frozen=True)
+class TransferSummaryReportRecord:
+    currency: str
+    net_transfers: str
+    gross_deposits: str
+    gross_withdrawals: str
+
+
+@dataclass(frozen=True)
+class TransferReportRecord:
+    report_date_local: date
+    transfer_type: str
+    amount: str
+    currency: str
+    description: str | None
+
+
+@dataclass(frozen=True)
+class PortfolioSummaryReportRecord:
+    report_date_local: date | None
+    cash_balances: tuple[CashBalanceReportRecord, ...]
+    transfer_summary_by_currency: tuple[TransferSummaryReportRecord, ...]
+    transfers: tuple[TransferReportRecord, ...]
+    net_transfers_usd: str | None
+    estimated_net_liquidation_value_usd: str | None
+    total_profit_usd: str | None
+    profit_percent: str | None
+
+
+@dataclass(frozen=True)
 class ProvenanceRecord:
     event_type: str
     event_id: UUID
@@ -205,6 +240,8 @@ class PortfolioRepositoryPort(Protocol):
         report_date_to: date | None,
         label_id: UUID | None,
     ) -> list[LabelPnlReportRecord]: ...
+
+    def db_report_portfolio_summary(self, account_id: str) -> PortfolioSummaryReportRecord: ...
 
     def db_report_provenance(
         self,

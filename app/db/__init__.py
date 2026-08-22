@@ -9,6 +9,7 @@ from .portfolio import SQLAlchemyPortfolioService
 from .operations_alerts import SQLAlchemyOperationsAlertService
 from .operations_alert_interfaces import AlertDeliveryStateRecord, AlertDeliveryStateRepositoryPort
 from .portfolio_interfaces import (
+    CashBalanceReportRecord,
     CorporateActionManualCaseRecord,
     DiagnosticArchiveRecord,
     IngestionSloRecord,
@@ -17,9 +18,12 @@ from .portfolio_interfaces import (
     LabelPnlReportRecord,
     LabelRecord,
     NoteRecord,
+    PortfolioSummaryReportRecord,
     PortfolioRepositoryPort,
     ProvenanceRecord,
     ReconciliationSourceRecord,
+    TransferReportRecord,
+    TransferSummaryReportRecord,
 )
 from .interfaces import (
 	CanonicalCashflowUpsertRequest,
@@ -102,6 +106,7 @@ __all__ = [
 	"AlertDeliveryStateRecord",
 	"AlertDeliveryStateRepositoryPort",
 	"CorporateActionManualCaseRecord",
+	"CashBalanceReportRecord",
 	"DiagnosticArchiveRecord",
 	"IngestionSloRecord",
 	"InstrumentPnlReportRecord",
@@ -109,9 +114,12 @@ __all__ = [
 	"LabelPnlReportRecord",
 	"LabelRecord",
 	"NoteRecord",
+	"PortfolioSummaryReportRecord",
 	"PortfolioRepositoryPort",
 	"ProvenanceRecord",
 	"ReconciliationSourceRecord",
+	"TransferReportRecord",
+	"TransferSummaryReportRecord",
 	"db_create_engine",
 	"db_create_session_factory",
 ]
