@@ -290,7 +290,6 @@ def api_serialize_ingestion_run_record(run_record: IngestionRunRecord) -> dict[s
 
     return {
         "ingestion_run_id": str(run_record.ingestion_run_id),
-        "account_id": run_record.account_id,
         "run_type": run_record.run_type,
         "status": run_record.state.status,
         "period_key": run_record.reference.period_key,

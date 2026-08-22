@@ -85,6 +85,57 @@ def test_reprocess_selection_is_empty_without_candidates() -> None:
     assert job_select_replay_artifacts([]) == ()
 
 
+def test_reprocess_empty_selection_finalizes_failed() -> None:
+    """Reject an explicit replay scope that resolves to no artifacts."""
+
+    operation_log: list[tuple[object, ...]] = []
+    ingestion_repository = _IngestionRepositoryStub()
+    orchestrator = _reprocess_orchestrator(
+        raw_read_repository=_ArtifactRawRepository([], {}, operation_log),
+        canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
+        snapshot_service=_SnapshotServiceStub(operation_log),
+        snapshot_repository=_CleanupRepositoryStub(operation_log),
+        config=CanonicalReprocessOrchestratorConfig("U_TEST", "2026-02-20", "query", "USD"),
+        ingestion_repository=ingestion_repository,
+    )
+
+    result = orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+
+    assert result.status == "failed"
+    assert ingestion_repository.finalize_calls[-1]["error_code"] == "REPROCESS_CONTRACT_ERROR"
+    assert "ABORT_EMPTY_SELECTION" in str(ingestion_repository.finalize_calls[-1]["error_message"])
+    assert "U_TEST" not in str(ingestion_repository.finalize_calls[-1]["error_message"])
+    assert "U_TEST" not in str(ingestion_repository.finalize_calls[-1]["diagnostics"])
+
+
+def test_reprocess_finalizes_unexpected_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not leave a reprocess run active after an ordinary programming error."""
+
+    operation_log: list[tuple[object, ...]] = []
+    candidate = _candidate(date(2026, 8, 20), datetime(2026, 8, 21, tzinfo=timezone.utc), UUID(int=9))
+    ingestion_repository = _IngestionRepositoryStub()
+    orchestrator = _reprocess_orchestrator(
+        raw_read_repository=_ArtifactRawRepository([candidate], {}, operation_log),
+        canonical_persistence_repository=_CanonicalPersistRepositoryStub(),
+        snapshot_service=_SnapshotServiceStub(operation_log),
+        snapshot_repository=_CleanupRepositoryStub(operation_log),
+        config=CanonicalReprocessOrchestratorConfig("U_TEST", "2026-02-20", "query", "USD"),
+        ingestion_repository=ingestion_repository,
+    )
+
+    def raise_unexpected(_candidates: list[RawArtifactReplayCandidate]) -> tuple[RawArtifactReplayCandidate, ...]:
+        raise KeyError("unexpected selection failure")
+
+    monkeypatch.setattr(reprocess_module, "job_select_replay_artifacts", raise_unexpected)
+
+    result = orchestrator.job_execute("reprocess_run")
+
+    assert result.status == "failed"
+    assert ingestion_repository.finalize_calls[-1]["status"] == "failed"
+    assert ingestion_repository.finalize_calls[-1]["error_code"] == "REPROCESS_UNEXPECTED_ERROR"
+    assert "unexpected selection failure" in str(ingestion_repository.finalize_calls[-1]["error_message"])
+
+
 class _ArtifactRawRepository:
     def __init__(
         self,

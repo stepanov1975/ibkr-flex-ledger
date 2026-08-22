@@ -255,6 +255,7 @@ def test_api_snapshot_daily_list_returns_contract_envelope() -> None:
     assert payload["sort"] == {"sort_by": "report_date_local", "sort_dir": "desc"}
     assert payload["filters"] == {"report_date_from": "2026-02-01", "report_date_to": "2026-02-28"}
     assert payload["items"][0]["realized_pnl"] == "78.6"
+    assert "account_id" not in payload["items"][0]
     assert snapshot_repository.calls[0]["account_id"] == "U_TEST"
 
 

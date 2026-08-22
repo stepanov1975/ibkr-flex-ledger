@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
+from app.db import PnlSnapshotDailyUpsertRequest
 from app.db.canonical_persistence import SQLAlchemyCanonicalPersistenceService
 from app.db.ingestion_run import SQLAlchemyIngestionRunService
 from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
+from app.db.portfolio import SQLAlchemyPortfolioService
 
 
 class _MappingResultStub:
@@ -51,6 +53,20 @@ class _MappingResultStub:
         """
 
         return self._rows
+
+    def one_or_none(self) -> dict | None:
+        """Return the only row or None for update-returning query tests."""
+
+        if not self._rows:
+            return None
+        assert len(self._rows) == 1
+        return self._rows[0]
+
+    def one(self) -> dict:
+        """Return the only row for detail query tests."""
+
+        assert len(self._rows) == 1
+        return self._rows[0]
 
 
 class _ConnectionStub:
@@ -345,3 +361,120 @@ def test_db_snapshot_list_uses_typed_nullable_date_predicates() -> None:
     executed_query = connection.executed_queries[0]
     assert "CAST(:report_date_from AS date) IS NULL" in executed_query
     assert "CAST(:report_date_to AS date) IS NULL" in executed_query
+
+
+def test_snapshot_upsert_persists_calculation_provisional_separately() -> None:
+    """Keep calculation uncertainty independent from manual-case state."""
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyLedgerSnapshotService(engine=_EngineStub(connection=connection))
+
+    service.db_pnl_snapshot_daily_upsert_many(
+        [
+            PnlSnapshotDailyUpsertRequest(
+                account_id="U_TEST",
+                report_date_local="2026-08-21",
+                instrument_id=str(uuid4()),
+                position_qty="1",
+                cost_basis="10",
+                realized_pnl="0",
+                unrealized_pnl="1",
+                total_pnl="1",
+                fees="0",
+                withholding_tax="0",
+                currency="USD",
+                provisional=True,
+                valuation_source="EOD_MARK_MISSING_ALL_SOURCES",
+                fx_source="base_currency",
+                ingestion_run_id=str(uuid4()),
+            )
+        ]
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert "calculation_provisional" in executed_query
+    assert "calculation_provisional = EXCLUDED.calculation_provisional" in executed_query
+
+
+def test_manual_case_update_preserves_calculation_provisional() -> None:
+    """Closing manual review must not clear independent calculation uncertainty."""
+
+    now_utc = datetime.now(timezone.utc)
+    case_id = uuid4()
+    case_row = {
+        "case_id": case_id,
+        "event_corp_action_id": uuid4(),
+        "action_type": "MERGER",
+        "instrument_id": uuid4(),
+        "symbol": "TEST",
+        "status": "resolved",
+        "owner": "owner",
+        "resolution_note": "resolved",
+        "resolved_at_utc": now_utc,
+        "created_at_utc": now_utc,
+        "updated_at_utc": now_utc,
+    }
+    connection = _ConnectionStub(rows=[case_row])
+    service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
+
+    service.db_manual_case_update(case_id, "resolved", "owner", "resolved")
+
+    snapshot_update_query = connection.executed_queries[2]
+    assert "calculation_provisional OR EXISTS" in snapshot_update_query
+
+
+def test_reconciliation_sources_use_snapshot_lineage_and_functional_currency() -> None:
+    """Compare one snapshot only with broker rows from its source run in its currency."""
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
+
+    service.db_reconciliation_sources(
+        account_id="U_TEST",
+        report_date_from=date(2026, 8, 21),
+        report_date_to=date(2026, 8, 21),
+        instrument_id=None,
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert executed_query.count("raw.ingestion_run_id=s.ingestion_run_id") >= 5
+    assert "raw.source_payload->>'ibCommission'" in executed_query
+    assert "raw.source_payload->>'commission'" not in executed_query
+    assert "raw.source_payload->>'ibCommissionCurrency'" in executed_query
+    assert "raw.source_payload->>'fxRateToBase'" in executed_query
+    assert "fx_raw.section_name='ConversionRates'" in executed_query
+    assert "REPLACE(BTRIM" in executed_query
+    assert "IN ('', '-', '--', 'N/A')" in executed_query
+    assert "UPPER(BTRIM(raw.source_payload->>'currency'))=s.currency" in executed_query
+
+
+def test_provenance_includes_events_through_snapshot_date() -> None:
+    """Trace a cumulative snapshot to every source event through its date."""
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
+
+    service.db_report_provenance(
+        account_id="U_TEST",
+        report_date_local=date(2026, 8, 21),
+        instrument_id=uuid4(),
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert executed_query.count("event.report_date_local<=:report_date") == 3
+    assert "event.report_date_local=:report_date" not in executed_query
+
+
+def test_ingestion_slo_records_include_only_scheduled_runs() -> None:
+    """Exclude manual triggers from scheduled-ingestion reliability metrics."""
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
+
+    service.db_ingestion_slo_records(
+        account_id="U_TEST",
+        since_utc=datetime(2026, 8, 21, tzinfo=timezone.utc),
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert "run_type='scheduled'" in executed_query

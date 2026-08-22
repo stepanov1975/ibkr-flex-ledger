@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+import json
 import os
 import uuid
 
@@ -11,6 +13,8 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from alembic import command
 from alembic.config import Config
+
+from app.db.portfolio import SQLAlchemyPortfolioService
 
 
 def _migration_build_database_url(base_url: str, database_name: str) -> str:
@@ -202,6 +206,10 @@ def test_migrations_apply_and_are_idempotent_ingestion_indexes() -> None:
                 "created_at_utc",
                 "raw_record_id",
             )
+            snapshot_columns = {
+                column["name"] for column in inspector.get_columns("pnl_snapshot_daily")
+            }
+            assert "calculation_provisional" in snapshot_columns
         finally:
             verification_engine.dispose()
 
@@ -336,6 +344,196 @@ def test_migration_05_adds_nullable_artifact_completion_foreign_key() -> None:
             }
         finally:
             downgraded_engine.dispose()
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)
+
+
+def test_migration_06_backfills_calculation_provisional() -> None:
+    """Preserve existing final/provisional snapshot meaning during migration."""
+
+    base_url = _migration_resolve_reachable_base_url()
+    temp_database_name = f"test_snapshot_provisional_{uuid.uuid4().hex[:10]}"
+    admin_url = _migration_build_database_url(base_url, "postgres")
+    temp_database_url = _migration_build_database_url(base_url, temp_database_name)
+    _migration_create_database(admin_url=admin_url, database_name=temp_database_name)
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = temp_database_url
+    try:
+        alembic_config = Config("alembic.ini")
+        command.upgrade(alembic_config, "20260821_05")
+        pre_upgrade_engine = create_engine(temp_database_url)
+        try:
+            run_id = uuid.uuid4()
+            instrument_ids = [uuid.uuid4(), uuid.uuid4()]
+            with pre_upgrade_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, period_key, "
+                        "flex_query_id, started_at_utc, ended_at_utc) VALUES "
+                        "(:run_id, 'U_MIGRATION', 'manual', 'success', '2026-08-21', 'query', now(), now())"
+                    ),
+                    {"run_id": run_id},
+                )
+                for index, (instrument_id, provisional) in enumerate(
+                    zip(instrument_ids, (False, True), strict=True)
+                ):
+                    connection.execute(
+                        text(
+                            "INSERT INTO instrument (instrument_id, account_id, conid, symbol, asset_category, currency) "
+                            "VALUES (:instrument_id, 'U_MIGRATION', :conid, :symbol, 'STK', 'USD')"
+                        ),
+                        {"instrument_id": instrument_id, "conid": str(index), "symbol": f"T{index}"},
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO pnl_snapshot_daily (account_id, report_date_local, instrument_id, "
+                            "position_qty, cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees, "
+                            "withholding_tax, currency, provisional, ingestion_run_id) VALUES "
+                            "('U_MIGRATION', '2026-08-21', :instrument_id, 1, 1, 0, 0, 0, 0, 0, 'USD', "
+                            ":provisional, :run_id)"
+                        ),
+                        {"instrument_id": instrument_id, "provisional": provisional, "run_id": run_id},
+                    )
+        finally:
+            pre_upgrade_engine.dispose()
+
+        command.upgrade(alembic_config, "head")
+        verification_engine = create_engine(temp_database_url)
+        try:
+            with verification_engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT provisional, calculation_provisional FROM pnl_snapshot_daily "
+                        "ORDER BY provisional"
+                    )
+                ).all()
+            assert rows == [(False, False), (True, True)]
+        finally:
+            verification_engine.dispose()
+
+        command.downgrade(alembic_config, "20260821_05")
+        downgraded_engine = create_engine(temp_database_url)
+        try:
+            assert "calculation_provisional" not in {
+                column["name"] for column in inspect(downgraded_engine).get_columns("pnl_snapshot_daily")
+            }
+        finally:
+            downgraded_engine.dispose()
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _migration_drop_database(admin_url=admin_url, database_name=temp_database_name)
+
+
+def test_reconciliation_normalizes_raw_values_and_commission_currency() -> None:
+    """Normalize Flex numerics and convert each fee using its actual currency."""
+
+    base_url = _migration_resolve_reachable_base_url()
+    temp_database_name = f"test_reconciliation_fx_{uuid.uuid4().hex[:10]}"
+    admin_url = _migration_build_database_url(base_url, "postgres")
+    temp_database_url = _migration_build_database_url(base_url, temp_database_name)
+    _migration_create_database(admin_url=admin_url, database_name=temp_database_name)
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = temp_database_url
+    try:
+        alembic_config = Config("alembic.ini")
+        command.upgrade(alembic_config, "head")
+        engine = create_engine(temp_database_url)
+        try:
+            run_id = uuid.uuid4()
+            instrument_id = uuid.uuid4()
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO ingestion_run (ingestion_run_id, account_id, run_type, status, period_key, "
+                        "flex_query_id, started_at_utc, ended_at_utc) VALUES "
+                        "(:run_id, 'U_RECON', 'scheduled', 'success', '2026-08-21', 'query', now(), now())"
+                    ),
+                    {"run_id": run_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO instrument (instrument_id, account_id, conid, symbol, asset_category, currency) "
+                        "VALUES (:instrument_id, 'U_RECON', '123', 'TEST', 'STK', 'EUR')"
+                    ),
+                    {"instrument_id": instrument_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO pnl_snapshot_daily (account_id, report_date_local, instrument_id, position_qty, "
+                        "cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees, withholding_tax, currency, "
+                        "calculation_provisional, provisional, ingestion_run_id) VALUES "
+                        "('U_RECON', '2026-08-21', :instrument_id, 1234.5, 0, 0, 0, 0, 0, 0, 'USD', false, false, :run_id)"
+                    ),
+                    {"instrument_id": instrument_id, "run_id": run_id},
+                )
+                raw_rows = (
+                    (
+                        "OpenPositions",
+                        "open",
+                        {"conid": "123", "currency": "EUR", "position": " 1,234.50 ",
+                         "fifoPnlUnrealized": " -- ", "fxRateToBase": " 1.20 "},
+                    ),
+                    (
+                        "Trades",
+                        "trade",
+                        {"conid": "123", "currency": "EUR", "fifoPnlRealized": " 1,000.25 ",
+                         "fxRateToBase": " 1.20 ", "ibCommission": " -2.50 ",
+                         "ibCommissionCurrency": "GBP", "fees": " -1.00 "},
+                    ),
+                    (
+                        "CashTransactions",
+                        "cash-eur",
+                        {"conid": "123", "currency": "EUR", "withholdingTax": " 10.00 ",
+                         "fxRateToBase": " 1.20 "},
+                    ),
+                    (
+                        "CashTransactions",
+                        "cash-jpy",
+                        {"conid": "123", "currency": "JPY", "withholdingTax": " 5.00 ",
+                         "fxRateToBase": " N/A "},
+                    ),
+                    (
+                        "ConversionRates",
+                        "gbp-usd",
+                        {"fromCurrency": "GBP", "toCurrency": "USD", "rate": " 1.30 ",
+                         "reportDate": "2026-08-21"},
+                    ),
+                )
+                for section_name, source_row_ref, payload in raw_rows:
+                    connection.execute(
+                        text(
+                            "INSERT INTO raw_record (ingestion_run_id, account_id, period_key, flex_query_id, "
+                            "payload_sha256, report_date_local, section_name, source_row_ref, source_payload) VALUES "
+                            "(:run_id, 'U_RECON', '2026-08-21', 'query', :payload_sha, '2026-08-21', "
+                            ":section_name, :source_row_ref, CAST(:payload AS jsonb))"
+                        ),
+                        {"run_id": run_id, "payload_sha": source_row_ref, "section_name": section_name,
+                         "source_row_ref": source_row_ref, "payload": json.dumps(payload)},
+                    )
+
+            rows = SQLAlchemyPortfolioService(engine=engine).db_reconciliation_sources(
+                account_id="U_RECON",
+                report_date_from=None,
+                report_date_to=None,
+                instrument_id=None,
+            )
+            assert len(rows) == 1
+            assert Decimal(rows[0].broker_position_qty or "") == Decimal("1234.50")
+            assert Decimal(rows[0].broker_realized_pnl or "") == Decimal("1200.300")
+            assert rows[0].broker_unrealized_pnl is None
+            assert Decimal(rows[0].broker_fees or "") == Decimal("-4.45")
+            assert rows[0].broker_withholding_tax is None
+        finally:
+            engine.dispose()
     finally:
         if previous_database_url is None:
             os.environ.pop("DATABASE_URL", None)

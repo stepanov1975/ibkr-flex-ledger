@@ -487,6 +487,7 @@ def test_api_ingestion_run_detail_includes_status_and_timeline() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "failed"
+    assert "account_id" not in payload
     assert isinstance(payload["diagnostics"], list)
     assert payload["diagnostics"][0]["stage"] == "preflight"
 
@@ -596,6 +597,7 @@ def test_api_ingestion_run_list_includes_canonical_summary_fields() -> None:
 
     assert response.status_code == 200
     payload = response.json()["items"][0]
+    assert "account_id" not in payload
     assert payload["canonical_input_row_count"] == 14946
     assert payload["canonical_duration_ms"] == 1948
     assert payload["canonical_skip_reason"] is None

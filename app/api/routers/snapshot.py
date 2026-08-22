@@ -140,7 +140,6 @@ def api_serialize_pnl_snapshot_daily_row(snapshot_row: PnlSnapshotDailyRecord) -
 
     return {
         "pnl_snapshot_daily_id": str(snapshot_row.pnl_snapshot_daily_id),
-        "account_id": snapshot_row.account_id,
         "report_date_local": snapshot_row.report_date_local.isoformat(),
         "instrument_id": str(snapshot_row.instrument_id),
         "position_qty": snapshot_row.position_qty,

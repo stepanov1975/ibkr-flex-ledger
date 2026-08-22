@@ -9,7 +9,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app import bootstrap as bootstrap_module
 from app.adapters import AdapterFetchResult, FlexTokenInvalidError
+from app.config import AppSettings
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
     CanonicalCorpActionUpsertRequest,
@@ -35,6 +37,45 @@ from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService
 
 _ARTIFACT_OWNER_RUN_ID = UUID("00000000-0000-0000-0000-000000000001")
 _FAILED_COMPLETION_RUN_ID = UUID("00000000-0000-0000-0000-000000000002")
+
+
+def test_cli_bootstrap_marks_ingestion_as_scheduled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Classify non-HTTP ingestion as scheduled for SLO reporting."""
+
+    settings = AppSettings(
+        environment_name="test-cli-ingestion",
+        database_url="postgresql+psycopg://postgres:postgres@localhost:5432/postgres",
+        account_id="U_TEST",
+        ibkr_flex_token="token",
+        ibkr_flex_query_id="query",
+    )
+    engine = object()
+    repository = object()
+    snapshot_repository = object()
+    snapshot_service = object()
+    adapter = object()
+    orchestrator = object()
+    captured_configs: list[IngestionOrchestratorConfig] = []
+
+    monkeypatch.setattr(bootstrap_module, "config_load_settings", lambda: settings)
+    monkeypatch.setattr(bootstrap_module, "db_create_engine", lambda database_url: engine)
+    monkeypatch.setattr(bootstrap_module, "SQLAlchemyIngestionRunService", lambda *, engine: repository)
+    monkeypatch.setattr(bootstrap_module, "SQLAlchemyRawPersistenceService", lambda *, engine: repository)
+    monkeypatch.setattr(bootstrap_module, "SQLAlchemyCanonicalPersistenceService", lambda *, engine: repository)
+    monkeypatch.setattr(bootstrap_module, "SQLAlchemyLedgerSnapshotService", lambda *, engine: snapshot_repository)
+    monkeypatch.setattr(bootstrap_module, "StockLedgerSnapshotService", lambda *, repository: snapshot_service)
+    monkeypatch.setattr(bootstrap_module, "FlexWebServiceAdapter", lambda **kwargs: adapter)
+
+    def build_orchestrator(**kwargs: Any) -> object:
+        captured_configs.append(kwargs["config"])
+        return orchestrator
+
+    monkeypatch.setattr(bootstrap_module, "IngestionJobOrchestrator", build_orchestrator)
+
+    result = bootstrap_module.bootstrap_create_ingestion_orchestrator()
+
+    assert result is orchestrator
+    assert captured_configs[0].run_type == "scheduled"
 
 
 class _RepositoryStub:
@@ -623,6 +664,30 @@ def test_jobs_ingestion_orchestrator_maps_typed_token_error_to_deterministic_cod
 
     assert result.status == "failed"
     assert repository_stub.finalize_calls[0]["error_code"] == "INGESTION_TOKEN_INVALID_ERROR"
+
+
+def test_jobs_ingestion_orchestrator_finalizes_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not leave a started run active after an ordinary programming error."""
+
+    repository = _RepositoryStub()
+
+    def raise_unexpected(**_kwargs: object) -> object:
+        raise KeyError("unexpected preflight failure")
+
+    monkeypatch.setattr(
+        ingestion_module,
+        "job_section_preflight_validate_required_sections",
+        raise_unexpected,
+    )
+
+    result = _build_orchestrator(repository).job_execute("ingestion_run")
+
+    assert result.status == "failed"
+    assert repository.finalize_calls[-1]["status"] == "failed"
+    assert repository.finalize_calls[-1]["error_code"] == "INGESTION_UNEXPECTED_ERROR"
+    assert "unexpected preflight failure" in str(repository.finalize_calls[-1]["error_message"])
 
 
 def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_details() -> None:

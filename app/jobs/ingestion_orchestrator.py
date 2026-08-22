@@ -379,7 +379,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 diagnostics=timeline,
             )
             return JobExecutionResult(job_name=normalized_job_name, status="success")
-        except (TimeoutError, ConnectionError, ValueError, RuntimeError) as error:
+        except Exception as error:
             error_code = self._job_error_code_for_exception(error)
 
             timeline.append(

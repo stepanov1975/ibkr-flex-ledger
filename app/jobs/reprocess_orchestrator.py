@@ -249,6 +249,11 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 flex_query_id=config.flex_query_id,
             )
             selected = job_select_replay_artifacts(candidates)
+            if not selected:
+                raise ValueError(
+                    "ABORT_EMPTY_SELECTION: no replayable artifacts found for "
+                    f"period_key={config.period_key} flex_query_id={config.flex_query_id}"
+                )
             timeline.append(
                 domain_build_stage_event(
                     stage="raw_read",
@@ -398,7 +403,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     diagnostics=timeline,
                 )
             return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
-        except (TimeoutError, ConnectionError, ValueError, RuntimeError) as error:
+        except Exception as error:
             error_code = "REPROCESS_UNEXPECTED_ERROR"
             if isinstance(error, FlexRequestError):
                 error_code = "REPROCESS_REQUEST_ERROR"

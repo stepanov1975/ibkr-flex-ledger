@@ -125,7 +125,7 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
         config=IngestionOrchestratorConfig(
             account_id=settings.account_id,
             flex_query_id=settings.ibkr_flex_query_id,
-            run_type="manual",
+            run_type="scheduled",
             reconciliation_enabled=False,
             functional_currency="USD",
         ),

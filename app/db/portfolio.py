@@ -305,7 +305,8 @@ class SQLAlchemyPortfolioService:
                 )
                 connection.execute(
                     text(
-                        "UPDATE pnl_snapshot_daily SET provisional=EXISTS (SELECT 1 FROM corporate_action_manual_case c "
+                        "UPDATE pnl_snapshot_daily SET provisional=calculation_provisional OR EXISTS "
+                        "(SELECT 1 FROM corporate_action_manual_case c "
                         "WHERE c.instrument_id=:instrument_id AND c.status='open') WHERE instrument_id=:instrument_id"
                     ),
                     {"instrument_id": instrument_id},
@@ -403,7 +404,7 @@ class SQLAlchemyPortfolioService:
                 f"SELECT '{event_type}' AS event_type, event.{id_column} AS event_id, event.source_raw_record_id, "
                 "raw.section_name, raw.source_row_ref, raw.source_payload FROM " + table + " event "
                 "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id WHERE event.account_id=:account_id "
-                "AND event.report_date_local=:report_date AND event.instrument_id=:instrument_id"
+                "AND event.report_date_local<=:report_date AND event.instrument_id=:instrument_id"
             )
         try:
             with self._engine.connect() as connection:
@@ -423,24 +424,72 @@ class SQLAlchemyPortfolioService:
         report_date_to: date | None,
         instrument_id: UUID | None,
     ) -> list[ReconciliationSourceRecord]:
+        def raw_numeric(field: str, alias: str = "raw") -> str:
+            return (
+                f"CASE WHEN BTRIM(COALESCE({alias}.source_payload->>'{field}', '')) "
+                "IN ('', '-', '--', 'N/A') THEN NULL ELSE "
+                f"REPLACE(BTRIM({alias}.source_payload->>'{field}'), ',', '')::numeric END"
+            )
+
+        raw_currency = "UPPER(BTRIM(raw.source_payload->>'currency'))"
+        raw_fx_rate = raw_numeric("fxRateToBase")
+        row_fx_rate = (
+            f"CASE WHEN {raw_currency}=s.currency THEN 1::numeric ELSE {raw_fx_rate} END"
+        )
+        commission_currency = (
+            "COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
+            f"{raw_currency})"
+        )
+        commission_conversion_rate = (
+            f"(SELECT {raw_numeric('rate', 'fx_raw')} FROM raw_record fx_raw "
+            "WHERE fx_raw.account_id=s.account_id AND fx_raw.ingestion_run_id=s.ingestion_run_id "
+            "AND fx_raw.section_name='ConversionRates' "
+            f"AND UPPER(BTRIM(fx_raw.source_payload->>'fromCurrency'))={commission_currency} "
+            "AND COALESCE(NULLIF(UPPER(BTRIM(fx_raw.source_payload->>'toCurrency')), ''), s.currency)=s.currency "
+            f"AND {raw_numeric('rate', 'fx_raw')} IS NOT NULL "
+            "ORDER BY fx_raw.report_date_local DESC, fx_raw.raw_record_id DESC LIMIT 1)"
+        )
+        commission_fx_rate = (
+            f"CASE WHEN {commission_currency}=s.currency THEN 1::numeric "
+            f"WHEN {commission_currency}={raw_currency} THEN {row_fx_rate} "
+            f"ELSE {commission_conversion_rate} END"
+        )
+        position = raw_numeric("position")
+        realized = raw_numeric("fifoPnlRealized")
+        unrealized = raw_numeric("fifoPnlUnrealized")
+        commission = raw_numeric("ibCommission")
+        fees = raw_numeric("fees")
+        withholding_tax = raw_numeric("withholdingTax")
+
         query = text(
             "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, s.currency, s.position_qty, "
             "s.realized_pnl, s.unrealized_pnl, s.fees, s.withholding_tax, s.provisional, "
-            "(SELECT NULLIF(raw.source_payload->>'position','')::numeric FROM raw_record raw WHERE raw.account_id=s.account_id "
+            f"(SELECT {position} FROM raw_record raw WHERE raw.account_id=s.account_id "
+            "AND raw.ingestion_run_id=s.ingestion_run_id "
             "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
             "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1) AS broker_position_qty, "
-            "(SELECT sum(NULLIF(raw.source_payload->>'fifoPnlRealized','')::numeric) FROM raw_record raw "
-            "WHERE raw.account_id=s.account_id AND raw.section_name='Trades' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid) AS broker_realized_pnl, "
-            "(SELECT NULLIF(raw.source_payload->>'fifoPnlUnrealized','')::numeric FROM raw_record raw "
-            "WHERE raw.account_id=s.account_id AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1) AS broker_unrealized_pnl, "
-            "(SELECT sum(COALESCE(NULLIF(raw.source_payload->>'commission','')::numeric,0) + "
-            "COALESCE(NULLIF(raw.source_payload->>'fees','')::numeric,0)) FROM raw_record raw WHERE raw.account_id=s.account_id "
+            f"(SELECT CASE WHEN bool_and(({realized}) IS NULL OR ({row_fx_rate}) IS NOT NULL) "
+            f"THEN sum(({realized}) * ({row_fx_rate})) ELSE NULL END "
+            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
             "AND raw.section_name='Trades' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid) AS broker_fees, "
-            "(SELECT sum(NULLIF(raw.source_payload->>'withholdingTax','')::numeric) FROM raw_record raw "
-            "WHERE raw.account_id=s.account_id AND raw.section_name='CashTransactions' "
+            "AND raw.source_payload->>'conid'=i.conid) AS broker_realized_pnl, "
+            f"(SELECT ({unrealized}) * ({row_fx_rate}) FROM raw_record raw "
+            "WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
+            "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
+            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1) AS broker_unrealized_pnl, "
+            "(SELECT CASE WHEN bool_and((fee_row.commission IS NULL OR fee_row.commission_fx_rate IS NOT NULL) "
+            "AND (fee_row.fees IS NULL OR fee_row.fee_fx_rate IS NOT NULL)) "
+            "THEN sum(COALESCE(fee_row.commission * fee_row.commission_fx_rate, 0) + "
+            "COALESCE(fee_row.fees * fee_row.fee_fx_rate, 0)) ELSE NULL END FROM ("
+            f"SELECT ({commission}) AS commission, ({fees}) AS fees, "
+            f"({commission_fx_rate}) AS commission_fx_rate, ({row_fx_rate}) AS fee_fx_rate "
+            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
+            "AND raw.section_name='Trades' AND raw.report_date_local=s.report_date_local "
+            "AND raw.source_payload->>'conid'=i.conid) fee_row) AS broker_fees, "
+            f"(SELECT CASE WHEN bool_and(({withholding_tax}) IS NULL OR ({row_fx_rate}) IS NOT NULL) "
+            f"THEN sum(({withholding_tax}) * ({row_fx_rate})) ELSE NULL END "
+            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
+            "AND raw.section_name='CashTransactions' "
             "AND raw.report_date_local=s.report_date_local AND raw.source_payload->>'conid'=i.conid) AS broker_withholding_tax, "
             "(SELECT event_trade_fill_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
             "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_event_id, "
@@ -499,7 +548,8 @@ class SQLAlchemyPortfolioService:
                 rows = connection.execute(
                     text(
                         "SELECT status, started_at_utc, ended_at_utc, duration_ms FROM ingestion_run "
-                        "WHERE account_id=:account_id AND started_at_utc>=:since_utc ORDER BY started_at_utc asc"
+                        "WHERE account_id=:account_id AND run_type='scheduled' "
+                        "AND started_at_utc>=:since_utc ORDER BY started_at_utc asc"
                     ),
                     {"account_id": self._text(account_id, "account_id"), "since_utc": since_utc},
                 ).mappings().all()
