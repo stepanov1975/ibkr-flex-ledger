@@ -1,7 +1,6 @@
 """Application bootstrap wiring for startup validation and dependency assembly."""
 
 from datetime import datetime, timedelta, timezone
-from typing import cast
 
 from fastapi import FastAPI
 
@@ -157,12 +156,9 @@ def bootstrap_evaluate_slo_alerts() -> AlertEvaluationResult:
 
     if settings.alert_webhook_url is not None:
         senders.append(
-            cast(
-                AlertSenderPort,
-                WebhookAlertSender(
-                    settings.alert_webhook_url.get_secret_value(),
-                    timeout=settings.alert_delivery_timeout_seconds,
-                ),
+            WebhookAlertSender(
+                settings.alert_webhook_url.get_secret_value(),
+                timeout=settings.alert_delivery_timeout_seconds,
             )
         )
 
@@ -172,22 +168,19 @@ def bootstrap_evaluate_slo_alerts() -> AlertEvaluationResult:
         and settings.alert_email_to is not None
     ):
         senders.append(
-            cast(
-                AlertSenderPort,
-                SmtpAlertSender(
-                    host=settings.alert_smtp_host,
-                    port=settings.alert_smtp_port,
-                    sender=settings.alert_email_from,
-                    recipients=settings.alert_email_recipients(),
-                    starttls=settings.alert_smtp_starttls,
-                    username=settings.alert_smtp_username,
-                    password=(
-                        None
-                        if settings.alert_smtp_password is None
-                        else settings.alert_smtp_password.get_secret_value()
-                    ),
-                    timeout=settings.alert_delivery_timeout_seconds,
+            SmtpAlertSender(
+                host=settings.alert_smtp_host,
+                port=settings.alert_smtp_port,
+                sender=settings.alert_email_from,
+                recipients=settings.alert_email_recipients(),
+                starttls=settings.alert_smtp_starttls,
+                username=settings.alert_smtp_username,
+                password=(
+                    None
+                    if settings.alert_smtp_password is None
+                    else settings.alert_smtp_password.get_secret_value()
                 ),
+                timeout=settings.alert_delivery_timeout_seconds,
             )
         )
 

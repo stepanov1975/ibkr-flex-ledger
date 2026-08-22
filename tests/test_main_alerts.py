@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import sys
 from unittest.mock import Mock
 
@@ -84,6 +85,37 @@ def test_alerts_evaluate_cli_reports_sanitized_no_channel_error(
     assert captured.out == ""
     assert captured.err == "no outbound alert channel is configured\n"
     assert "hooks.example.test/secret" not in captured.out + captured.err
+
+
+def test_alerts_evaluate_cli_sanitizes_invalid_real_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    malformed_url = "ftp://hook-user:hook-secret@hooks.example.test/private-path"
+    recipient = "private-owner@example.test"
+    smtp_password = "smtp-private-secret"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("IBKR_FLEX_TOKEN", "token")
+    monkeypatch.setenv("IBKR_FLEX_QUERY_ID", "query")
+    monkeypatch.setenv("ALERT_WEBHOOK_URL", malformed_url)
+    monkeypatch.setenv("ALERT_SMTP_HOST", "smtp.example.test")
+    monkeypatch.setenv("ALERT_SMTP_USERNAME", "private-user")
+    monkeypatch.setenv("ALERT_SMTP_PASSWORD", smtp_password)
+    monkeypatch.setenv("ALERT_EMAIL_FROM", "alerts@example.test")
+    monkeypatch.setenv("ALERT_EMAIL_TO", recipient)
+    monkeypatch.setattr(sys, "argv", ["stock-app", "alerts-evaluate"])
+
+    with pytest.raises(SystemExit) as raised:
+        main_module.main()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 1
+    assert captured.out == ""
+    assert captured.err == "outbound alert configuration is invalid\n"
+    assert malformed_url not in captured.err
+    assert recipient not in captured.err
+    assert smtp_password not in captured.err
 
 
 def test_alert_bootstrap_wires_one_engine_configured_channels_and_30_day_window(

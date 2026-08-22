@@ -44,8 +44,11 @@ class AlertTransition:
 
 
 class AlertSenderPort(Protocol):
-    channel: Literal["webhook", "email"]
-    destination_fingerprint: str
+    @property
+    def channel(self) -> Literal["webhook", "email"]: ...
+
+    @property
+    def destination_fingerprint(self) -> str: ...
 
     def send(self, transition: AlertTransition) -> None: ...
 

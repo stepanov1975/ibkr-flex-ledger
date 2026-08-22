@@ -16,7 +16,7 @@ from app.bootstrap import (
     bootstrap_create_reprocess_orchestrator,
     bootstrap_evaluate_slo_alerts,
 )
-from app.config import config_load_settings
+from app.config import SettingsLoadError, config_load_settings
 from app.db import SQLAlchemyIngestionRunService, SQLAlchemyPortfolioService, db_create_engine
 from app.jobs import job_extract_missing_sections_from_diagnostics
 from app.operations import operations_archive_expired_diagnostics
@@ -59,6 +59,9 @@ def main() -> None:
     if parsed_arguments.command == "alerts-evaluate":
         try:
             alert_result = bootstrap_evaluate_slo_alerts()
+        except SettingsLoadError:
+            print("outbound alert configuration is invalid", file=sys.stderr)
+            raise SystemExit(1) from None
         except AlertConfigurationError as error:
             print(error, file=sys.stderr)
             raise SystemExit(1) from None
