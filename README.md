@@ -151,6 +151,13 @@ Service endpoints:
 - Portfolio dashboard: `http://127.0.0.1:8000/ui`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
 
+### UI date and time display
+
+The dashboard displays date-only values as `dd/mm/yy` and timestamps as
+`dd/mm/yy hh:mm`, using zero-padded values and 24-hour time. Timestamp display
+uses the `Asia/Jerusalem` timezone; date-only business values retain their
+reported calendar date. API payloads and persisted timestamps remain ISO/UTC.
+
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
 SLO visibility. Backup, retention, and restore procedures are documented in

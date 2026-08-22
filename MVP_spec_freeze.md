@@ -18,7 +18,7 @@ Rules:
 - MVP account scope: strictly single IBKR account.
 - MVP single-account API contract: `account_id` remains internal-only in MVP API payloads; backend data-access layers use one fixed configured account context.
 - MVP base reporting currency: `USD`, fixed at initial setup and immutable in MVP.
-- Time policy: persist timestamps in UTC; apply `Asia/Jerusalem` for UI and business date boundaries.
+- Time policy: persist timestamps in UTC; apply `Asia/Jerusalem` for UI and business date boundaries. UI date-only values use zero-padded `dd/mm/yy`; UI timestamps use zero-padded `dd/mm/yy hh:mm` with 24-hour time. API payloads retain their ISO date and UTC timestamp contracts.
 - Ingestion overlap policy: single active run lock; reject overlapping triggers with `409` and message `run already active`.
 - Authentication hardening for proxy headers/trust assumptions: out of MVP scope (post-MVP).
 - Reverse-proxy identity header contract validation in application code: out of MVP scope (post-MVP).

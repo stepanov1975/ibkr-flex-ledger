@@ -35,3 +35,38 @@ def test_dashboard_formats_positions_as_integers_or_three_decimal_numbers() -> N
     assert "minimumFractionDigits:0" in response.text
     assert "maximumFractionDigits:3" in response.text
     assert "formatPosition(item.position_qty)" in response.text
+
+
+def test_dashboard_formats_business_dates_as_day_month_two_digit_year() -> None:
+    """Render report dates without applying a timezone conversion."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+
+    response = TestClient(application).get("/ui")
+
+    assert response.status_code == 200
+    assert "function formatDate(value)" in response.text
+    assert "`${match[3]}/${match[2]}/${match[1].slice(-2)}`" in response.text
+    assert "formatDate(item.report_date_local)" in response.text
+
+
+def test_dashboard_formats_timestamps_in_jerusalem_with_24_hour_time() -> None:
+    """Render UTC instants as zero-padded Jerusalem dates and times."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+
+    response = TestClient(application).get("/ui")
+
+    assert response.status_code == 200
+    assert "new Intl.DateTimeFormat('en-GB'" in response.text
+    assert "timeZone:'Asia/Jerusalem'" in response.text
+    assert "day:'2-digit'" in response.text
+    assert "month:'2-digit'" in response.text
+    assert "year:'2-digit'" in response.text
+    assert "hour:'2-digit'" in response.text
+    assert "minute:'2-digit'" in response.text
+    assert "hourCycle:'h23'" in response.text
+    assert "formatDateTime(item.created_at_utc)" in response.text
+    assert "formatDateTime(item.started_at_utc)" in response.text
