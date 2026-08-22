@@ -54,7 +54,7 @@ Out of scope for MVP:
 
 - Runtime: Ubuntu LXC deployment
 - Services: app + PostgreSQL (Docker Compose)
-- Scheduler: cron-triggered ingestion CLI
+- Scheduler: systemd timers for ingestion and operational maintenance CLIs
 - Layering:
 	- Adapter layer: Flex fetch and immutable raw persistence
 	- Mapping layer: raw records to canonical events
@@ -491,6 +491,88 @@ Task 7 implementation modules:
 - `app/jobs/ingestion_orchestrator.py`
 - `tests/test_ledger_fifo_snapshot.py`
 - `tests/test_api_snapshot.py`
+
+## Corporate-action review workflow (Task 8)
+
+Corporate actions are classified using the frozen automatic/manual policy. Deterministic
+actions such as complete split records can update the ledger automatically; ambiguous or
+unsupported actions create manual cases and mark only affected instruments provisional.
+
+Operator endpoints:
+
+- `GET /corporate-actions/cases` lists cases and accepts a status filter.
+- `PATCH /corporate-actions/cases/{case_id}` records status, owner, and resolution notes.
+
+Resolving a case recomputes provisional state without hiding unrelated instruments or
+reports. The API and persistence workflow are implemented in
+`app/api/routers/corporate_actions.py`, `app/domain/corporate_actions.py`, and
+`app/db/portfolio.py`.
+
+## Labels and notes (Task 9)
+
+Portfolio metadata APIs support label CRUD, many-to-many instrument assignment, and notes
+attached to instruments or labels:
+
+- `GET|POST /labels`, `PATCH|DELETE /labels/{label_id}`
+- `POST|DELETE /instruments/{instrument_id}/labels/{label_id}`
+- `GET|POST /notes`, `PATCH|DELETE /notes/{note_id}`
+
+List endpoints enforce the configured pagination bounds and their documented sort/filter
+allowlists. See the generated OpenAPI documentation for request and response schemas.
+
+## Reporting and provenance (Task 10)
+
+The reporting API exposes:
+
+- `GET /reports/pnl/by-instrument`
+- `GET /reports/pnl/by-label`
+- `GET /reports/provenance`
+
+PnL endpoints return JSON by default. Pass `format=csv` for the stable CSV `v1` contract;
+responses include the fixed column order and `X-Schema-Version: v1`. Provenance rows link
+reported values to canonical events, raw-record identities, section names, and immutable
+source payloads.
+
+## Reconciliation diff mode (Task 11)
+
+`GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
+frozen tolerance matrix in `MVP_spec_freeze.md`. JSON and `format=csv` outputs include
+absolute/relative differences, tolerances, pass/fail state, provisional state, and source
+identities. Requests fail clearly when required broker reconciliation sections are absent.
+
+## Operations, alerts, and recovery (Task 12)
+
+`GET /operations/slo` and `/ui` expose the 30-day scheduled-ingestion SLO state. The
+`alerts-evaluate` CLI sends transition-only alert and recovery notifications through
+independently optional JSON webhook and SMTP channels, with durable per-destination
+deduplication.
+
+Checked-in systemd timers schedule:
+
+- daily verified PostgreSQL backups;
+- daily 60-day diagnostics retention;
+- weekly isolated restore drills;
+- daily ingestion; and
+- SLO alert evaluation every 15 minutes.
+
+Installation, environment variables, manual commands, locking, alert semantics, backup
+retention, PITR, and incident recovery are documented in `deploy/systemd/README.md` and
+`docs/operations.md`.
+
+## Release quality gate (Task 13)
+
+The release gate combines deterministic unit/regression fixtures with PostgreSQL-backed
+seeded ingestion, replay, reporting, provenance, and reconciliation scenarios. Run:
+
+```bash
+IBKR_FLEX_TOKEN=test IBKR_FLEX_QUERY_ID=test .venv/bin/pytest -q
+.venv/bin/ruff check app tests
+.venv/bin/mypy
+```
+
+Operational release proof—including backup checksums, replay run IDs, reconciliation and
+provisional results, migration state, and measured RPO/RTO—is recorded in
+`docs/releases/2026-08-22-release-evidence.md`.
 
 ## VS Code virtual environment setup
 
