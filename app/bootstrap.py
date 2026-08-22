@@ -1,17 +1,19 @@
 """Application bootstrap wiring for startup validation and dependency assembly."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from fastapi import FastAPI
 
 from app.api import create_api_application
 from app.config import config_load_settings
-from app.adapters import FlexWebServiceAdapter
+from app.adapters import FlexWebServiceAdapter, SmtpAlertSender, WebhookAlertSender
 from app.db import (
     SQLAlchemyCanonicalPersistenceService,
     SQLAlchemyDatabaseHealthService,
     SQLAlchemyIngestionRunService,
     SQLAlchemyLedgerSnapshotService,
+    SQLAlchemyOperationsAlertService,
     SQLAlchemyPortfolioService,
     SQLAlchemyRawPersistenceService,
     db_create_engine,
@@ -24,6 +26,16 @@ from app.jobs import (
 )
 from app.ledger import StockLedgerSnapshotService
 from app.ledger import snapshot_resolve_report_date_local
+from app.operations import (
+    AlertEvaluationResult,
+    AlertSenderPort,
+    operations_build_slo_status,
+    operations_evaluate_slo_alerts,
+)
+
+
+class AlertConfigurationError(RuntimeError):
+    """Raised when an alert evaluation has no outbound destination."""
 
 
 def bootstrap_create_application() -> FastAPI:
@@ -131,6 +143,69 @@ def bootstrap_create_ingestion_orchestrator() -> IngestionJobOrchestrator:
         ),
         canonical_repository=canonical_repository,
         snapshot_service=snapshot_service,
+    )
+
+
+def bootstrap_evaluate_slo_alerts() -> AlertEvaluationResult:
+    """Evaluate and deliver the current scheduled-ingestion SLO transition."""
+
+    settings = config_load_settings()
+    engine = db_create_engine(database_url=settings.database_url)
+    portfolio_repository = SQLAlchemyPortfolioService(engine=engine)
+    state_repository = SQLAlchemyOperationsAlertService(engine=engine)
+    senders: list[AlertSenderPort] = []
+
+    if settings.alert_webhook_url is not None:
+        senders.append(
+            cast(
+                AlertSenderPort,
+                WebhookAlertSender(
+                    settings.alert_webhook_url.get_secret_value(),
+                    timeout=settings.alert_delivery_timeout_seconds,
+                ),
+            )
+        )
+
+    if (
+        settings.alert_smtp_host is not None
+        and settings.alert_email_from is not None
+        and settings.alert_email_to is not None
+    ):
+        senders.append(
+            cast(
+                AlertSenderPort,
+                SmtpAlertSender(
+                    host=settings.alert_smtp_host,
+                    port=settings.alert_smtp_port,
+                    sender=settings.alert_email_from,
+                    recipients=settings.alert_email_recipients(),
+                    starttls=settings.alert_smtp_starttls,
+                    username=settings.alert_smtp_username,
+                    password=(
+                        None
+                        if settings.alert_smtp_password is None
+                        else settings.alert_smtp_password.get_secret_value()
+                    ),
+                    timeout=settings.alert_delivery_timeout_seconds,
+                ),
+            )
+        )
+
+    if not senders:
+        raise AlertConfigurationError("no outbound alert channel is configured")
+
+    now = datetime.now(timezone.utc)
+    rows = portfolio_repository.db_ingestion_slo_records(
+        settings.account_id,
+        now - timedelta(days=30),
+    )
+    status = operations_build_slo_status(rows, measured_at_utc=now)
+    return operations_evaluate_slo_alerts(
+        settings.account_id,
+        status,
+        state_repository,
+        senders,
+        now,
     )
 
 

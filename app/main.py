@@ -5,13 +5,16 @@ This module validates startup configuration and launches the FastAPI service.
 
 import argparse
 from pathlib import Path
+import sys
 
 import uvicorn
 
 from app.bootstrap import (
+    AlertConfigurationError,
     bootstrap_create_application,
     bootstrap_create_ingestion_orchestrator,
     bootstrap_create_reprocess_orchestrator,
+    bootstrap_evaluate_slo_alerts,
 )
 from app.config import config_load_settings
 from app.db import SQLAlchemyIngestionRunService, SQLAlchemyPortfolioService, db_create_engine
@@ -34,7 +37,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="api",
-        choices=("api", "ingestion-run", "reprocess-run", "diagnostics-retention"),
+        choices=("api", "ingestion-run", "reprocess-run", "diagnostics-retention", "alerts-evaluate"),
         help="Runtime command: `api` starts server, `ingestion-run` triggers one ingestion workflow, "
         "`reprocess-run` triggers one canonical reprocess workflow",
         type=str,
@@ -52,6 +55,20 @@ def main() -> None:
         help="Optional Flex query id override for `reprocess-run`",
     )
     parsed_arguments = argument_parser.parse_args()
+
+    if parsed_arguments.command == "alerts-evaluate":
+        try:
+            alert_result = bootstrap_evaluate_slo_alerts()
+        except AlertConfigurationError as error:
+            print(error, file=sys.stderr)
+            raise SystemExit(1) from None
+        print(
+            f"delivered_channels={','.join(alert_result.delivered_channels) or 'none'} "
+            f"failed_channels={','.join(alert_result.failed_channels) or 'none'}"
+        )
+        if alert_result.failed_channels:
+            raise SystemExit(1)
+        return
 
     if parsed_arguments.command == "diagnostics-retention":
         settings = config_load_settings()
