@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .portfolio_interfaces import (
     CashBalanceReportRecord,
+    CostSummaryReportRecord,
     CorporateActionManualCaseRecord,
     DiagnosticArchiveRecord,
     IngestionSloRecord,
@@ -23,6 +24,7 @@ from .portfolio_interfaces import (
     PortfolioSummaryReportRecord,
     ProvenanceRecord,
     ReconciliationSourceRecord,
+    SecuritiesCommissionSummaryReportRecord,
     TransferReportRecord,
     TransferSummaryReportRecord,
 )
@@ -339,7 +341,8 @@ class SQLAlchemyPortfolioService:
             "s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
             "(SELECT count(*) FROM corporate_action_manual_case c WHERE c.instrument_id=s.instrument_id AND c.status='open') "
             "AS unresolved_case_count FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
-            "WHERE s.account_id=:account_id AND (CAST(:date_from AS date) IS NULL OR s.report_date_local>=:date_from) "
+            "WHERE s.account_id=:account_id AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH', 'FX') "
+            "AND (CAST(:date_from AS date) IS NULL OR s.report_date_local>=:date_from) "
             "AND (CAST(:date_to AS date) IS NULL OR s.report_date_local<=:date_to) "
             "AND (CAST(:instrument_id AS uuid) IS NULL OR s.instrument_id=CAST(:instrument_id AS uuid)) "
             "ORDER BY s.report_date_local asc, i.symbol asc, s.instrument_id asc"
@@ -453,12 +456,141 @@ class SQLAlchemyPortfolioService:
             "WHERE event.account_id=:account_id AND event.cash_action='Deposits/Withdrawals' "
             "ORDER BY event.report_date_local DESC, event.event_cashflow_id DESC"
         )
+        cost_query = text(
+            "WITH eligible_artifacts AS (" + eligible_artifacts + "), trade_cost_events AS ("
+            "SELECT CASE WHEN UPPER(BTRIM(instrument.asset_category)) IN ('CASH', 'FX') "
+            "THEN 'FX conversion commissions' ELSE 'Securities commissions' END AS category, "
+            "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
+            "WHEN COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
+            "UPPER(BTRIM(event.currency)))='USD' THEN -event.commission "
+            "WHEN COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
+            "UPPER(BTRIM(event.currency)))=UPPER(BTRIM(event.currency)) "
+            "AND event.fx_rate_to_base>0 THEN -event.commission*event.fx_rate_to_base ELSE NULL END AS net_cost_usd, "
+            "UPPER(BTRIM(instrument.asset_category)) NOT IN ('CASH', 'FX') AS included_in_instrument_pnl, "
+            "event.report_date_local AS activity_date FROM event_trade_fill event "
+            "JOIN instrument ON instrument.instrument_id=event.instrument_id "
+            "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND COALESCE(event.commission, 0)<>0"
+            "), cashflow_cost_events AS ("
+            "SELECT CASE WHEN event.cash_action='Withholding Tax' THEN 'Dividend withholding tax' "
+            "WHEN event.cash_action='Other Fees' AND event.instrument_id IS NOT NULL "
+            "THEN 'Instrument-related other fees' "
+            "WHEN event.cash_action='Other Fees' THEN 'Account-level other fees' "
+            "ELSE event.cash_action END AS category, "
+            "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
+            "WHEN event.amount_in_base IS NOT NULL THEN -event.amount_in_base "
+            "WHEN UPPER(BTRIM(event.currency))='USD' THEN -event.amount "
+            "WHEN BTRIM(COALESCE(raw.source_payload->>'fxRateToBase', '')) "
+            "~ '^[+]?[0-9]+([.][0-9]+)?$' "
+            "AND (raw.source_payload->>'fxRateToBase')::numeric>0 "
+            "THEN -event.amount*(raw.source_payload->>'fxRateToBase')::numeric ELSE NULL END AS net_cost_usd, "
+            "CASE WHEN event.cash_action='Withholding Tax' THEN true "
+            "WHEN event.cash_action='Other Fees' THEN event.instrument_id IS NOT NULL "
+            "ELSE false END AS included_in_instrument_pnl, "
+            "event.report_date_local AS activity_date FROM event_cashflow event "
+            "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND event.cash_action<>'Deposits/Withdrawals' "
+            "AND (LOWER(event.cash_action) LIKE '%interest%' OR LOWER(event.cash_action) LIKE '%fee%' "
+            "OR LOWER(event.cash_action) LIKE '%tax%')"
+            "), transaction_tax_candidates AS ("
+            "SELECT raw.source_payload, artifact.report_date_local, raw.created_at_utc, raw.raw_record_id, "
+            "COALESCE(NULLIF(BTRIM(raw.source_payload->>'tradeId'), ''), "
+            "NULLIF(BTRIM(raw.source_payload->>'tradeID'), ''), "
+            "(raw.source_payload-'reportDate')::text) AS event_identity, "
+            "row_number() OVER (PARTITION BY artifact.raw_artifact_id, "
+            "COALESCE(NULLIF(BTRIM(raw.source_payload->>'tradeId'), ''), "
+            "NULLIF(BTRIM(raw.source_payload->>'tradeID'), ''), "
+            "(raw.source_payload-'reportDate')::text) ORDER BY raw.source_row_ref, raw.raw_record_id) "
+            "AS event_occurrence FROM eligible_artifacts artifact JOIN raw_record raw "
+            "ON raw.raw_artifact_id=artifact.raw_artifact_id WHERE raw.section_name='TransactionTaxes'"
+            "), ranked_transaction_taxes AS ("
+            "SELECT DISTINCT ON (event_identity, event_occurrence) source_payload, report_date_local, "
+            "created_at_utc, raw_record_id FROM transaction_tax_candidates "
+            "ORDER BY event_identity, event_occurrence, report_date_local DESC, created_at_utc DESC, raw_record_id DESC"
+            "), transaction_tax_events AS ("
+            "SELECT COALESCE(NULLIF(BTRIM(source_payload->>'taxDescription'), ''), 'Transaction tax') AS category, "
+            "CASE WHEN BTRIM(COALESCE(source_payload->>'taxAmount', '')) "
+            "!~ '^[+-]?[0-9]+([.][0-9]+)?$' THEN NULL "
+            "WHEN UPPER(BTRIM(source_payload->>'currency'))='USD' "
+            "THEN -(source_payload->>'taxAmount')::numeric "
+            "WHEN BTRIM(COALESCE(source_payload->>'fxRateToBase', '')) ~ '^[+]?[0-9]+([.][0-9]+)?$' "
+            "AND (source_payload->>'fxRateToBase')::numeric>0 "
+            "THEN -(source_payload->>'taxAmount')::numeric*(source_payload->>'fxRateToBase')::numeric "
+            "ELSE NULL END AS net_cost_usd, false AS included_in_instrument_pnl, "
+            "CASE WHEN BTRIM(COALESCE(source_payload->>'reportDate', '')) ~ '^[0-9]{8}$' "
+            "THEN to_date(source_payload->>'reportDate', 'YYYYMMDD') ELSE report_date_local END AS activity_date "
+            "FROM ranked_transaction_taxes"
+            "), cost_events AS ("
+            "SELECT * FROM trade_cost_events UNION ALL SELECT * FROM cashflow_cost_events "
+            "UNION ALL SELECT * FROM transaction_tax_events"
+            ") SELECT category, sum(net_cost_usd) AS net_cost_usd, included_in_instrument_pnl, "
+            "count(*) FILTER (WHERE net_cost_usd IS NULL) AS missing_value_count, "
+            "min(activity_date) AS activity_date_from, max(activity_date) AS activity_date_to "
+            "FROM cost_events GROUP BY category, included_in_instrument_pnl ORDER BY category"
+        )
+        dividend_query = text(
+            "WITH dividend_events AS (SELECT event.cash_action, event.report_date_local AS activity_date, "
+            "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
+            "WHEN event.amount_in_base IS NOT NULL THEN event.amount_in_base "
+            "WHEN UPPER(BTRIM(event.currency))='USD' THEN event.amount "
+            "WHEN BTRIM(COALESCE(raw.source_payload->>'fxRateToBase', '')) "
+            "~ '^[+]?[0-9]+([.][0-9]+)?$' "
+            "AND (raw.source_payload->>'fxRateToBase')::numeric>0 "
+            "THEN event.amount*(raw.source_payload->>'fxRateToBase')::numeric ELSE NULL END AS amount_usd "
+            "FROM event_cashflow event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND event.cash_action IN "
+            "('Dividends', 'Payment In Lieu Of Dividends', 'Withholding Tax')) "
+            "SELECT min(activity_date) AS activity_date_from, max(activity_date) AS activity_date_to, "
+            "COALESCE(sum(amount_usd) FILTER (WHERE cash_action IN "
+            "('Dividends', 'Payment In Lieu Of Dividends')), 0) AS gross_dividend_payments_usd, "
+            "COALESCE(-sum(amount_usd) FILTER (WHERE cash_action='Withholding Tax'), 0) "
+            "AS dividend_withholding_tax_usd, count(*) FILTER (WHERE amount_usd IS NULL AND cash_action IN "
+            "('Dividends', 'Payment In Lieu Of Dividends')) AS gross_missing_value_count, "
+            "count(*) FILTER (WHERE amount_usd IS NULL AND cash_action='Withholding Tax') "
+            "AS withholding_missing_value_count "
+            "FROM dividend_events"
+        )
+        commission_query = text(
+            "WITH securities_commission_events AS ("
+            "SELECT CASE UPPER(BTRIM(instrument.asset_category)) "
+            "WHEN 'STK' THEN 'Stocks' WHEN 'OPT' THEN 'Options' "
+            "ELSE INITCAP(REPLACE(BTRIM(instrument.asset_category), '_', ' ')) END AS instrument_type, "
+            "event.side, event.instrument_id, event.report_date_local AS activity_date, "
+            "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
+            "WHEN COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
+            "UPPER(BTRIM(event.currency)))='USD' THEN -event.commission "
+            "WHEN COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
+            "UPPER(BTRIM(event.currency)))=UPPER(BTRIM(event.currency)) "
+            "AND event.fx_rate_to_base>0 THEN -event.commission*event.fx_rate_to_base ELSE NULL END "
+            "AS commission_usd FROM event_trade_fill event "
+            "JOIN instrument ON instrument.instrument_id=event.instrument_id "
+            "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND COALESCE(event.commission, 0)<>0 "
+            "AND UPPER(BTRIM(instrument.asset_category)) NOT IN ('CASH', 'FX')"
+            "), grouped AS ("
+            "SELECT instrument_type, side, count(*) AS execution_count, "
+            "count(DISTINCT instrument_id) AS instrument_count, sum(commission_usd) AS commission_usd, "
+            "count(*) FILTER (WHERE commission_usd IS NULL) AS missing_value_count, "
+            "min(activity_date) AS activity_date_from, max(activity_date) AS activity_date_to, false AS is_total "
+            "FROM securities_commission_events GROUP BY instrument_type, side"
+            "), overall AS ("
+            "SELECT NULL::text AS instrument_type, NULL::text AS side, count(*) AS execution_count, "
+            "count(DISTINCT instrument_id) AS instrument_count, sum(commission_usd) AS commission_usd, "
+            "count(*) FILTER (WHERE commission_usd IS NULL) AS missing_value_count, "
+            "min(activity_date) AS activity_date_from, max(activity_date) AS activity_date_to, true AS is_total "
+            "FROM securities_commission_events"
+            ") SELECT * FROM grouped UNION ALL SELECT * FROM overall "
+            "ORDER BY is_total, instrument_type, side"
+        )
         params = {"account_id": self._text(account_id, "account_id")}
         try:
             with self._engine.connect() as connection:
                 cash_rows = connection.execute(cash_query, params).mappings().all()
                 position_rows = connection.execute(position_query, params).mappings().all()
                 transfer_rows = connection.execute(transfer_query, params).mappings().all()
+                cost_rows = connection.execute(cost_query, params).mappings().all()
+                dividend_rows = connection.execute(dividend_query, params).mappings().all()
+                commission_rows = connection.execute(commission_query, params).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("portfolio summary report failed") from error
 
@@ -534,6 +666,118 @@ class SQLAlchemyPortfolioService:
             )
             for currency, totals in sorted(transfer_totals.items())
         )
+
+        cost_summary = tuple(
+            CostSummaryReportRecord(
+                category=row["category"],
+                net_cost_usd=(
+                    None if int(row["missing_value_count"]) > 0 or row["net_cost_usd"] is None
+                    else str(row["net_cost_usd"])
+                ),
+                included_in_instrument_pnl=bool(row["included_in_instrument_pnl"]),
+            )
+            for row in sorted(cost_rows, key=lambda item: item["category"])
+        )
+        costs_complete = all(
+            int(row["missing_value_count"]) == 0 and row["net_cost_usd"] is not None
+            for row in cost_rows
+        )
+        total_costs_usd = (
+            sum((Decimal(row["net_cost_usd"]) for row in cost_rows), Decimal("0"))
+            if costs_complete else None
+        )
+        outside_cost_rows = [row for row in cost_rows if not bool(row["included_in_instrument_pnl"])]
+        outside_costs_complete = all(
+            int(row["missing_value_count"]) == 0 and row["net_cost_usd"] is not None
+            for row in outside_cost_rows
+        )
+        costs_outside_instrument_pnl_usd = (
+            sum((Decimal(row["net_cost_usd"]) for row in outside_cost_rows), Decimal("0"))
+            if outside_costs_complete else None
+        )
+
+        dividend_row = None if not dividend_rows else dividend_rows[0]
+        gross_dividend_payments_usd: Decimal | None
+        dividend_withholding_tax_usd: Decimal | None
+        if dividend_row is None:
+            gross_dividend_payments_usd = Decimal("0")
+            dividend_withholding_tax_usd = Decimal("0")
+        else:
+            gross_dividend_payments_usd = (
+                None
+                if int(dividend_row["gross_missing_value_count"]) > 0
+                or dividend_row["gross_dividend_payments_usd"] is None
+                else Decimal(dividend_row["gross_dividend_payments_usd"])
+            )
+            dividend_withholding_tax_usd = (
+                None
+                if int(dividend_row["withholding_missing_value_count"]) > 0
+                or dividend_row["dividend_withholding_tax_usd"] is None
+                else Decimal(dividend_row["dividend_withholding_tax_usd"])
+            )
+        net_dividend_payments_usd = (
+            gross_dividend_payments_usd - dividend_withholding_tax_usd
+            if gross_dividend_payments_usd is not None and dividend_withholding_tax_usd is not None else None
+        )
+
+        commission_total_row = next(
+            (row for row in commission_rows if bool(row["is_total"])),
+            None,
+        )
+        securities_commission_summary = tuple(
+            SecuritiesCommissionSummaryReportRecord(
+                instrument_type=row["instrument_type"],
+                side=row["side"],
+                execution_count=int(row["execution_count"]),
+                instrument_count=int(row["instrument_count"]),
+                commission_usd=(
+                    None if int(row["missing_value_count"]) > 0 or row["commission_usd"] is None
+                    else str(row["commission_usd"])
+                ),
+            )
+            for row in sorted(
+                (row for row in commission_rows if not bool(row["is_total"])),
+                key=lambda item: (item["instrument_type"], item["side"]),
+            )
+        )
+        securities_commission_date_from = (
+            None if commission_total_row is None else commission_total_row["activity_date_from"]
+        )
+        securities_commission_date_to = (
+            None if commission_total_row is None else commission_total_row["activity_date_to"]
+        )
+        securities_commission_execution_count = (
+            0 if commission_total_row is None else int(commission_total_row["execution_count"])
+        )
+        securities_commission_instrument_count = (
+            0 if commission_total_row is None else int(commission_total_row["instrument_count"])
+        )
+        if commission_total_row is None or int(commission_total_row["execution_count"]) == 0:
+            securities_commission_total_usd: Decimal | None = Decimal("0")
+        elif (
+            int(commission_total_row["missing_value_count"]) > 0
+            or commission_total_row["commission_usd"] is None
+        ):
+            securities_commission_total_usd = None
+        else:
+            securities_commission_total_usd = Decimal(commission_total_row["commission_usd"])
+
+        activity_starts = [
+            value for value in (
+                *(row["activity_date_from"] for row in cost_rows),
+                None if dividend_row is None else dividend_row["activity_date_from"],
+            ) if value is not None
+        ]
+        activity_ends = [
+            value for value in (
+                *(row["activity_date_to"] for row in cost_rows),
+                None if dividend_row is None else dividend_row["activity_date_to"],
+                report_date_local,
+            ) if value is not None
+        ] if activity_starts else []
+        activity_date_from = min(activity_starts) if activity_starts else None
+        activity_date_to = max(activity_ends) if activity_ends else None
+
         net_transfers_value = net_transfers_usd if transfers_have_usd_values else None
         total_profit_usd = (
             None if estimated_nlv_usd is None or net_transfers_value is None
@@ -548,6 +792,30 @@ class SQLAlchemyPortfolioService:
             cash_balances=tuple(cash_balances),
             transfer_summary_by_currency=transfer_summaries,
             transfers=tuple(transfers),
+            activity_date_from=activity_date_from,
+            activity_date_to=activity_date_to,
+            cost_summary=cost_summary,
+            total_costs_usd=None if total_costs_usd is None else str(total_costs_usd),
+            costs_outside_instrument_pnl_usd=(
+                None if costs_outside_instrument_pnl_usd is None else str(costs_outside_instrument_pnl_usd)
+            ),
+            gross_dividend_payments_usd=(
+                None if gross_dividend_payments_usd is None else str(gross_dividend_payments_usd)
+            ),
+            dividend_withholding_tax_usd=(
+                None if dividend_withholding_tax_usd is None else str(dividend_withholding_tax_usd)
+            ),
+            net_dividend_payments_usd=(
+                None if net_dividend_payments_usd is None else str(net_dividend_payments_usd)
+            ),
+            securities_commission_summary=securities_commission_summary,
+            securities_commission_date_from=securities_commission_date_from,
+            securities_commission_date_to=securities_commission_date_to,
+            securities_commission_execution_count=securities_commission_execution_count,
+            securities_commission_instrument_count=securities_commission_instrument_count,
+            securities_commission_total_usd=(
+                None if securities_commission_total_usd is None else str(securities_commission_total_usd)
+            ),
             net_transfers_usd=None if net_transfers_value is None else str(net_transfers_value),
             estimated_net_liquidation_value_usd=None if estimated_nlv_usd is None else str(estimated_nlv_usd),
             total_profit_usd=None if total_profit_usd is None else str(total_profit_usd),

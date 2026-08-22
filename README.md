@@ -149,6 +149,7 @@ Service endpoints:
 - Health: `http://127.0.0.1:8000/health`
 - PostgreSQL host port: `5433` (container port `5432`)
 - Portfolio dashboard: `http://127.0.0.1:8000/ui`
+- Costs dashboard: `http://127.0.0.1:8000/ui/costs`
 - Operations dashboard: `http://127.0.0.1:8000/ui/operations`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
 
@@ -547,6 +548,8 @@ reported values to canonical events, raw-record identities, section names, and i
 source payloads. Instrument PnL JSON also exposes average cost per position unit, total cost,
 and last-day value for open positions. These values use the snapshot's functional currency;
 closed positions or positions without a cost basis return `null` for all three fields.
+Instrument PnL excludes `CASH` and `FX` pseudo-instruments; currency cash balances remain
+available through the portfolio-summary report.
 
 The portfolio-summary report supplies the `/ui` overview with the latest broker cash
 balance per currency, all canonical deposits and withdrawals in their original currency,
@@ -558,6 +561,17 @@ position values converted to USD; total profit subtracts net transfers in USD, a
 percentage divides that result by positive net transfers. A USD-derived metric is `null`
 when report dates differ or a required FX rate, cash balance, or current position value is
 unavailable.
+
+The same report summarizes all imported cost and dividend history in USD. Cost categories
+include trade and FX commissions, paid or received interest, withholding and transaction
+taxes, and other instrument- or account-level fees. Net cost is positive for an expense and
+negative for a credit. Each category states whether it is already included in instrument
+PnL; the separate outside-instrument-PnL subtotal explains which costs affect the portfolio
+profit bridge without being counted in that report. Dividend payments show gross regular
+dividends and payments in lieu, withholding tax, and the resulting net payment.
+The `/ui/costs` page presents the category summary separately from the portfolio dashboard
+and breaks securities commissions down by instrument type and buy/sell side, with execution
+and instrument counts plus the covered date range.
 
 ## Reconciliation diff mode (Task 11)
 

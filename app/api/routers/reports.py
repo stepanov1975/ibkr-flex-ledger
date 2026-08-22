@@ -106,6 +106,48 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
                     }
                     for row in summary.transfers
                 ],
+                "activity_date_from": (
+                    None if summary.activity_date_from is None else summary.activity_date_from.isoformat()
+                ),
+                "activity_date_to": (
+                    None if summary.activity_date_to is None else summary.activity_date_to.isoformat()
+                ),
+                "cost_summary": [
+                    {
+                        "category": row.category,
+                        "net_cost_usd": row.net_cost_usd,
+                        "included_in_instrument_pnl": row.included_in_instrument_pnl,
+                    }
+                    for row in summary.cost_summary
+                ],
+                "total_costs_usd": summary.total_costs_usd,
+                "costs_outside_instrument_pnl_usd": summary.costs_outside_instrument_pnl_usd,
+                "gross_dividend_payments_usd": summary.gross_dividend_payments_usd,
+                "dividend_withholding_tax_usd": summary.dividend_withholding_tax_usd,
+                "net_dividend_payments_usd": summary.net_dividend_payments_usd,
+                "securities_commission_summary": [
+                    {
+                        "instrument_type": row.instrument_type,
+                        "side": row.side,
+                        "execution_count": row.execution_count,
+                        "instrument_count": row.instrument_count,
+                        "commission_usd": row.commission_usd,
+                    }
+                    for row in summary.securities_commission_summary
+                ],
+                "securities_commission_date_from": (
+                    None
+                    if summary.securities_commission_date_from is None
+                    else summary.securities_commission_date_from.isoformat()
+                ),
+                "securities_commission_date_to": (
+                    None
+                    if summary.securities_commission_date_to is None
+                    else summary.securities_commission_date_to.isoformat()
+                ),
+                "securities_commission_execution_count": summary.securities_commission_execution_count,
+                "securities_commission_instrument_count": summary.securities_commission_instrument_count,
+                "securities_commission_total_usd": summary.securities_commission_total_usd,
                 "net_transfers_usd": summary.net_transfers_usd,
                 "estimated_net_liquidation_value_usd": summary.estimated_net_liquidation_value_usd,
                 "total_profit_usd": summary.total_profit_usd,

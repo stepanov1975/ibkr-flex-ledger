@@ -448,6 +448,23 @@ def test_reconciliation_sources_use_snapshot_lineage_and_functional_currency() -
     assert "UPPER(BTRIM(raw.source_payload->>'currency'))=s.currency" in executed_query
 
 
+def test_instrument_pnl_report_excludes_cash_and_fx_categories() -> None:
+    """Keep currency translation snapshots out of investment P&L reporting."""
+
+    connection = _ConnectionStub(rows=[])
+    service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
+
+    service.db_report_pnl_by_instrument(
+        account_id="U_TEST",
+        report_date_from=None,
+        report_date_to=None,
+        instrument_id=None,
+    )
+
+    executed_query = connection.executed_queries[0]
+    assert "UPPER(BTRIM(i.asset_category)) NOT IN ('CASH', 'FX')" in executed_query
+
+
 def test_provenance_includes_events_through_snapshot_date() -> None:
     """Trace a cumulative snapshot to every source event through its date."""
 

@@ -101,7 +101,10 @@ def test_main_page_exposes_portfolio_summary_and_requested_tables() -> None:
     assert "Estimated net liquidation value" in response.text
     assert "Net transfers (USD)" in response.text
     assert "Total profit (USD)" in response.text
+    assert "Total costs (USD)" in response.text
+    assert "Net dividend payments" in response.text
     assert "Cash balances" in response.text
+    assert "Cost summary by category" not in response.text
     assert "Transfer summary by currency" in response.text
     assert "Total P&amp;L by instrument" in response.text
     assert "Transfer history" in response.text
@@ -111,7 +114,129 @@ def test_main_page_exposes_portfolio_summary_and_requested_tables() -> None:
     ) in response.text
     assert "<th>Currency</th><th>Net transfers</th><th>Gross deposits</th><th>Gross withdrawals</th>" in response.text
     assert "<th>Date</th><th>Type</th><th>Amount</th><th>Currency</th><th>Description</th>" in response.text
+    assert 'href="/ui/costs"' in response.text
     assert 'href="/ui/operations"' in response.text
+
+
+def test_main_page_places_supporting_summaries_after_instrument_pnl() -> None:
+    """Keep the instrument P&L table ahead of its dividend, cash, and transfer details."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+
+    response = TestClient(application).get("/ui")
+
+    section_positions = [
+        response.text.index("Total P&amp;L by instrument"),
+        response.text.index("Net dividend payments"),
+        response.text.index("Cash balances"),
+        response.text.index("Transfer summary by currency"),
+        response.text.index("Transfer history"),
+    ]
+    assert section_positions == sorted(section_positions)
+
+
+def test_costs_page_renders_cost_treatment_breakdown() -> None:
+    """Explain which cost categories affect the instrument P&L bridge on their own page."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+
+    response = TestClient(application).get("/ui/costs")
+
+    assert response.status_code == 200
+    assert 'id="costs-outside-pnl-usd"' in response.text
+    assert 'id="cost-history-range"' in response.text
+    assert 'id="cost-summary"' in response.text
+    assert "<th>Category</th><th>Net cost</th><th>P&amp;L treatment</th>" in response.text
+    assert "item.included_in_instrument_pnl?'Included':'Outside'" in response.text
+
+
+def test_costs_page_places_securities_commission_summary_above_categories() -> None:
+    """Show the requested buy/sell commission table before the category summary."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+
+    response = TestClient(application).get("/ui/costs")
+
+    assert response.status_code == 200
+    assert response.text.index("Securities commissions") < response.text.index("Cost summary by category")
+    assert "<th>Instrument type</th><th>Side</th><th>Executions</th><th>Commission</th>" in response.text
+    assert 'id="securities-commission-summary"' in response.text
+    assert 'id="securities-commission-coverage"' in response.text
+    assert 'id="securities-commission-total"' in response.text
+    assert "Total buys" in response.text
+    assert "Total sells" in response.text
+    assert "Grand total" in response.text
+    assert 'href="/ui"' in response.text
+
+
+def test_costs_page_executes_commission_totals_and_unavailable_values() -> None:
+    """Execute the shipped Costs-page JavaScript for complete and missing commission values."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+    response = TestClient(application).get("/ui/costs")
+    script = response.text.split("<script>", 1)[1].split("</script>", 1)[0].rsplit("loadCosts()", 1)[0]
+    context = quickjs.Context()
+    context.eval(
+        """
+        function makeNode(){return {children:[],textContent:'',className:'',
+          append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
+        const nodeIds=['securities-commission-summary','buy-execution-total','buy-commission-total',
+          'sell-execution-total','sell-commission-total','securities-execution-total',
+          'securities-commission-total','securities-commission-coverage','cost-summary',
+          'costs-outside-pnl-usd','cost-history-range'];
+        const nodes=Object.fromEntries(nodeIds.map(id=>[id,makeNode()]));
+        const document={getElementById:id=>nodes[id],createElement:()=>makeNode()};
+        const Intl={NumberFormat:function(){return {format:value=>'USD '+Number(value).toFixed(2)}}};
+        """
+    )
+    context.eval(script)
+    context.eval(
+        """
+        let responsePayload={
+          securities_commission_summary:[
+            {instrument_type:'Stocks',side:'BUY',execution_count:2,commission_usd:'7'},
+            {instrument_type:'Options',side:'SELL',execution_count:1,commission_usd:'5'}],
+          securities_commission_execution_count:3,securities_commission_instrument_count:3,
+          securities_commission_total_usd:'12',securities_commission_date_from:'2026-08-01',
+          securities_commission_date_to:'2026-08-20',cost_summary:[],
+          costs_outside_instrument_pnl_usd:'3',activity_date_from:'2026-08-01',activity_date_to:'2026-08-20'};
+        json=async()=>responsePayload;loadCosts();
+        """
+    )
+    while context.execute_pending_job():
+        pass
+
+    rendered_rows = json.loads(
+        context.eval(
+            "JSON.stringify(nodes['securities-commission-summary'].children.map("
+            "row=>row.children.map(cell=>cell.textContent)))"
+        )
+    )
+    assert rendered_rows == [
+        ["Stocks", "Buy", "2", "USD 7.00"],
+        ["Options", "Sell", "1", "USD 5.00"],
+    ]
+    assert context.eval("nodes['buy-commission-total'].textContent") == "USD 7.00"
+    assert context.eval("nodes['sell-commission-total'].textContent") == "USD 5.00"
+    assert context.eval("nodes['securities-commission-total'].textContent") == "USD 12.00"
+
+    context.eval(
+        """
+        responsePayload.securities_commission_summary[1].commission_usd=null;
+        responsePayload.securities_commission_total_usd=null;
+        loadCosts();
+        """
+    )
+    while context.execute_pending_job():
+        pass
+
+    assert context.eval("nodes['buy-commission-total'].textContent") == "USD 7.00"
+    assert context.eval("nodes['sell-commission-total'].textContent") == "N/A"
+    assert context.eval("nodes['securities-commission-total'].textContent") == "N/A"
 
 
 def test_main_page_renders_derived_instrument_cost_and_value_fields() -> None:

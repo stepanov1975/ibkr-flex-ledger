@@ -113,6 +113,46 @@ _CASH_EVENT_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <AccountInformation />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
+_COST_AND_DIVIDEND_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
+<FlexStatement reportDate="20260821">
+  <Trades>
+    <Trade levelOfDetail="EXECUTION" ibExecID="COST-STK" transactionID="101"
+      conid="910001" symbol="COST_STK" assetCategory="STK" currency="USD"
+      buySell="BUY" quantity="1" tradePrice="10" ibCommission="-10"
+      ibCommissionCurrency="USD" reportDate="20260821" dateTime="20260821;100000" />
+    <Trade levelOfDetail="EXECUTION" ibExecID="COST-FX" transactionID="102"
+      conid="910002" symbol="USD.CASH" assetCategory="CASH" currency="USD"
+      buySell="BUY" quantity="1" tradePrice="1" ibCommission="-2"
+      ibCommissionCurrency="USD" reportDate="20260821" dateTime="20260821;100001" />
+  </Trades>
+  <OpenPositions />
+  <CashTransactions>
+    <CashTransaction transactionID="201" conid="910001" symbol="COST_STK" assetCategory="STK"
+      type="Dividends" amount="20" currency="USD" reportDate="20260810" />
+    <CashTransaction transactionID="202" conid="910001" symbol="COST_STK" assetCategory="STK"
+      type="Payment In Lieu Of Dividends" amount="5" currency="USD" reportDate="20260811" />
+    <CashTransaction transactionID="203" type="Withholding Tax" amount="-4"
+      currency="USD" reportDate="20260812" />
+    <CashTransaction transactionID="204" conid="910001" symbol="COST_STK" assetCategory="STK"
+      type="Broker Interest Paid" amount="-3" currency="USD" reportDate="20260813" />
+    <CashTransaction transactionID="205" type="Broker Interest Received" amount="0.75"
+      currency="USD" reportDate="20260814" />
+    <CashTransaction transactionID="206" conid="910001" symbol="COST_STK" assetCategory="STK"
+      type="Other Fees" amount="-1" currency="USD" reportDate="20260815" />
+    <CashTransaction transactionID="207" type="Other Fees" amount="-0.5"
+      currency="USD" reportDate="20260816" />
+  </CashTransactions>
+  <TransactionTaxes>
+    <TransactionTax taxDescription="Transaction tax" date="20260815"
+      reportDate="20260821" currency="USD" taxAmount="-0.25" fxRateToBase="1" />
+  </TransactionTaxes>
+  <CashReport />
+  <CorporateActions />
+  <ConversionRates />
+  <SecuritiesInfo />
+  <AccountInformation />
+</FlexStatement></FlexStatements></FlexQueryResponse>"""
+
 _REPLAY_EARLY_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
 <FlexStatement reportDate="20260219">
   <Trades><Trade levelOfDetail="EXECUTION" ibExecID="REPLAY-BUY" transactionID="101"
@@ -654,8 +694,8 @@ def test_postgresql_alex_assignment_rows_close_with_broker_authority() -> None:
         _drop_database(admin_url, database_name)
 
 
-def test_postgresql_completed_artifact_preserves_cash_event_snapshot() -> None:
-    """Keep CASH event-derived quantity outside OpenPositions absence authority."""
+def test_postgresql_completed_artifact_preserves_cash_event_snapshot_but_omits_it_from_pnl() -> None:
+    """Keep CASH/FX snapshots auditable without reporting them as investment P&L."""
 
     base_url = _reachable_database_url()
     database_name = f"test_cash_event_e2e_{uuid.uuid4().hex[:10]}"
@@ -705,6 +745,31 @@ def test_postgresql_completed_artifact_preserves_cash_event_snapshot() -> None:
                     "WHERE account_id='U_CASH_EVENT' AND completed_ingestion_run_id IS NOT NULL"
                 )
             ).scalar_one() == 1
+
+        portfolio_repository = SQLAlchemyPortfolioService(engine)
+        assert portfolio_repository.db_report_pnl_by_instrument(
+            "U_CASH_EVENT", None, None, None
+        ) == []
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE instrument SET asset_category='FX' "
+                    "WHERE account_id='U_CASH_EVENT' AND conid='990001'"
+                )
+            )
+        assert portfolio_repository.db_report_pnl_by_instrument(
+            "U_CASH_EVENT", None, None, None
+        ) == []
+        with engine.connect() as connection:
+            fx_snapshot_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM pnl_snapshot_daily s "
+                    "JOIN instrument i USING (instrument_id) "
+                    "WHERE s.account_id='U_CASH_EVENT' AND i.asset_category='FX'"
+                )
+            ).scalar_one()
+        assert fx_snapshot_count == 1
     finally:
         if engine is not None:
             engine.dispose()
@@ -1554,6 +1619,108 @@ def test_postgresql_fx_only_scope_rebuild_preserves_unrelated_instrument_state()
         assert final_lots[eur_instrument_id]["open_price"] == Decimal("15")
         assert final_lots[eur_instrument_id]["cost_basis_open"] == Decimal("15")
         assert final_lots[eur_instrument_id] != initial_lots[eur_instrument_id]
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _drop_database(admin_url, database_name)
+
+
+def test_postgresql_portfolio_summary_aggregates_costs_dividends_and_overlapping_taxes() -> None:
+    """Exercise cost signs, treatment, FX completeness, and raw-tax deduplication in PostgreSQL."""
+
+    base_url = _reachable_database_url()
+    database_name = f"test_cost_summary_{uuid.uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    test_database_url = _database_url(base_url, database_name)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    _create_database(admin_url, database_name)
+    os.environ["DATABASE_URL"] = test_database_url
+    engine = None
+
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_create_engine(test_database_url)
+        adapter = _SeededAdapter(_COST_AND_DIVIDEND_PAYLOAD)
+        orchestrator = IngestionJobOrchestrator(
+            ingestion_repository=SQLAlchemyIngestionRunService(engine),
+            raw_persistence_repository=SQLAlchemyRawPersistenceService(engine),
+            flex_adapter=adapter,
+            config=IngestionOrchestratorConfig(
+                account_id="COST_ACCOUNT",
+                flex_query_id="seeded-query",
+            ),
+            canonical_repository=SQLAlchemyCanonicalPersistenceService(engine),
+        )
+
+        first_result = orchestrator.job_execute("ingestion_run")
+        adapter.payload_bytes = _COST_AND_DIVIDEND_PAYLOAD.replace(
+            b"<TransactionTaxes>",
+            b'<TransactionTaxes><TransactionTax taxDescription="Other transaction tax" '
+            b'date="20260815" reportDate="20260821" currency="USD" taxAmount="-0.10" '
+            b'fxRateToBase="1" />',
+        )
+        overlapping_result = orchestrator.job_execute("ingestion_run")
+        assert first_result.status == overlapping_result.status == "success"
+
+        summary = SQLAlchemyPortfolioService(engine).db_report_portfolio_summary("COST_ACCOUNT")
+
+        assert {
+            row.category: (row.net_cost_usd, row.included_in_instrument_pnl)
+            for row in summary.cost_summary
+        } == {
+            "Account-level other fees": ("0.50000000", False),
+            "Broker Interest Paid": ("3.00000000", False),
+            "Broker Interest Received": ("-0.75000000", False),
+            "Dividend withholding tax": ("4.00000000", True),
+            "FX conversion commissions": ("2.00000000", False),
+            "Instrument-related other fees": ("1.00000000", True),
+            "Other transaction tax": ("0.10", False),
+            "Securities commissions": ("10.00000000", True),
+            "Transaction tax": ("0.25", False),
+        }
+        assert summary.total_costs_usd == "20.10000000"
+        assert summary.costs_outside_instrument_pnl_usd == "5.10000000"
+        assert summary.gross_dividend_payments_usd == "25.00000000"
+        assert summary.dividend_withholding_tax_usd == "4.00000000"
+        assert summary.net_dividend_payments_usd == "21.00000000"
+        assert [
+            (
+                row.instrument_type,
+                row.side,
+                row.execution_count,
+                row.instrument_count,
+                row.commission_usd,
+            )
+            for row in summary.securities_commission_summary
+        ] == [("Stocks", "BUY", 1, 1, "10.00000000")]
+        assert summary.securities_commission_date_from == date(2026, 8, 21)
+        assert summary.securities_commission_date_to == date(2026, 8, 21)
+        assert summary.securities_commission_execution_count == 1
+        assert summary.securities_commission_instrument_count == 1
+        assert summary.securities_commission_total_usd == "10.00000000"
+
+        adapter.payload_bytes = adapter.payload_bytes.replace(
+            b"</CashTransactions>",
+            b'<CashTransaction transactionID="208" type="Dividends" amount="10" '
+            b'currency="EUR" reportDate="20260817" /></CashTransactions>',
+        )
+        missing_fx_result = orchestrator.job_execute("ingestion_run")
+        assert missing_fx_result.status == "success"
+
+        incomplete_summary = SQLAlchemyPortfolioService(engine).db_report_portfolio_summary("COST_ACCOUNT")
+        assert incomplete_summary.gross_dividend_payments_usd is None
+        assert incomplete_summary.dividend_withholding_tax_usd == "4.00000000"
+        assert incomplete_summary.net_dividend_payments_usd is None
+
+        empty_summary = SQLAlchemyPortfolioService(engine).db_report_portfolio_summary("EMPTY_ACCOUNT")
+        assert empty_summary.securities_commission_summary == ()
+        assert empty_summary.securities_commission_execution_count == 0
+        assert empty_summary.securities_commission_instrument_count == 0
+        assert empty_summary.securities_commission_total_usd == "0"
     finally:
         if engine is not None:
             engine.dispose()

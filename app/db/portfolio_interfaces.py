@@ -109,11 +109,41 @@ class TransferReportRecord:
 
 
 @dataclass(frozen=True)
+class CostSummaryReportRecord:
+    category: str
+    net_cost_usd: str | None
+    included_in_instrument_pnl: bool
+
+
+@dataclass(frozen=True)
+class SecuritiesCommissionSummaryReportRecord:
+    instrument_type: str
+    side: str
+    execution_count: int
+    instrument_count: int
+    commission_usd: str | None
+
+
+@dataclass(frozen=True)
 class PortfolioSummaryReportRecord:
     report_date_local: date | None
     cash_balances: tuple[CashBalanceReportRecord, ...]
     transfer_summary_by_currency: tuple[TransferSummaryReportRecord, ...]
     transfers: tuple[TransferReportRecord, ...]
+    activity_date_from: date | None
+    activity_date_to: date | None
+    cost_summary: tuple[CostSummaryReportRecord, ...]
+    total_costs_usd: str | None
+    costs_outside_instrument_pnl_usd: str | None
+    gross_dividend_payments_usd: str | None
+    dividend_withholding_tax_usd: str | None
+    net_dividend_payments_usd: str | None
+    securities_commission_summary: tuple[SecuritiesCommissionSummaryReportRecord, ...]
+    securities_commission_date_from: date | None
+    securities_commission_date_to: date | None
+    securities_commission_execution_count: int
+    securities_commission_instrument_count: int
+    securities_commission_total_usd: str | None
     net_transfers_usd: str | None
     estimated_net_liquidation_value_usd: str | None
     total_profit_usd: str | None
