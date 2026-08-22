@@ -36,9 +36,12 @@ channels that already delivered it remain deduplicated.
 Run an evaluation manually with:
 
 ```bash
-docker compose --project-name stock_app --env-file .env --file docker-compose.yml \
-  exec -T app python -m app.main alerts-evaluate
+cd /stock_app
+./scripts/run_scheduled_job.sh alerts
 ```
+
+The launcher uses the same non-blocking `alerts.lock` as the systemd service, preserving the
+single-host overlap guarantee for manual and scheduled evaluations.
 
 Inspect scheduler failures with:
 

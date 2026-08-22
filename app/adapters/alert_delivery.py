@@ -4,6 +4,7 @@ from email.message import EmailMessage
 from hashlib import sha256
 import json
 import smtplib
+import ssl
 from typing import Literal
 from urllib import request as urllib_request
 
@@ -93,7 +94,7 @@ class SmtpAlertSender:
 			message = self._message(transition)
 			with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as smtp:
 				if self._starttls:
-					smtp.starttls()
+					smtp.starttls(context=ssl.create_default_context())
 				if self._username is not None and self._password is not None:
 					smtp.login(self._username, self._password)
 				smtp.send_message(

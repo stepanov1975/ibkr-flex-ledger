@@ -1,5 +1,6 @@
 import json
 import smtplib
+import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any
@@ -16,17 +17,19 @@ from app.operations import AlertDeliveryError, AlertTransition, OperationsSloSta
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 
 
-def _transition(event_type: str = "alert") -> AlertTransition:
+def _transition(
+	event_type: str = "alert", *, numeric_nulls: bool = False
+) -> AlertTransition:
 	status = OperationsSloStatus(
 		measured_at_utc=NOW,
 		summary=IngestionSloSummary(
 			run_count=20,
 			success_count=18,
-			success_rate=0.9,
+			success_rate=None if numeric_nulls else 0.9,
 			success_target=0.99,
 			success_alert_threshold=0.98,
 			success_breached=event_type == "alert",
-			p95_duration_ms=2_100_000,
+			p95_duration_ms=None if numeric_nulls else 2_100_000,
 			p95_target_ms=900_000,
 			duration_alert_threshold_ms=1_800_000,
 			duration_breached=event_type == "alert",
@@ -74,26 +77,29 @@ def test_webhook_posts_exact_transition_payload_with_idempotency_key(monkeypatch
 	assert request.get_method() == "POST"
 	assert request.get_header("Content-type") == "application/json"
 	assert request.get_header("Idempotency-key") == transition.event_id
-	assert json.loads(request.data) == transition.payload()
-	assert request.data == json.dumps(transition.payload(), sort_keys=True).encode("utf-8")
-	assert set(json.loads(request.data)) == {
-		"schema_version",
-		"event_id",
-		"event_type",
-		"account_id",
-		"measured_at_utc",
-		"window_days",
-		"run_count",
-		"success_count",
-		"success_rate",
-		"success_target",
-		"success_alert_threshold",
-		"p95_duration_ms",
-		"p95_target_ms",
-		"duration_alert_threshold_ms",
-		"consecutive_failure_alert",
-		"reason_codes",
+	expected_payload = {
+		"schema_version": "1",
+		"event_id": "event-123",
+		"event_type": "alert",
+		"account_id": "U_TEST",
+		"measured_at_utc": "2026-08-22T12:00:00+00:00",
+		"window_days": 30,
+		"run_count": 20,
+		"success_count": 18,
+		"success_rate": 0.9,
+		"success_target": 0.99,
+		"success_alert_threshold": 0.98,
+		"p95_duration_ms": 2_100_000,
+		"p95_target_ms": 900_000,
+		"duration_alert_threshold_ms": 1_800_000,
+		"consecutive_failure_alert": True,
+		"reason_codes": [
+			"success_rate_below_threshold",
+			"duration_above_threshold",
+		],
 	}
+	assert json.loads(request.data) == expected_payload
+	assert request.data == json.dumps(expected_payload, sort_keys=True).encode("utf-8")
 	assert captured["timeout"] == 10.0
 	assert "hooks.example.test" not in sender.destination_fingerprint
 	assert len(sender.destination_fingerprint) == 64
@@ -147,8 +153,8 @@ class _RecordingSmtp:
 	def __exit__(self, *args: object) -> None:
 		return None
 
-	def starttls(self) -> None:
-		self.calls.append(("starttls",))
+	def starttls(self, *, context: ssl.SSLContext) -> None:
+		self.calls.append(("starttls", context))
 
 	def login(self, username: str, password: str) -> None:
 		self.calls.append(("login", username, password))
@@ -181,8 +187,12 @@ def test_smtp_uses_tls_authentication_and_renders_alert(monkeypatch) -> None:
 
 	smtp = _RecordingSmtp.instances[0]
 	assert (smtp.host, smtp.port, smtp.timeout) == ("smtp.example.test", 2525, 12.5)
+	starttls_context = smtp.calls[0][1]
+	assert isinstance(starttls_context, ssl.SSLContext)
+	assert starttls_context.check_hostname is True
+	assert starttls_context.verify_mode == ssl.CERT_REQUIRED
 	assert smtp.calls == [
-		("starttls",),
+		("starttls", starttls_context),
 		("login", "smtp-user", "smtp-secret"),
 		(
 			"send_message",
@@ -242,6 +252,44 @@ def test_smtp_can_skip_tls_and_authentication_and_renders_recovery(monkeypatch) 
 	assert message["Subject"] == "SLO recovery for U_TEST"
 	assert "Event type: recovery" in message.get_content()
 	assert "Reason codes: none" in message.get_content()
+
+
+def test_smtp_renders_numeric_nulls_as_not_available(monkeypatch) -> None:
+	_RecordingSmtp.instances.clear()
+	monkeypatch.setattr(smtplib, "SMTP", _RecordingSmtp)
+	sender = SmtpAlertSender(
+		host="smtp.example.test",
+		port=25,
+		sender="alerts@example.test",
+		recipients=("owner@example.test",),
+		starttls=False,
+	)
+
+	sender.send(_transition("recovery", numeric_nulls=True))
+
+	body = _RecordingSmtp.instances[0].messages[0].get_content()
+	assert "Success rate: not available" in body
+	assert "P95 duration (ms): not available" in body
+
+
+def test_destination_fingerprints_ignore_supported_normalization_differences() -> None:
+	first_webhook = WebhookAlertSender(" https://hooks.example.test/secret ")
+	second_webhook = WebhookAlertSender("https://hooks.example.test/secret")
+	first_email = SmtpAlertSender(
+		host=" SMTP.EXAMPLE.TEST ",
+		port=587,
+		sender=" Alerts@Example.Test ",
+		recipients=(" Owner@Example.Test ", "oncall@example.test"),
+	)
+	second_email = SmtpAlertSender(
+		host="smtp.example.test",
+		port=587,
+		sender="alerts@example.test",
+		recipients=("ONCALL@EXAMPLE.TEST", "owner@example.test"),
+	)
+
+	assert first_webhook.destination_fingerprint == second_webhook.destination_fingerprint
+	assert first_email.destination_fingerprint == second_email.destination_fingerprint
 
 
 def test_smtp_sanitizes_delivery_failure_without_chaining(monkeypatch) -> None:

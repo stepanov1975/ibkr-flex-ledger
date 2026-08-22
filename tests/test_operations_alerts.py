@@ -162,7 +162,16 @@ def test_persistence_failure_is_sanitized_and_does_not_stop_other_channels() -> 
     result = operations_evaluate_slo_alerts(
         "U_TEST", _alerting_status(), repository, [webhook, email], NOW
     )
+    first_webhook_event_id = webhook.attempted[0].event_id
+    repository.failing_fingerprints.clear()
+    retry = operations_evaluate_slo_alerts(
+        "U_TEST", _alerting_status(LATER), repository, [webhook, email], LATER
+    )
 
     assert result.delivered_channels == ("email",)
     assert result.failed_channels == ("webhook",)
+    assert retry.delivered_channels == ("webhook",)
+    assert retry.failed_channels == ()
+    assert webhook.attempted[1].event_id == first_webhook_event_id
+    assert len(email.transitions) == 1
     assert email.transitions[0].event_type == "alert"
