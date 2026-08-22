@@ -784,6 +784,83 @@ def test_operations_repair_runbook_shell_and_sql_blocks_parse() -> None:
         _drop_database(admin_url, database_name)
 
 
+def test_operations_repair_postgres_commands_forward_scope_to_container(
+    tmp_path: Path,
+) -> None:
+    """Execute repair commands across an isolated host/container environment boundary."""
+
+    operations_text = Path("docs/operations.md").read_text(encoding="utf-8")
+    repair_section = operations_text.split(
+        "## Broker position repair by immutable replay", maxsplit=1
+    )[1].split("## Restore drill", maxsplit=1)[0]
+    postgres_scope_blocks = [
+        block
+        for block in re.findall(r"```bash\n(.*?)\n```", repair_section, flags=re.DOTALL)
+        if "postgres sh -eu -c 'psql" in block
+        and '-v account_id="$REPAIR_ACCOUNT_ID"' in block
+    ]
+    assert len(postgres_scope_blocks) == 3
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_psql = fake_bin / "psql"
+    fake_psql.write_text(
+        "#!/bin/sh\n"
+        "set -u\n"
+        "case \" $* \" in\n"
+        "  *\" account_id=$REPAIR_ACCOUNT_ID \"*\" period_key=$TARGET_PERIOD \"*"
+        "\" flex_query_id=$TARGET_QUERY \"*) cat >/dev/null ;;\n"
+        "  *) exit 9 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_psql.chmod(0o755)
+
+    compose_boundary = r"""
+repair_compose() {
+    local -a forwarded=()
+    test "$1" = exec
+    shift
+    while [[ "$1" = -T || "$1" = -e ]]; do
+        if [[ "$1" = -T ]]; then
+            shift
+            continue
+        fi
+        local declaration="$2"
+        shift 2
+        if [[ "$declaration" = *=* ]]; then
+            forwarded+=("$declaration")
+        else
+            forwarded+=("$declaration=${!declaration}")
+        fi
+    done
+    local service="$1"
+    shift
+    if [[ "$service" = app ]]; then
+        env -i "PATH=$FAKE_BIN:/usr/bin:/bin" "ACCOUNT_ID=$REPAIR_ACCOUNT_ID" \
+            "${forwarded[@]}" "$@"
+    else
+        test "$service" = postgres
+        env -i "PATH=$FAKE_BIN:/usr/bin:/bin" "POSTGRES_USER=doc-user" \
+            "POSTGRES_DB=doc-db" "${forwarded[@]}" "$@"
+    fi
+}
+REPAIR_ACCOUNT_ID=DOC_ACCOUNT
+TARGET_PERIOD=2026-08-21
+TARGET_QUERY=doc-query
+"""
+
+    for postgres_scope_block in postgres_scope_blocks:
+        executed = subprocess.run(
+            ["bash", "-c", f"{compose_boundary}\n{postgres_scope_block}"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "FAKE_BIN": str(fake_bin)},
+        )
+        assert executed.returncode == 0, executed.stderr
+
+
 def test_postgresql_deterministic_replay_cleanup_is_scoped_immutable_and_idempotent() -> None:
     """Rebuild reversed-date artifacts without mutating raw or unrelated snapshots."""
 

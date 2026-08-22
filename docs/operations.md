@@ -159,7 +159,11 @@ test "$ACCOUNT_ID" = "$REPAIR_ACCOUNT_ID" || {
 }
 '
 
-repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+repair_compose exec -T \
+  -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" \
+  -e TARGET_PERIOD="$TARGET_PERIOD" \
+  -e TARGET_QUERY="$TARGET_QUERY" \
+  postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
   -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
 CREATE TEMP TABLE repair_selected_artifact AS
 WITH eligible_artifact AS (
@@ -276,7 +280,11 @@ selected set, three zero discrepancy rows per selected date, and one four-counte
 row per selected date.
 
 ```bash
-repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+repair_compose exec -T \
+  -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" \
+  -e TARGET_PERIOD="$TARGET_PERIOD" \
+  -e TARGET_QUERY="$TARGET_QUERY" \
+  postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
   -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
 CREATE TEMP TABLE repair_selected_artifact AS
 WITH eligible_artifact AS (
@@ -424,7 +432,11 @@ provisional summary is restricted to the explicit account and selected dates; it
 another account or a globally latest date. The JSONB checksum preserves SQL `NULL` positions.
 
 ```bash
-repair_compose exec -T postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+repair_compose exec -T \
+  -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" \
+  -e TARGET_PERIOD="$TARGET_PERIOD" \
+  -e TARGET_QUERY="$TARGET_QUERY" \
+  postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
   -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
 WITH eligible_artifact AS (
     SELECT artifact.report_date_local,

@@ -259,3 +259,94 @@ PASS (no output)
   recorded.
 - Concerns: none known in the code fix. The expected operational prerequisite remains the
   verified Task 8 backup and explicit per-scope candidate report before the operator CLI.
+
+## User-Authorized Targeted Fix Cycle
+
+### Scope and resolution
+
+- Cycle base: `e65309f0991010dffb88950c595f80da1e94e36c`.
+- Residual defect: three documented PostgreSQL commands consumed host-shell
+  `REPAIR_ACCOUNT_ID`, `TARGET_PERIOD`, and `TARGET_QUERY` inside a single-quoted
+  container-side `sh -u` command without forwarding those variables through Compose exec.
+- Root cause: single quotes correctly defer variable expansion to the container shell, but the
+  absent `exec -e` arguments left that clean environment without the three scope variables.
+- Fix: the pre-delete report, broker/discrepancy verification, and checksum/provisional command
+  now each pass explicit `-e NAME="$NAME"` values before the `postgres` service. This works even
+  though the host variables are shell variables rather than exported environment variables.
+- Preserved without change: Compose project `stock_app`, `/stock_app/.env`, the reviewed
+  worktree Compose file, account guard, SQL text and production-equivalent eligibility/scope
+  predicates.
+
+### RED evidence
+
+The regression extracts all three affected Bash blocks, executes each through a Compose-like
+boundary that starts the inner command with `env -i`, and uses a fake `psql` only at the
+external database-client boundary. The fake client verifies that its `-v` values equal the
+three variables actually present inside the simulated container.
+
+Before the runbook fix:
+
+```text
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/pytest -q \
+  tests/test_end_to_end_seeded.py::test_operations_repair_postgres_commands_forward_scope_to_container
+FAILED test_operations_repair_postgres_commands_forward_scope_to_container
+sh: 1: REPAIR_ACCOUNT_ID: parameter not set
+1 failed in 0.73s
+```
+
+This is the original runtime failure, not a source-text or Bash-syntax assertion.
+
+### GREEN evidence and final gates
+
+```text
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/pytest -q \
+  tests/test_end_to_end_seeded.py::test_operations_repair_postgres_commands_forward_scope_to_container
+1 passed in 0.65s
+
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/pytest -q \
+  tests/test_end_to_end_seeded.py::test_operations_repair_runbook_shell_and_sql_blocks_parse
+1 passed in 1.21s
+
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/pytest -q
+233 passed in 7.81s
+
+/stock_app/.venv/bin/ruff check app/ tests/ --ignore=E501,W293,W291
+All checks passed!
+
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/mypy
+Success: no issues found in 60 source files
+
+set -a; source /stock_app/.env; set +a
+/stock_app/.venv/bin/mypy --strict tests/test_mapping_canonical_pipeline.py \
+  tests/test_db_ledger_snapshot.py tests/test_ledger_snapshot_service_strict.py \
+  tests/test_jobs_reprocess.py
+Success: no issues found in 4 source files
+
+/stock_app/.venv/bin/python -m pip check
+No broken requirements found.
+
+git diff --check
+PASS (no output)
+```
+
+The shell/SQL documentation test runs `bash -n` on every repair Bash block and executes all
+five SQL heredocs against a freshly created, migrated, disposable PostgreSQL database.
+
+### Changed files and safety review
+
+- `docs/operations.md` — forwards all three explicit scope variables into each of the three
+  container-side PostgreSQL commands.
+- `tests/test_end_to_end_seeded.py` — adds the host/container environment-boundary regression.
+- `.superpowers/sdd/2026-08-21-broker-position-reconciliation/final-fix-report.md` — records this
+  authorized cycle.
+- No application code, SQL predicates, schema, dependencies, or unrelated documentation was
+  changed.
+- No active data was read or mutated, no repair/cleanup command was run, Docker Compose was not
+  invoked against the active project, and no IBKR endpoint was contacted. Documentation SQL
+  validation used only a disposable `test_*` database that the test dropped in `finally`.
+- Concerns: none known.
