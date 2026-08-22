@@ -1,5 +1,6 @@
 """Adapter layer package for broker integration boundaries."""
 
+from .alert_delivery import SmtpAlertSender, WebhookAlertSender
 from .flex_errors import (
 	FlexAdapterConnectionError,
 	FlexAdapterError,
@@ -27,4 +28,6 @@ __all__ = [
 	"FlexTokenExpiredError",
 	"FlexTokenInvalidError",
 	"FlexWebServiceAdapter",
+	"SmtpAlertSender",
+	"WebhookAlertSender",
 ]
