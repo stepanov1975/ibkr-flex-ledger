@@ -94,6 +94,25 @@ def _scheduler_environment(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
                 "diagnostics-retention",
             ],
         ),
+        (
+            "alerts",
+            [
+                "compose",
+                "--project-name",
+                "stock_app",
+                "--env-file",
+                ".env",
+                "--file",
+                "docker-compose.yml",
+                "exec",
+                "-T",
+                "app",
+                "python",
+                "-m",
+                "app.main",
+                "alerts-evaluate",
+            ],
+        ),
     ],
 )
 def test_scheduler_routes_container_jobs_to_pinned_compose_project(
@@ -146,7 +165,13 @@ def test_systemd_scheduler_units_verify(tmp_path: Path) -> None:
     """Catch malformed service/timer units before installation on the host."""
 
     unit_paths = sorted(SYSTEMD_DIR.glob("ibkr-flex-ledger-*.*"))
-    assert len(unit_paths) == 8
+    assert len(unit_paths) == 10
+    alert_timer = (
+        SYSTEMD_DIR / "ibkr-flex-ledger-alerts.timer"
+    ).read_text(encoding="utf-8")
+    assert "OnCalendar=*:0/15" in alert_timer
+    assert "Persistent=true" in alert_timer
+    assert "RandomizedDelaySec=1m" in alert_timer
     verification_paths = []
     for unit_path in unit_paths:
         contents = unit_path.read_text(encoding="utf-8")

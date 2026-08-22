@@ -1,0 +1,11 @@
+[Unit]
+Description=Evaluate IBKR Flex Ledger outbound SLO alerts every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=1m
+Unit=ibkr-flex-ledger-alerts.service
+
+[Install]
+WantedBy=timers.target

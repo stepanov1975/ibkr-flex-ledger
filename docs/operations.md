@@ -5,17 +5,51 @@ The application exposes ingestion reliability measurements at `GET /operations/s
 ## Scheduled operations
 
 The production Docker Compose host uses the checked-in systemd services and timers in
-`deploy/systemd/`. Install and enable all four timers by following
+`deploy/systemd/`. Install and enable all five timers by following
 `deploy/systemd/README.md`. The default UTC schedule is:
 
 - verified backup daily at 02:00;
 - 60-day diagnostics retention daily at 03:15;
 - restore drill every Sunday at 04:00; and
-- ingestion daily at 06:00.
+- ingestion daily at 06:00; and
+- outbound SLO alert evaluation every 15 minutes.
 
 Timers are persistent and include a small randomized delay. Backup, retention, and restore
-drill jobs share a non-blocking maintenance lock; ingestion uses a separate lock. A skipped
-overlap is reported as a failed systemd service and must be investigated in the journal.
+drill jobs share a non-blocking maintenance lock; ingestion and alert evaluation use separate
+locks. A skipped overlap is reported as a failed systemd service and must be investigated in
+the journal.
+
+## Outbound SLO alerts
+
+Configure one or both delivery channels in `/stock_app/.env`: `ALERT_WEBHOOK_URL` for an HTTP(S)
+webhook, and `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_STARTTLS`,
+`ALERT_SMTP_USERNAME`, `ALERT_SMTP_PASSWORD`, `ALERT_EMAIL_FROM`, and comma-separated
+`ALERT_EMAIL_TO` for SMTP email. `ALERT_DELIVERY_TIMEOUT_SECONDS` controls the outbound request
+timeout. The SMTP username and password are optional together; the SMTP host, sender, and at
+least one recipient are required together.
+
+Each configured channel receives a message only when the evaluated SLO state transitions between
+healthy and alerting. The first healthy evaluation establishes a baseline without sending a
+message. Failed channels retry the same transition on the next evaluation independently, while
+channels that already delivered it remain deduplicated.
+
+Run an evaluation manually with:
+
+```bash
+docker compose --project-name stock_app --env-file .env --file docker-compose.yml \
+  exec -T app python -m app.main alerts-evaluate
+```
+
+Inspect scheduler failures with:
+
+```bash
+systemctl status ibkr-flex-ledger-alerts.service
+journalctl -u ibkr-flex-ledger-alerts.service
+```
+
+Delivery state is persisted after an SMTP send succeeds. A rare process crash after the SMTP
+server accepts an email but before that state is written can cause a duplicate email on the next
+evaluation.
 
 ## Diagnostic retention
 

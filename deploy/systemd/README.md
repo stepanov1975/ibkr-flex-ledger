@@ -9,11 +9,12 @@ at `/stock_app`. All calendar times are UTC.
 | Diagnostics retention | Daily at 03:15 | Maintenance |
 | Restore drill | Sunday at 04:00 | Maintenance |
 | Flex ingestion | Daily at 06:00 | Ingestion |
+| Outbound SLO alert evaluation | Every 15 minutes | Alerts |
 
 The randomized delays in the timer files spread host load after startup. Persistent
 timers run a missed job after the host returns. Backup, retention, and restore drill
-share a non-blocking maintenance lock so they cannot overlap; ingestion has its own
-lock so duplicate ingestion runs cannot overlap.
+share a non-blocking maintenance lock so they cannot overlap; ingestion and alert
+evaluation each have their own lock so duplicate runs cannot overlap.
 
 Install and activate the units on the Compose host:
 
@@ -22,6 +23,7 @@ sudo install -m 0644 deploy/systemd/ibkr-flex-ledger-*.* /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now \
   ibkr-flex-ledger-ingestion.timer \
+  ibkr-flex-ledger-alerts.timer \
   ibkr-flex-ledger-retention.timer \
   ibkr-flex-ledger-backup.timer \
   ibkr-flex-ledger-restore-drill.timer

@@ -3,7 +3,7 @@
 set -eu
 
 usage() {
-    echo "usage: $0 {ingestion|retention|backup|restore-drill}" >&2
+    echo "usage: $0 {ingestion|retention|alerts|backup|restore-drill}" >&2
 }
 
 if [ "$#" -ne 1 ]; then
@@ -25,6 +25,11 @@ case "$job_name" in
         lock_name=maintenance.lock
         set -- docker compose --project-name stock_app --env-file .env \
             --file docker-compose.yml exec -T app python -m app.main diagnostics-retention
+        ;;
+    alerts)
+        lock_name=alerts.lock
+        set -- docker compose --project-name stock_app --env-file .env \
+            --file docker-compose.yml exec -T app python -m app.main alerts-evaluate
         ;;
     backup)
         lock_name=maintenance.lock
