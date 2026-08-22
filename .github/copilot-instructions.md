@@ -57,7 +57,7 @@
 ## TECHNICAL STANDARDS & LINTING
 1. **Code Style (PEP 8):**
    * Adhere to PEP 8 naming conventions (CapWords for classes, snake_case for functions/vars).
-   * **Line Length:** Limit to **120 characters** (aligns with Pylint config).
+   * **Line Length:** Limit to **120 characters** (aligns with the project Ruff policy).
 2. **Modern Python Idioms:**
    * Use `pathlib` instead of `os.path`.
    * Use `f-strings` for string interpolation (except in logging).

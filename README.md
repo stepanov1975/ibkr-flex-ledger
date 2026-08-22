@@ -28,7 +28,7 @@ Code under `references/` is reference material only. It is not part of this appl
 
 - Imports IBKR Flex reports on a schedule and stores immutable raw payloads.
 - Normalizes broker records into canonical events (trades, cashflows, FX, and flagged corporate actions).
-- Computes stock positions and P&L with a stocks-first ledger (FIFO in MVP).
+- Computes positions and P&L with a stocks-first FIFO ledger, including contract-multiplier economics for supported options.
 - Supports labels and notes for grouped analysis and reporting drilldowns.
 - Provides reconciliation views to compare broker-aligned and economic calculations with traceability to source rows.
 
@@ -46,7 +46,7 @@ Included in MVP:
 
 Out of scope for MVP:
 
-- Options lifecycle accounting
+- Full options lifecycle and deliverable accounting beyond supported option trades and broker position valuation
 - Real-time market data and risk dashboards
 - Trade execution automation
 
@@ -183,9 +183,11 @@ Credential storage guidance:
 
 Required settings for startup validation:
 
-- `ACCOUNT_ID`
 - `IBKR_FLEX_TOKEN`
 - `IBKR_FLEX_QUERY_ID`
+
+`ACCOUNT_ID` has a development fallback of `DEFAULT_ACCOUNT`, but deployments should
+set it explicitly so ingestion and repair commands target the intended account.
 
 Optional Flex retry strategy tuning settings:
 
@@ -371,6 +373,9 @@ Example:
 curl -X POST "http://127.0.0.1:8000/ingestion/reprocess?period_key=2026-02-14&flex_query_id=query"
 ```
 
+The HTTP endpoint is replay-only. Supplying an explicit scope does not authorize
+deletion of unsupported snapshot dates.
+
 Ingestion run list/detail payload additions:
 
 - `canonical_input_row_count`: Number of raw rows considered by canonical mapping for this run.
@@ -405,6 +410,16 @@ CLI trigger command additions:
 /stock_app/.venv/bin/python -m app.main reprocess-run
 ```
 
+The command above is also replay-only. The operator-only cleanup path requires both
+`--period-key` and `--flex-query-id`, a verified backup, and the candidate checks in
+`docs/operations.md`:
+
+```bash
+/stock_app/.venv/bin/python -m app.main reprocess-run \
+  --period-key 2026-02-14 \
+  --flex-query-id query
+```
+
 Task 5 implementation modules:
 
 - `app/mapping/service.py`
@@ -414,9 +429,15 @@ Task 5 implementation modules:
 
 ## Valuation and FX fallback engine (Task 6)
 
-Snapshot accounting follows the frozen deterministic hierarchies:
+Snapshot accounting uses broker authority when a completed `OpenPositions` artifact
+is available and deterministic fallbacks outside that authority:
 
-- EOD mark: `OpenPositions.markPrice` -> same-day `Trades.closePrice` -> last known trade price
+- With matching FIFO and broker quantities, economic unrealized P&L is broker position
+  quantity x `OpenPositions.markPrice` x contract multiplier x FX, less FIFO cost basis.
+  Missing mark, positive multiplier, or FX makes the row provisional; broker-reported
+  unrealized P&L is not substituted for an exact match.
+- Same-day `Trades.closePrice` and last known trade price are fallback marks only when
+  completed broker-position authority is not being applied.
 - Execution FX: `Trades.fxRateToBase` -> derived net-cash ratio -> exact/nearest-previous `ConversionRates`
 - Base-currency events use `1.0`; missing non-base FX marks the snapshot provisional rather than labeling native amounts as USD
 - Flex statement `reportDate` drives the snapshot business date, including delayed imports
@@ -428,19 +449,22 @@ affected snapshot row provisional. Execution-level assignment and exercise (Book
 rows without `ibExecID` use stable namespaced identities such as `FLEX_TXN:<transactionID>`
 or `FLEX_TRADE:<tradeID>`.
 
-An explicit scoped reprocess reads immutable artifacts, replays their actual report dates
-chronologically, rebuilds canonical events and snapshots, and removes only unsupported
-derived snapshot dates in that account/period/query scope. It does not request or download
-a new IBKR Flex statement. Back up and verify PostgreSQL before using cleanup-capable
-reprocess; see `docs/operations.md`.
+Every reprocess reads immutable artifacts, replays their actual report dates
+chronologically, and rebuilds canonical events and snapshots without requesting a new
+IBKR Flex statement. The ordinary HTTP endpoint, including explicit HTTP scopes, never
+deletes snapshots. Only the CLI command with both scope flags may remove unsupported
+derived snapshot dates in that exact account/period/query scope. Back up and verify
+PostgreSQL before using that cleanup-capable command; see `docs/operations.md`.
 
-## Stocks-first FIFO ledger and daily snapshots (Task 7)
+## FIFO ledger and daily snapshots (Task 7)
 
-Task 7 adds the first project-native stocks FIFO ledger computation flow and persists daily snapshot outputs.
+Task 7 adds the project-native FIFO ledger computation flow and persists daily snapshot outputs.
 
 Included behavior:
 
-- Deterministic FIFO lot matching for stock trades with stable tie-break ordering (`trade_timestamp_utc` then source row id)
+- Deterministic FIFO lot matching for canonical trades with stable tie-break ordering
+  (`trade_timestamp_utc` then source row id), including validated contract multipliers
+  for option and other multiplier-bearing executions
 - Base-currency realized and unrealized PnL computation with cashflow, fee, and withholding impacts
 - Automatic snapshot stage execution after successful ingestion runs (`snapshot` timeline stage persisted in run diagnostics)
 - Day-level snapshot persistence into `pnl_snapshot_daily` and reconciled open-lot persistence into `position_lot`

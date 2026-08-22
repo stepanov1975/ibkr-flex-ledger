@@ -727,10 +727,13 @@ def test_operations_repair_runbook_shell_and_sql_blocks_parse() -> None:
     assert "docker compose stop" not in repair_section
     assert "--project-name stock_app" in repair_section
     assert "--env-file /stock_app/.env" in repair_section
-    assert '--file "$REPAIR_WORKTREE/docker-compose.yml"' in repair_section
+    assert 'REPAIR_CHECKOUT=${REPAIR_CHECKOUT:-/stock_app}' in repair_section
+    assert '--file "$REPAIR_CHECKOUT/docker-compose.yml"' in repair_section
     assert "ABORT_EMPTY_SELECTION" in repair_section
     assert "ABORT_MISSING_OPENPOSITIONS" in repair_section
-    assert "LATEST_COUNT_105_CONFIRMED" in repair_section
+    assert "latest_non_cash_broker_count" in repair_section
+    assert "LATEST_RECORDED_COUNT_CONFIRMED" in repair_section
+    assert "ABORT_LATEST_COUNT_CHANGED" in repair_section
     assert "ABORT_MISSING_SNAPSHOT_DIAGNOSTIC" in repair_section
     assert repair_section.count(
         "artifact.completed_ingestion_run_id IS NOT NULL AND completion.status = 'success'"
@@ -769,6 +772,8 @@ def test_operations_repair_runbook_shell_and_sql_blocks_parse() -> None:
                     "period_key=2026-08-21",
                     "-v",
                     "flex_query_id=doc-query",
+                    "-v",
+                    "expected_latest_broker_count=0",
                 ],
                 input=sql_block,
                 text=True,
@@ -848,6 +853,7 @@ repair_compose() {
 REPAIR_ACCOUNT_ID=DOC_ACCOUNT
 TARGET_PERIOD=2026-08-21
 TARGET_QUERY=doc-query
+EXPECTED_LATEST_BROKER_COUNT=0
 """
 
     for postgres_scope_block in postgres_scope_blocks:

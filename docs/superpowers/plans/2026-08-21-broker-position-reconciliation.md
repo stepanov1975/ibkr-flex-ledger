@@ -1,6 +1,13 @@
 # Broker Position Reconciliation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+Status: Completed on 2026-08-22
+
+This is a historical execution plan, not a current runbook or progress tracker. The
+checkboxes preserve the planning format. Current behavior is documented in `README.md`,
+the approved accounting design, and `docs/operations.md`.
+
+> Historical note: the unchecked boxes preserve the original planning template; do not
+> execute this file as a current implementation checklist.
 
 **Goal:** Make daily snapshot quantities agree with completed IBKR OpenPositions data while preserving an auditable event-derived ledger and deterministically repairing the active database from immutable raw artifacts.
 
@@ -577,7 +584,7 @@ def test_snapshot_creates_broker_only_option_with_contract_valuation() -> None:
 - [ ] **Step 3: Add match, optional-valuation, FX, and cashflow-only tests**
 
 ```python
-def test_snapshot_exact_match_keeps_fifo_cost_and_uses_broker_unrealized() -> None:
+def test_snapshot_exact_match_keeps_fifo_cost_and_uses_economic_unrealized() -> None:
     instrument_id = uuid4()
     repository = _RepositoryStub(
         trades=[_trade(instrument_id, "BUY", "10", "10")],
@@ -591,7 +598,8 @@ def test_snapshot_exact_match_keeps_fifo_cost_and_uses_broker_unrealized() -> No
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.position_qty == "10"
     assert snapshot.cost_basis == "100"
-    assert snapshot.unrealized_pnl == "200"
+    assert snapshot.unrealized_pnl == "20"
+    assert snapshot.valuation_source == "openpositions_mark_price"
     assert snapshot.provisional is False
     assert result.broker_position_match_count == 1
 
@@ -691,7 +699,7 @@ Build `instrument_keys` as the sorted union of trade, instrument-linked cashflow
 1. Compute FIFO and reconstructable realized P&L from canonical rows.
 2. Keep its open-lot requests unchanged for `position_lot` reconciliation.
 3. Compare FIFO quantity with the broker row, treating broker absence as zero.
-4. On exact match, keep FIFO cost and realized P&L; prefer broker unrealized converted to functional currency, then fall back to broker mark/multiplier market value minus FIFO cost.
+4. On exact match, keep FIFO cost and realized P&L and compute economic unrealized P&L from broker quantity, mark, positive multiplier, FX, and FIFO cost. Missing required market inputs make the row provisional; do not substitute broker-reported unrealized P&L.
 5. On mismatch, write broker quantity, converted broker cost and unrealized values, reconstructable realized P&L, and `provisional=True`.
 6. For broker-only rows, use zero realized P&L unless canonical cashflow evidence exists and emit no lot.
 7. When required cost/mark/FX data is unavailable, preserve `None` cost, use zero only for the non-null P&L database columns, and set provisional.
@@ -1306,7 +1314,7 @@ def test_reprocess_maps_and_snapshots_selected_artifacts_chronologically(
         ingestion_repository=_IngestionRepositoryStub(),
     )
 
-    result = orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
 
     supported_dates = ("2026-02-19", "2026-08-20")
     assert result.status == "success"
@@ -1355,7 +1363,7 @@ def _trade_row(owner_run_id: UUID, artifact_label: str) -> RawRecordForMapping:
 def test_reprocess_failure_never_deletes_unsupported_snapshots() -> None:
     operation_log: list[tuple[object, ...]] = []
     harness = _build_reprocess_harness(operation_log, fail_on_snapshot_call=2)
-    result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = harness.orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
     assert result.status == "failed"
     assert harness.cleanup_repository.delete_calls == []
 
@@ -1407,7 +1415,7 @@ def _build_reprocess_harness(
 
 def test_reprocess_records_cleanup_candidates_before_deleted_count() -> None:
     harness = _build_reprocess_harness([])
-    result = harness.orchestrator.job_execute_reprocess_target("2026-02-20", "query")
+    result = harness.orchestrator.job_execute_reprocess_target_with_cleanup("2026-02-20", "query")
     assert result.status == "success"
     diagnostics = harness.ingestion_repository.finalize_calls[0]["diagnostics"]
     cleanup_events = [event for event in diagnostics if event["stage"] == "snapshot_cleanup"]
@@ -1452,7 +1460,7 @@ Accumulate per-artifact counts in diagnostics. If any read, map, or snapshot rai
 Create one `SQLAlchemyLedgerSnapshotService` and `StockLedgerSnapshotService` in each bootstrap path and pass both to `CanonicalReprocessOrchestrator`. In `app/main.py`, when both reprocess flags are supplied, call:
 
 ```python
-execution_result = reprocess_orchestrator.job_execute_reprocess_target(
+execution_result = reprocess_orchestrator.job_execute_reprocess_target_with_cleanup(
     period_key=parsed_arguments.period_key,
     flex_query_id=parsed_arguments.flex_query_id,
 )

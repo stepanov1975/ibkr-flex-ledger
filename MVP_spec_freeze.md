@@ -64,6 +64,12 @@ Goal: define deterministic ordered source lists and tie-break behavior.
 
 If all three sources are missing, valuation is marked provisional and diagnostic code `EOD_MARK_MISSING_ALL_SOURCES` is emitted.
 
+Post-freeze supersession: completed `OpenPositions` artifacts follow the broker-authoritative
+reconciliation design in `docs/superpowers/specs/2026-08-21-broker-position-reconciliation-design.md`.
+For an exact FIFO/broker quantity match, broker mark, positive multiplier, and FX are required
+to compute economic unrealized P&L; priorities 2 and 3 apply only outside completed broker
+position authority.
+
 ### 2.2 Execution FX Fallback
 
 | Priority | Source | Eligibility Condition | Tie-Break Rule | Missing-Data Behavior |

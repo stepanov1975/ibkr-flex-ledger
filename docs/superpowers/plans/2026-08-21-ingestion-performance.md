@@ -1,12 +1,19 @@
 # Incremental Ingestion Performance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+Status: Completed on 2026-08-21
+
+This is a historical execution plan, not a current runbook or progress tracker. The
+checkboxes preserve the planning format. Use `README.md`, `linting.md`, `testing.md`,
+and `docs/operations.md` for current behavior and commands.
+
+> Historical note: the unchecked boxes preserve the original planning template; do not
+> execute this file as a current implementation checklist.
 
 **Goal:** Make normal IBKR Flex ingestion deterministic and change-driven while retaining every distinct raw artifact and preserving full reprocess behavior.
 
 **Architecture:** Exact duplicate artifacts short-circuit after identity validation; distinct artifacts retain all raw rows and canonicalize only rows changed from their immediately preceding version. Canonical instruments are batch-upserted, snapshots are rebuilt only for affected instruments/currencies, and monotonic stage durations make remaining costs observable.
 
-**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy Core, PostgreSQL 16, Alembic, pytest, Ruff, MyPy, Docker Compose
+**Tech Stack:** Python 3.13, FastAPI, SQLAlchemy Core, PostgreSQL 17, Alembic, pytest, Ruff, MyPy, Docker Compose
 
 **Spec:** `docs/superpowers/specs/2026-08-21-ingestion-performance-design.md`
 
@@ -498,7 +505,7 @@ instrument_id_by_conid = {record.conid: record.instrument_id for record in recor
 
 - [ ] **Step 5: Run canonical pipeline, persistence, and reprocess tests**
 
-Run: `pytest -q tests/test_jobs_canonical_pipeline.py tests/test_db_canonical_upsert.py tests/test_jobs_reprocess_orchestrator.py`
+Run: `pytest -q tests/test_jobs_canonical_pipeline.py tests/test_db_canonical_upsert.py tests/test_jobs_reprocess.py`
 
 Expected: PASS, including stable canonical origin identity and mutable correction updates.
 
@@ -1083,7 +1090,7 @@ Start a separate counter immediately before preflight, XML extraction, artifact 
 
 - [ ] **Step 8: Run orchestrator and reprocess suites**
 
-Run: `pytest -q tests/test_jobs_ingestion_orchestrator.py tests/test_jobs_reprocess_orchestrator.py`
+Run: `pytest -q tests/test_jobs_ingestion_orchestrator.py tests/test_jobs_reprocess.py`
 
 Expected: PASS; reprocess continues to call the existing complete-period raw read and full canonical pipeline.
 

@@ -33,22 +33,24 @@ after the backup and cleanup-candidate report have been recorded.
 ### 0. Pin the reviewed checkout and Compose project
 
 Run the entire repair from one shell. This wrapper always addresses the existing `stock_app`
-Compose project, loads `/stock_app/.env`, and builds from the reviewed worktree rather than
-from the main checkout. Replace `REVIEWED_COMMIT` with the commit approved for the repair and
-do not continue unless every check succeeds:
+Compose project, loads `/stock_app/.env`, and builds from the exact reviewed checkout.
+`REPAIR_CHECKOUT` defaults to the merged main checkout; change it only when a different
+reviewed checkout is intentionally being used. Replace `REVIEWED_COMMIT` and do not
+continue unless every check succeeds:
 
 ```bash
-REPAIR_WORKTREE=/stock_app/.worktrees/broker-position-reconciliation
+REPAIR_CHECKOUT=${REPAIR_CHECKOUT:-/stock_app}
 REVIEWED_COMMIT='replace-with-reviewed-commit-sha'
 
-test "$(git -C "$REPAIR_WORKTREE" branch --show-current)" = 'codex/broker-position-reconciliation'
-test "$(git -C "$REPAIR_WORKTREE" rev-parse HEAD)" = "$REVIEWED_COMMIT"
+test -f "$REPAIR_CHECKOUT/docker-compose.yml"
+test "$(git -C "$REPAIR_CHECKOUT" rev-parse HEAD)" = "$REVIEWED_COMMIT"
+test -z "$(git -C "$REPAIR_CHECKOUT" status --porcelain --untracked-files=all)"
 
 repair_compose() {
     docker compose \
         --project-name stock_app \
         --env-file /stock_app/.env \
-        --file "$REPAIR_WORKTREE/docker-compose.yml" \
+        --file "$REPAIR_CHECKOUT/docker-compose.yml" \
         "$@"
 }
 
@@ -232,16 +234,38 @@ SELECT selected.report_date_local, selected.raw_artifact_id,
 FROM repair_selected_artifact selected
 ORDER BY selected.report_date_local;
 
+SELECT count(*) AS latest_non_cash_broker_count
+FROM repair_selected_artifact selected
+JOIN raw_record position_row
+  ON position_row.raw_artifact_id = selected.raw_artifact_id
+ AND position_row.section_name = 'OpenPositions'
+ AND position_row.source_row_ref LIKE 'OpenPositions:OpenPosition:%'
+WHERE selected.report_date_local = (
+    SELECT max(latest.report_date_local)
+    FROM repair_selected_artifact latest
+)
+  AND UPPER(BTRIM(position_row.source_payload->>'assetCategory')) NOT IN ('CASH', 'FX');
+
 SELECT report_date_local AS unsupported_date, row_count
 FROM repair_cleanup_candidate
 ORDER BY report_date_local;
 SQL
 ```
 
+Copy `latest_non_cash_broker_count` from the saved pre-delete output into the shell and
+validate it before deployment:
+
+```bash
+EXPECTED_LATEST_BROKER_COUNT='replace-with-recorded-count'
+case "$EXPECTED_LATEST_BROKER_COUNT" in
+    ''|*[!0-9]*) printf 'expected broker count must be a non-negative integer\n' >&2; exit 1 ;;
+esac
+```
+
 ### 3. Deploy reviewed code and run the operator-only replay
 
-Build and replace only the `app` service in the pinned project. This uses the Compose file's
-worktree-relative build context, so it cannot build stale code from the main checkout:
+Build and replace only the `app` service in the pinned project. The Compose file's relative
+build context resolves from `REPAIR_CHECKOUT`, whose clean commit was verified in step 0:
 
 ```bash
 repair_compose up -d --build app
@@ -274,18 +298,20 @@ Run this verification with the same explicit account/period/query values. It rep
 production eligibility rule, so legacy successful-owner artifacts remain included. It reports
 the expected non-cash broker OpenPositions count for every selected report date, three final
 snapshot discrepancies for every selected date (including zero rows), and all four production
-reconciliation counters from the newest successful reprocess. During Task 8, the latest
-selected report date must have exactly **105** broker OpenPositions rows. Require a nonempty
-selected set, three zero discrepancy rows per selected date, and one four-counter diagnostic
-row per selected date.
+reconciliation counters from the newest successful reprocess. Set
+`EXPECTED_LATEST_BROKER_COUNT` to the latest count recorded before mutation. Require a
+nonempty selected set, an exact latest-count match, three zero discrepancy rows per selected
+date, and one four-counter diagnostic row per selected date.
 
 ```bash
 repair_compose exec -T \
   -e REPAIR_ACCOUNT_ID="$REPAIR_ACCOUNT_ID" \
   -e TARGET_PERIOD="$TARGET_PERIOD" \
   -e TARGET_QUERY="$TARGET_QUERY" \
+  -e EXPECTED_LATEST_BROKER_COUNT="$EXPECTED_LATEST_BROKER_COUNT" \
   postgres sh -eu -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
-  -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" -v flex_query_id="$TARGET_QUERY"' <<'SQL'
+  -v account_id="$REPAIR_ACCOUNT_ID" -v period_key="$TARGET_PERIOD" \
+  -v flex_query_id="$TARGET_QUERY" -v expected_latest_broker_count="$EXPECTED_LATEST_BROKER_COUNT"' <<'SQL'
 CREATE TEMP TABLE repair_selected_artifact AS
 WITH eligible_artifact AS (
     SELECT artifact.raw_artifact_id, artifact.ingestion_run_id,
@@ -348,10 +374,10 @@ WITH broker_count AS (
 )
 SELECT report_date_local, expected_broker_open_positions_count,
        CASE WHEN report_date_local = max(report_date_local) OVER ()
-            THEN CASE WHEN expected_broker_open_positions_count = 105
-                      THEN 'LATEST_COUNT_105_CONFIRMED'
-                      ELSE 'ABORT_LATEST_COUNT_NOT_105' END
-            ELSE 'NON_LATEST_SELECTED_DATE' END AS task_8_count_status
+            THEN CASE WHEN expected_broker_open_positions_count = :'expected_latest_broker_count'::bigint
+                      THEN 'LATEST_RECORDED_COUNT_CONFIRMED'
+                      ELSE 'ABORT_LATEST_COUNT_CHANGED' END
+            ELSE 'NON_LATEST_SELECTED_DATE' END AS latest_count_status
 FROM broker_count
 ORDER BY report_date_local;
 
@@ -518,8 +544,8 @@ SQL
 
 Rerun the same guarded CLI command once, repeat both queries, and require an identical checksum
 and identical discrepancy results. Explain every remaining provisional group; it is not
-automatically a repair failure. Never continue from an empty selected set or a latest Task 8
-broker count other than 105.
+automatically a repair failure. Never continue from an empty selected set or when the latest
+broker count differs from `EXPECTED_LATEST_BROKER_COUNT`.
 
 ### 5. Roll back if verification fails
 

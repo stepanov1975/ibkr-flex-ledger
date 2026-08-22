@@ -1,8 +1,13 @@
 # Broker Position Reconciliation Design
 
 Date: 2026-08-21
-Status: Approved in chat; awaiting written-spec review
+Status: Implemented and verified on 2026-08-22
 Repository: `/stock_app`
+
+This is the approved historical design record. Current user-facing behavior is
+documented in `README.md`; current repair commands and safety requirements are in
+`docs/operations.md`. The active-database section below records the one-time repair
+acceptance criteria and is not a reusable broker-position-count requirement.
 
 ## Problem
 

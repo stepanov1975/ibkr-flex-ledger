@@ -103,6 +103,7 @@ Raw input remains immutable. All derived data can be regenerated from raw record
    2. `Trades.closePrice` (same `conid` + `report_date`)
    3. Last known `Trades.tradePrice` on or before `report_date`
    Tie-break: latest `dateTime`, then highest numeric `transactionID`, then highest raw record primary key. If all missing: mark provisional with `EOD_MARK_MISSING_ALL_SOURCES`.
+   - Supersession: completed `OpenPositions` artifacts use the broker-authoritative reconciliation design in `docs/superpowers/specs/2026-08-21-broker-position-reconciliation-design.md`. For an exact quantity match, broker mark, multiplier, and FX are required for economic unrealized P&L; trade-price fallbacks apply only outside that completed broker authority.
 - Economic FX policy (execution FX fallback):
    1. `Trades.fxRateToBase` (non-null and > 0)
    2. Derived `abs(netCashInBase) / abs(netCash)` when `netCash != 0`

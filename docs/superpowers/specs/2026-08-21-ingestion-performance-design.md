@@ -1,5 +1,11 @@
 # Incremental Ingestion Performance Design
 
+Status: Implemented and verified on 2026-08-21
+
+This document preserves the pre-implementation baseline and approved design. Current
+runtime behavior and diagnostic fields are documented in `README.md`; operational
+procedures are documented in `docs/operations.md`.
+
 ## Context
 
 The restored production-like dataset contains two 4.6 MB IBKR Flex artifacts, 29,944 raw records, 503 canonical trades, 12,207 canonical FX rows, and 372 daily snapshot rows. Historical diagnostics show that canonical processing remained stable at about 1.8 seconds and snapshot processing at 56–65 milliseconds, while the two complete runs took 10.97 and 19.33 seconds. Both reports were ready on the first poll; randomized first-poll waiting accounted for most of the difference.
