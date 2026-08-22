@@ -69,7 +69,7 @@ def test_alert_secrets_and_destinations_are_hidden_from_repr() -> None:
         **BASE,
         alert_webhook_url="https://hooks.example.test/secret",
         alert_smtp_host="smtp.example.test",
-        alert_smtp_username="user",
+        alert_smtp_username="smtp-login-secret",
         alert_smtp_password="secret",
         alert_email_from="alerts@example.test",
         alert_email_to="one@example.test",
@@ -82,7 +82,7 @@ def test_alert_secrets_and_destinations_are_hidden_from_repr() -> None:
     assert "smtp.example.test" not in settings_repr
     assert "alerts@example.test" not in settings_repr
     assert "one@example.test" not in settings_repr
-    assert "user" not in settings_repr
+    assert "smtp-login-secret" not in settings_repr
     assert "secret" not in settings_repr
 
 
