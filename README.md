@@ -562,13 +562,26 @@ retention, PITR, and incident recovery are documented in `deploy/systemd/README.
 ## Release quality gate (Task 13)
 
 The release gate combines deterministic unit/regression fixtures with PostgreSQL-backed
-seeded ingestion, replay, reporting, provenance, and reconciliation scenarios. Run:
+seeded ingestion, replay, reporting, provenance, and reconciliation scenarios. Run the
+general gates:
 
 ```bash
 IBKR_FLEX_TOKEN=test IBKR_FLEX_QUERY_ID=test .venv/bin/pytest -q
 .venv/bin/ruff check app tests
 .venv/bin/mypy
 ```
+
+Then point `DATABASE_URL` at a reachable PostgreSQL database whose user may create and drop
+databases, and run the isolated seeded gate explicitly:
+
+```bash
+IBKR_FLEX_TOKEN=test IBKR_FLEX_QUERY_ID=test \
+  .venv/bin/pytest -q tests/test_end_to_end_seeded.py
+```
+
+The seeded tests create uniquely named temporary databases and remove them afterward. Do not
+accept a release based only on the general suite when this file was skipped for lack of a
+reachable PostgreSQL server.
 
 Operational release proof—including backup checksums, replay run IDs, reconciliation and
 provisional results, migration state, and measured RPO/RTO—is recorded in

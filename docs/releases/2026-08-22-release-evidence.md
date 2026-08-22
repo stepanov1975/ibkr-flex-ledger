@@ -49,7 +49,7 @@ reported exactly one Alembic head and one current revision. The live
 Replay used stored raw artifacts only; it did not contact IBKR. Raw persistence counts
 remained unchanged at three artifacts and 46,027 raw records.
 
-| Replay scope | First run ID | Idempotency run ID | Selected broker positions | Snapshot checksum |
+| Replay scope | First run ID | Idempotency run ID | Final broker-position match count | Snapshot MD5 aggregate |
 | --- | --- | --- | ---: | --- |
 | Period `2026-02-20`, report date `2026-02-19` | `41df138c-02d9-4ecb-82fe-3a213737bbbe` | `49b29611-8aaf-44a0-b472-9264e0c4fd62` | 85 | `0ff98faf60ea745dd026e07af1aa7e01` |
 | Period `2026-08-21`, report date `2026-08-20` | `d876490c-6117-4e08-99d0-ef13c82a3fe5` | `6ee04cb8-4246-4af9-8764-43200334d8a4` | 105 | `0900d6b377e9aa4d42a3ec6cc117e549` |
@@ -109,9 +109,11 @@ The temporary restore container and volume were removed automatically.
 
 - Focused operations/alert suite: 52 passed.
 - Full suite: 275 passed, 21 environment-dependent skips.
+- Isolated PostgreSQL seeded suite: 8 passed.
 - Ruff: passed with zero errors.
 - MyPy: passed with zero errors.
 - Shell syntax and Compose expansion: passed.
+- Live `GET /health`: `status=ok`, application up, and database connectivity verified.
 - All ten systemd service/timer definitions: verified using temporary worktree-path copies
   while preserving assertions that installed units target `/stock_app`.
 - Whole-branch code review: approved after verified SMTP TLS and lock-safe manual execution
