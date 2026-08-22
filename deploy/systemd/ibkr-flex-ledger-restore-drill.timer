@@ -1,0 +1,11 @@
+[Unit]
+Description=Run an IBKR Flex Ledger restore drill weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=ibkr-flex-ledger-restore-drill.service
+
+[Install]
+WantedBy=timers.target

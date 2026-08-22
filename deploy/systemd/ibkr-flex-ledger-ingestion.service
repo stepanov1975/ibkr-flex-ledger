@@ -1,0 +1,10 @@
+[Unit]
+Description=IBKR Flex Ledger scheduled ingestion
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/stock_app
+ExecStart=/stock_app/scripts/run_scheduled_job.sh ingestion
+TimeoutStartSec=1h

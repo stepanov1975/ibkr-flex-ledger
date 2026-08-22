@@ -1,0 +1,11 @@
+[Unit]
+Description=Run IBKR Flex Ledger ingestion daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+Unit=ibkr-flex-ledger-ingestion.service
+
+[Install]
+WantedBy=timers.target

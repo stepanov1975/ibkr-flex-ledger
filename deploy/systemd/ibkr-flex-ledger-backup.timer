@@ -1,0 +1,11 @@
+[Unit]
+Description=Create an IBKR Flex Ledger verified backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+Unit=ibkr-flex-ledger-backup.service
+
+[Install]
+WantedBy=timers.target

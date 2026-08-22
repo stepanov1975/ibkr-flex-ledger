@@ -2,6 +2,21 @@
 
 The application exposes ingestion reliability measurements at `GET /operations/slo` and the browser dashboard at `/ui`. The API reports the frozen 30-day success-rate target, p95 duration target, breach thresholds, and consecutive-failure signal.
 
+## Scheduled operations
+
+The production Docker Compose host uses the checked-in systemd services and timers in
+`deploy/systemd/`. Install and enable all four timers by following
+`deploy/systemd/README.md`. The default UTC schedule is:
+
+- verified backup daily at 02:00;
+- 60-day diagnostics retention daily at 03:15;
+- restore drill every Sunday at 04:00; and
+- ingestion daily at 06:00.
+
+Timers are persistent and include a small randomized delay. Backup, retention, and restore
+drill jobs share a non-blocking maintenance lock; ingestion uses a separate lock. A skipped
+overlap is reported as a failed systemd service and must be investigated in the journal.
+
 ## Diagnostic retention
 
 Run daily:
