@@ -18,7 +18,7 @@ class AlertDeliveryStateRecord:
     updated_at_utc: datetime
 
 
-class OperationsAlertDeliveryStateRepositoryPort(Protocol):
+class AlertDeliveryStateRepositoryPort(Protocol):
     def db_alert_delivery_state_get(
         self,
         account_id: str,

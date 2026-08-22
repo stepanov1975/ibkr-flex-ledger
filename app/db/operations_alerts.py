@@ -7,10 +7,10 @@ from typing import Any
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from .operations_alert_interfaces import AlertDeliveryStateRecord, OperationsAlertDeliveryStateRepositoryPort
+from .operations_alert_interfaces import AlertDeliveryStateRecord, AlertDeliveryStateRepositoryPort
 
 
-class SQLAlchemyOperationsAlertService(OperationsAlertDeliveryStateRepositoryPort):
+class SQLAlchemyOperationsAlertService(AlertDeliveryStateRepositoryPort):
     """Database implementation for per-channel outbound alert state."""
 
     _SUPPORTED_CHANNELS = frozenset({"webhook", "email"})
@@ -42,8 +42,8 @@ class SQLAlchemyOperationsAlertService(OperationsAlertDeliveryStateRepositoryPor
                         "destination_fingerprint": destination_fingerprint,
                     },
                 ).mappings().one_or_none()
-        except SQLAlchemyError as error:
-            raise RuntimeError("alert delivery state get failed") from error
+        except SQLAlchemyError:
+            raise RuntimeError("alert delivery state get failed") from None
         return None if row is None else self._record(row)
 
     def db_alert_delivery_state_upsert(self, record: AlertDeliveryStateRecord) -> None:
@@ -72,8 +72,8 @@ class SQLAlchemyOperationsAlertService(OperationsAlertDeliveryStateRepositoryPor
                         "updated_at_utc": record.updated_at_utc,
                     },
                 )
-        except SQLAlchemyError as error:
-            raise RuntimeError("alert delivery state upsert failed") from error
+        except SQLAlchemyError:
+            raise RuntimeError("alert delivery state upsert failed") from None
 
     @classmethod
     def _validate_channel(cls, channel: str) -> None:

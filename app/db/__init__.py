@@ -7,7 +7,7 @@ from .raw_persistence import SQLAlchemyRawPersistenceService
 from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
 from .portfolio import SQLAlchemyPortfolioService
 from .operations_alerts import SQLAlchemyOperationsAlertService
-from .operations_alert_interfaces import AlertDeliveryStateRecord, OperationsAlertDeliveryStateRepositoryPort
+from .operations_alert_interfaces import AlertDeliveryStateRecord, AlertDeliveryStateRepositoryPort
 from .portfolio_interfaces import (
     CorporateActionManualCaseRecord,
     DiagnosticArchiveRecord,
@@ -100,7 +100,7 @@ __all__ = [
 	"SQLAlchemyPortfolioService",
 	"SQLAlchemyOperationsAlertService",
 	"AlertDeliveryStateRecord",
-	"OperationsAlertDeliveryStateRepositoryPort",
+	"AlertDeliveryStateRepositoryPort",
 	"CorporateActionManualCaseRecord",
 	"DiagnosticArchiveRecord",
 	"IngestionSloRecord",

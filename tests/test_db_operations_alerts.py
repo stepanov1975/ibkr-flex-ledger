@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.db import AlertDeliveryStateRepositoryPort
 from app.db.operations_alert_interfaces import AlertDeliveryStateRecord
 from app.db.operations_alerts import SQLAlchemyOperationsAlertService
 
@@ -78,6 +79,12 @@ def _record() -> AlertDeliveryStateRecord:
 
 def _service(connection: _ConnectionStub) -> SQLAlchemyOperationsAlertService:
     return SQLAlchemyOperationsAlertService(engine=cast(Engine, _EngineStub(connection)))
+
+
+def test_alert_delivery_state_protocol_is_exported_for_consumers() -> None:
+    """Expose the delivery-state protocol under the evaluator import contract."""
+
+    assert AlertDeliveryStateRepositoryPort in SQLAlchemyOperationsAlertService.__mro__
 
 
 def test_alert_state_get_uses_full_channel_identity() -> None:
@@ -164,3 +171,4 @@ def test_alert_state_database_failures_are_sanitized(operation: str) -> None:
     assert str(error.value) == f"alert delivery state {operation} failed"
     assert "U_TEST" not in str(error.value)
     assert "a" * 64 not in str(error.value)
+    assert error.value.__cause__ is None
