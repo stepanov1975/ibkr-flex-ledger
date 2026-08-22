@@ -1,6 +1,6 @@
 """Typed runtime settings with dotenv support and startup validation."""
 
-from pydantic import Field, ValidationError, ValidationInfo, field_validator
+from pydantic import Field, SecretStr, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,15 @@ class AppSettings(BaseSettings):
     api_default_limit: int = Field(default=50, ge=1)
     api_max_limit: int = Field(default=200, ge=1)
     diagnostics_archive_dir: str = Field(default="var/diagnostics-archive", min_length=1)
+    alert_webhook_url: SecretStr | None = Field(default=None, repr=False)
+    alert_delivery_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    alert_smtp_host: str | None = Field(default=None, repr=False)
+    alert_smtp_port: int = Field(default=587, ge=1, le=65535)
+    alert_smtp_starttls: bool = Field(default=True)
+    alert_smtp_username: str | None = Field(default=None, repr=False)
+    alert_smtp_password: SecretStr | None = Field(default=None, repr=False)
+    alert_email_from: str | None = Field(default=None, repr=False)
+    alert_email_to: str | None = Field(default=None, repr=False)
 
     @field_validator("account_id", "ibkr_flex_token", "ibkr_flex_query_id")
     @classmethod
@@ -63,6 +72,24 @@ class AppSettings(BaseSettings):
         if not stripped_value:
             raise ValueError("value must not be blank")
         return stripped_value
+
+    @field_validator(
+        "alert_webhook_url",
+        "alert_smtp_host",
+        "alert_smtp_username",
+        "alert_smtp_password",
+        "alert_email_from",
+        "alert_email_to",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_alert_string(cls, value: str | SecretStr | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        stripped_value = value.strip()
+        return stripped_value or None
 
     @field_validator("api_max_limit")
     @classmethod
@@ -89,6 +116,25 @@ class AppSettings(BaseSettings):
                 "ibkr_flex_jitter_max_multiplier must be greater than or equal to ibkr_flex_jitter_min_multiplier"
             )
         return value
+
+    @model_validator(mode="after")
+    def _validate_alert_delivery(self) -> "AppSettings":
+        email_values = (self.alert_smtp_host, self.alert_email_from, self.alert_email_to)
+        if any(email_values) and not all(email_values):
+            raise ValueError("SMTP host, email sender, and email recipients must be configured together")
+        if bool(self.alert_smtp_username) != bool(self.alert_smtp_password):
+            raise ValueError("SMTP username and password must be configured together")
+        webhook_url = None if self.alert_webhook_url is None else self.alert_webhook_url.get_secret_value()
+        if webhook_url is not None and not webhook_url.startswith(("http://", "https://")):
+            raise ValueError("alert webhook URL must use HTTP or HTTPS")
+        if self.alert_email_to and not self.alert_email_recipients():
+            raise ValueError("alert email recipients must include at least one address")
+        return self
+
+    def alert_email_recipients(self) -> tuple[str, ...]:
+        if self.alert_email_to is None:
+            return ()
+        return tuple(recipient.strip() for recipient in self.alert_email_to.split(",") if recipient.strip())
 
 
 class DatabaseUrlSettings(BaseSettings):
