@@ -169,6 +169,11 @@ def test_systemd_scheduler_units_verify(tmp_path: Path) -> None:
     alert_timer = (
         SYSTEMD_DIR / "ibkr-flex-ledger-alerts.timer"
     ).read_text(encoding="utf-8")
+    ingestion_timer = (
+        SYSTEMD_DIR / "ibkr-flex-ledger-ingestion.timer"
+    ).read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 09:00:00 UTC" in ingestion_timer
+    assert "RandomizedDelaySec=5m" in ingestion_timer
     assert "OnCalendar=*:0/15" in alert_timer
     assert "Persistent=true" in alert_timer
     assert "RandomizedDelaySec=1m" in alert_timer

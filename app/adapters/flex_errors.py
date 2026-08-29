@@ -8,11 +8,18 @@ class FlexAdapterError(Exception):
 
     Attributes:
         error_code: Optional upstream Flex error code.
+        stage_timeline: Adapter stage events captured before the failure.
     """
 
-    def __init__(self, message: str, error_code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        error_code: str | None = None,
+        stage_timeline: list[dict[str, object]] | None = None,
+    ):
         super().__init__(message)
         self.error_code = error_code
+        self.stage_timeline = list(stage_timeline or [])
 
 
 class FlexAdapterConnectionError(FlexAdapterError, ConnectionError):

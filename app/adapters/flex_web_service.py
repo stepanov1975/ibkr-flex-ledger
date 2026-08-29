@@ -117,9 +117,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         base_url: str = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService",
         api_version: str = "3",
         initial_wait_seconds: float = 5.0,
-        retry_attempts: int = 7,
+        retry_attempts: int = 10,
         retry_backoff_base_seconds: float = 10.0,
-        retry_max_backoff_seconds: float = 60.0,
+        retry_max_backoff_seconds: float = 45.0,
         jitter_min_multiplier: float = 0.5,
         jitter_max_multiplier: float = 1.5,
         random_unit_interval_provider: Callable[[], float] | None = None,
@@ -413,7 +413,10 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 error_code=error_code,
             )
 
-        raise FlexAdapterTimeoutError("Flex statement polling timed out after all retries")
+        raise FlexAdapterTimeoutError(
+            "Flex statement polling timed out after all retries",
+            stage_timeline=stage_timeline,
+        )
 
     def _adapter_http_get(self, url: str, query_parameters: dict[str, str]) -> bytes:
         """Execute one HTTP GET and return response payload bytes.

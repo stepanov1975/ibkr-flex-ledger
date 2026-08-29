@@ -11,7 +11,7 @@ The production Docker Compose host uses the checked-in systemd services and time
 - verified backup daily at 02:00;
 - 60-day diagnostics retention daily at 03:15;
 - restore drill every Sunday at 04:00; and
-- ingestion daily at 06:00; and
+- ingestion daily at 09:00; and
 - outbound SLO alert evaluation every 15 minutes.
 
 Timers are persistent and include a small randomized delay. Backup, retention, and restore

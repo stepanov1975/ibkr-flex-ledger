@@ -193,6 +193,107 @@ def test_adapters_flex_poll_retries_on_server_busy_error_code_1009(monkeypatch: 
     assert any(seconds >= 5 for seconds in sleep_calls)
 
 
+def test_adapters_flex_poll_timeout_retains_retry_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retain IBKR retry responses when report generation exhausts polling."""
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=0,
+        retry_attempts=2,
+        retry_backoff_base_seconds=0,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
+    )
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    in_progress_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1019</ErrorCode>"
+        b"<ErrorMessage>Statement generation in progress</ErrorMessage></FlexStatementResponse>"
+    )
+    payload_sequence = [request_success_payload, in_progress_payload, in_progress_payload]
+
+    monkeypatch.setattr(
+        adapter,
+        "_adapter_http_get",
+        lambda **_kwargs: payload_sequence.pop(0),
+    )
+    monkeypatch.setattr(flex_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FlexAdapterTimeoutError) as caught:
+        adapter.adapter_fetch_report(query_id="query-id")
+
+    retry_events = [
+        event
+        for event in getattr(caught.value, "stage_timeline", [])
+        if event.get("stage") == "download" and event.get("status") == "retrying"
+    ]
+    assert [event["details"]["poll_attempt"] for event in retry_events] == [1, 2]
+    assert [event["details"]["error_code"] for event in retry_events] == ["1019", "1019"]
+    assert [event["details"]["error_message"] for event in retry_events] == [
+        "Statement generation in progress",
+        "Statement generation in progress",
+    ]
+
+
+def test_adapters_flex_default_poll_budget_attempts_ten_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give a persistently generating statement ten download opportunities by default."""
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        initial_wait_seconds=0,
+        retry_backoff_base_seconds=0,
+        retry_max_backoff_seconds=10,
+        jitter_min_multiplier=1.0,
+        jitter_max_multiplier=1.0,
+    )
+    request_success_payload = (
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF123</ReferenceCode>"
+        b"<Url>https://example.test/GetStatement</Url></FlexStatementResponse>"
+    )
+    in_progress_payload = (
+        b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1019</ErrorCode>"
+        b"<ErrorMessage>Statement generation in progress</ErrorMessage></FlexStatementResponse>"
+    )
+    payload_sequence = [request_success_payload, *([in_progress_payload] * 10)]
+
+    monkeypatch.setattr(
+        adapter,
+        "_adapter_http_get",
+        lambda **_kwargs: payload_sequence.pop(0),
+    )
+    monkeypatch.setattr(flex_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FlexAdapterTimeoutError) as caught:
+        adapter.adapter_fetch_report(query_id="query-id")
+
+    retry_events = [
+        event
+        for event in caught.value.stage_timeline
+        if event.get("stage") == "download" and event.get("status") == "retrying"
+    ]
+    assert len(retry_events) == 10
+
+
+def test_adapters_flex_default_worst_case_poll_envelope_stays_below_slo() -> None:
+    """Keep ten slow poll responses inside the fifteen-minute ingestion target."""
+
+    adapter = FlexWebServiceAdapter(
+        token="token",
+        random_unit_interval_provider=lambda: 1.0,
+    )
+
+    waits = [adapter.adapter_calculate_retry_wait_seconds(index) for index in range(10)]
+
+    assert waits == [5.0, 15.0, 30.0, 60.0, 67.5, 67.5, 67.5, 67.5, 67.5, 67.5]
+    assert sum(waits) + (11 * 30.0) == 845.0
+    assert sum(waits) + (11 * 30.0) < 900.0
+
+
 def test_adapters_flex_request_known_error_code_uses_fallback_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """Use deterministic fallback message for known code when upstream message is blank.
 

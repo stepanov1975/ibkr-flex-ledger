@@ -8,7 +8,7 @@ at `/stock_app`. All calendar times are UTC.
 | Verified PostgreSQL backup | Daily at 02:00 | Maintenance |
 | Diagnostics retention | Daily at 03:15 | Maintenance |
 | Restore drill | Sunday at 04:00 | Maintenance |
-| Flex ingestion | Daily at 06:00 | Ingestion |
+| Flex ingestion | Daily at 09:00 | Ingestion |
 | Outbound SLO alert evaluation | Every 15 minutes | Alerts |
 
 The randomized delays in the timer files spread host load after startup. Persistent

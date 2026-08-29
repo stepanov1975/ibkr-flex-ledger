@@ -381,6 +381,9 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             return JobExecutionResult(job_name=normalized_job_name, status="success")
         except Exception as error:
             error_code = self._job_error_code_for_exception(error)
+            error_stage_timeline = getattr(error, "stage_timeline", [])
+            if isinstance(error_stage_timeline, list):
+                timeline.extend(error_stage_timeline)
 
             timeline.append(
                 domain_build_stage_event(

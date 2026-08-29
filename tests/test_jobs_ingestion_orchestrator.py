@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app import bootstrap as bootstrap_module
-from app.adapters import AdapterFetchResult, FlexTokenInvalidError
+from app.adapters import AdapterFetchResult, FlexAdapterTimeoutError, FlexTokenInvalidError
 from app.config import AppSettings
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -39,8 +39,8 @@ _ARTIFACT_OWNER_RUN_ID = UUID("00000000-0000-0000-0000-000000000001")
 _FAILED_COMPLETION_RUN_ID = UUID("00000000-0000-0000-0000-000000000002")
 
 
-def test_cli_bootstrap_marks_ingestion_as_scheduled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Classify non-HTTP ingestion as scheduled for SLO reporting."""
+def test_cli_bootstrap_uses_scheduled_ingestion_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the scheduled run type and bounded default Flex poll budget."""
 
     settings = AppSettings(
         environment_name="test-cli-ingestion",
@@ -55,6 +55,7 @@ def test_cli_bootstrap_marks_ingestion_as_scheduled(monkeypatch: pytest.MonkeyPa
     snapshot_service = object()
     adapter = object()
     orchestrator = object()
+    captured_adapter_kwargs: list[dict[str, object]] = []
     captured_configs: list[IngestionOrchestratorConfig] = []
 
     monkeypatch.setattr(bootstrap_module, "config_load_settings", lambda: settings)
@@ -64,7 +65,11 @@ def test_cli_bootstrap_marks_ingestion_as_scheduled(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(bootstrap_module, "SQLAlchemyCanonicalPersistenceService", lambda *, engine: repository)
     monkeypatch.setattr(bootstrap_module, "SQLAlchemyLedgerSnapshotService", lambda *, engine: snapshot_repository)
     monkeypatch.setattr(bootstrap_module, "StockLedgerSnapshotService", lambda *, repository: snapshot_service)
-    monkeypatch.setattr(bootstrap_module, "FlexWebServiceAdapter", lambda **kwargs: adapter)
+    def build_adapter(**kwargs: object) -> object:
+        captured_adapter_kwargs.append(kwargs)
+        return adapter
+
+    monkeypatch.setattr(bootstrap_module, "FlexWebServiceAdapter", build_adapter)
 
     def build_orchestrator(**kwargs: Any) -> object:
         captured_configs.append(kwargs["config"])
@@ -76,6 +81,8 @@ def test_cli_bootstrap_marks_ingestion_as_scheduled(monkeypatch: pytest.MonkeyPa
 
     assert result is orchestrator
     assert captured_configs[0].run_type == "scheduled"
+    assert captured_adapter_kwargs[0]["retry_attempts"] == 10
+    assert captured_adapter_kwargs[0]["retry_max_backoff_seconds"] == 45.0
 
 
 class _RepositoryStub:
@@ -628,6 +635,45 @@ def test_jobs_ingestion_orchestrator_returns_failed_result_on_adapter_timeout() 
     assert isinstance(diagnostics, list)
     failed_run_events = [event for event in diagnostics if event.get("stage") == "run" and event.get("status") == "failed"]
     assert len(failed_run_events) == 1
+
+
+def test_jobs_ingestion_orchestrator_persists_adapter_timeline_on_timeout() -> None:
+    """Persist the exact upstream retry response before the terminal failure event."""
+
+    retry_event = {
+        "stage": "download",
+        "status": "retrying",
+        "details": {
+            "poll_attempt": 10,
+            "error_code": "1019",
+            "error_message": "Statement generation in progress",
+        },
+    }
+
+    class _TimeoutAdapterStub:
+        def adapter_fetch_report(self, query_id: str) -> AdapterFetchResult:
+            _ = query_id
+            raise FlexAdapterTimeoutError(
+                "Flex statement polling timed out after all retries",
+                stage_timeline=[retry_event],
+            )
+
+    repository_stub = _RepositoryStub()
+    orchestrator = IngestionJobOrchestrator(
+        ingestion_repository=repository_stub,
+        raw_persistence_repository=_RawPersistenceStub(),
+        flex_adapter=_TimeoutAdapterStub(),
+        config=IngestionOrchestratorConfig(account_id="U_TEST", flex_query_id="query"),
+    )
+
+    result = orchestrator.job_execute(job_name="ingestion_run")
+
+    diagnostics = repository_stub.finalize_calls[0]["diagnostics"]
+    assert result.status == "failed"
+    assert repository_stub.finalize_calls[0]["error_code"] == "INGESTION_TIMEOUT_ERROR"
+    assert diagnostics[-2] == retry_event
+    assert diagnostics[-1]["stage"] == "run"
+    assert diagnostics[-1]["status"] == "failed"
 
 
 def test_jobs_ingestion_orchestrator_maps_typed_token_error_to_deterministic_code() -> None:
