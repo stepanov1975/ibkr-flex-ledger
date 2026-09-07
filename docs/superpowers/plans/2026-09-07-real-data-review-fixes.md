@@ -23,9 +23,9 @@ Approved scope: user requested fixes to the reassessed review report. Retain the
 ## Progress
 
 - Initial baseline: prior suite 364 passed; full working-tree baseline preserved.
-- User choice: alerts remain dashboard-only; remote access clarification pending.
+- User choice: alerts remain dashboard-only; direct LAN access confirmed and preserved.
 
 - Tasks1–3 complete: reporting/security/operational code changes implemented;388tests passed; Ruff/MyPy passed; independent review approved; final image built and source hashes verified.
 - Operations complete: fresh verified backup, isolated6secondrestore drill, maintenance timers installed; alert timer disabled.
-- Ruling: replace full historical replay with expense-only snapshot repair. Existing stored non-expense values differ from pre-existing workspace calculations; replay would apply unrelated earlier fixes. Prepared guarded repair preview 360 rows; disposable-database apply/idempotence/stale-baseline checks passed; no production snapshot writes yet.
-- Pending: user remoteaccess clarification before replacing running app with loopback port; apply prepared expense-only repair after deployment and verify storage/API.
+- Ruling: replace full historical replay with expense-only snapshot repair. Existing stored non-expense values differ from pre-existing workspace calculations; replay would apply unrelated earlier fixes. Prepared guarded repair preview 360 rows; disposable-database apply/idempotence/stale-baseline checks passed; the guarded live repair subsequently updated those 360 rows.
+- Complete: restored original LAN-compatible port publication, deployed the reviewed image, applied the guarded expense-only repair, and verified live LAN APIs and all 2,109 snapshots. Non-expense values and raw/canonical row counts remain unchanged.

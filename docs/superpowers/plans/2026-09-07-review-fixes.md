@@ -33,7 +33,7 @@
 
 ## Task 4: Operations and deployment
 
-- [x] Bind the application port to loopback and document proxy access.
+- [x] Initial loopback restriction superseded: preserve direct LAN access confirmed by the user; deployment and LAN API checks passed.
 - [x] Treat partial SMTP refusal as delivery failure, preserving retry eligibility.
 - [x] Escape database URL percent characters at Alembic configuration boundary.
 - [x] Prune archived WAL using a verified retained recovery baseline, with fail-closed handling and tests against disposable directories.

@@ -2,7 +2,7 @@
 
 Reassessment date: September 7, 2026. This report supersedes the original ten-item priority list.
 
-Implementation update: the retained code issues have been fixed and validated with 388 passing tests. Maintenance timers, a fresh backup, and an isolated restore drill are complete. Application deployment and the stored expense repair await the remote-access clarification. See [fix status and validation](/stock_app/docs/reviews/2026-09-07-real-data-fixes.md). The evidence below records the pre-fix assessment.
+Implementation update: the retained code issues have been fixed and validated with 388 passing tests. Maintenance timers, a fresh backup, and an isolated restore drill are complete. Application deployment and the stored expense repair are complete; direct LAN access is preserved. See [fix status and validation](/stock_app/docs/reviews/2026-09-07-real-data-fixes.md). The evidence below records the pre-fix assessment.
 
 **Three P2 defects are confirmed using existing data and current application code.** Four other findings describe reproducible security/operational risks whose triggering conditions were not observed. Three input-dependent findings are excluded from the active list because their assumptions do not match the stored reports.
 
