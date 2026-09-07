@@ -170,6 +170,8 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
                         "section_name": row.section_name,
                         "source_row_ref": row.source_row_ref,
                         "source_payload": row.source_payload,
+                        "raw_artifact_id": None if row.raw_artifact_id is None else str(row.raw_artifact_id),
+                        "ingestion_run_id": None if row.ingestion_run_id is None else str(row.ingestion_run_id),
                     }
                     for row in rows
                 ],

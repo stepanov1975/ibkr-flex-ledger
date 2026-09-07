@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /service
 
 COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip==26.2 && pip install --no-cache-dir -r requirements.txt
 
 COPY app app
 COPY alembic alembic

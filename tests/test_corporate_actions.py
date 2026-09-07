@@ -27,11 +27,11 @@ def test_split_is_automatic_only_with_deterministic_factor() -> None:
     assert ambiguous.requires_manual is True
 
 
-def test_cash_dividend_requires_explicit_amount_and_withholding_field() -> None:
-    """Prevent incomplete cash-dividend rows from bypassing review."""
+def test_cash_dividend_requires_review_until_cashflows_can_be_matched() -> None:
+    """Require review even with amount and withholding until cashflow identity is known."""
 
     complete = domain_classify_corporate_action("CD", {"amount": "12.50", "withholdingTax": "0"})
     incomplete = domain_classify_corporate_action("CD", {"amount": "12.50"})
 
-    assert complete.requires_manual is False
+    assert complete.requires_manual is True
     assert incomplete.requires_manual is True

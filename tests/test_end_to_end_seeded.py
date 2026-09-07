@@ -421,8 +421,9 @@ def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_increm
             )
             assert provenance_response.status_code == 200
             provenance_items = provenance_response.json()["items"]
-            assert {item["event_type"] for item in provenance_items} == {"cashflow", "trade_fill"}
+            assert {item["event_type"] for item in provenance_items} == {"cashflow", "trade_fill", "open_position"}
             assert all(item["source_raw_record_id"] for item in provenance_items)
+            assert all(item["raw_artifact_id"] and item["ingestion_run_id"] for item in provenance_items)
 
         with engine.connect() as connection:
             runs = connection.execute(
@@ -737,7 +738,7 @@ def test_postgresql_completed_artifact_preserves_cash_event_snapshot_but_omits_i
             ).mappings().one()
             assert dict(snapshot) == {
                 "position_qty": Decimal("2"),
-                "provisional": False,
+                "provisional": True,  # The last execution price is a provisional valuation.
             }
             assert connection.execute(
                 text(

@@ -230,9 +230,13 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
             artifact_persistence_duration_ms = _duration_ms(artifact_persistence_started_ns)
 
+            skip_is_safe = (
+                self._canonical_repository is None
+                or self._canonical_repository.db_canonical_skip_is_safe(self._config.account_id)
+            )
             completed_duplicate = False
             completed_ingestion_run_id = artifact_result.artifact.completed_ingestion_run_id
-            if artifact_result.deduplicated and completed_ingestion_run_id is not None:
+            if skip_is_safe and artifact_result.deduplicated and completed_ingestion_run_id is not None:
                 completed_ingestion_run = self._ingestion_repository.db_ingestion_run_get_by_id(
                     completed_ingestion_run_id
                 )
@@ -301,7 +305,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     canonical_skip_reason = duplicate_skip_reason
                 else:
                     canonical_raw_read_started_ns = perf_counter_ns()
-                    if recover_artifact_rows:
+                    if recover_artifact_rows or not skip_is_safe:
                         canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_artifact(
                             raw_artifact_id=artifact_result.artifact.raw_artifact_id,
                         )
@@ -358,6 +362,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 canonical_raw_rows=canonical_raw_rows,
                 duplicate_skip_reason=duplicate_skip_reason,
                 timeline=timeline,
+                force_full_rebuild=not skip_is_safe,
             )
 
             if (
@@ -493,6 +498,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         canonical_raw_rows: list[RawRecordForCanonicalMapping] | None,
         duplicate_skip_reason: str | None,
         timeline: list[dict[str, object]],
+        force_full_rebuild: bool = False,
     ) -> None:
         """Append snapshot stage timeline events for automatic Task 7 execution.
 
@@ -541,7 +547,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             snapshot_scope_mode = "skipped"
             snapshot_duration_ms = 0
             snapshot_skip_reason = duplicate_skip_reason
-        elif canonical_raw_rows is None:
+        elif canonical_raw_rows is None or force_full_rebuild:
             snapshot_started_ns = perf_counter_ns()
             snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                 account_id=self._config.account_id,
@@ -551,7 +557,9 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             )
             snapshot_duration_ms = _duration_ms(snapshot_started_ns)
             snapshot_scope_mode = "full_fallback"
-            snapshot_full_rebuild_reason = "canonical_repository_not_configured"
+            snapshot_full_rebuild_reason = (
+                "prior_failed_run" if force_full_rebuild else "canonical_repository_not_configured"
+            )
         else:
             scope = job_build_incremental_snapshot_scope(canonical_raw_rows)
             if scope.full_rebuild_reason is not None:

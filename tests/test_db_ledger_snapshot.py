@@ -266,6 +266,7 @@ def test_trade_read_includes_asset_category_and_raw_multiplier() -> None:
         "price": Decimal("0.60"),
         "fees": None,
         "commission": None,
+        "commission_currency": None,
         "functional_currency": "USD",
         "currency": "USD",
         "transaction_id": "1",

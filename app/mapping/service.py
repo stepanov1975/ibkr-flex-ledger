@@ -506,7 +506,10 @@ class CanonicalMappingService:
         payload = raw_record.source_payload
         currency = self._mapping_required_value(payload, "fromCurrency", raw_record)
         report_date_local = self._mapping_resolve_report_date(raw_record, payload)
-        transaction_id = self._mapping_optional_value(payload, "transactionID") or raw_record.source_row_ref
+        target_currency = self._mapping_optional_value(payload, "toCurrency") or functional_currency
+        transaction_id = self._mapping_optional_value(payload, "transactionID") or (
+            f"conversion-rate:{report_date_local}:{currency}:{target_currency}"
+        )
         fx_rate = self._mapping_optional_decimal_value(payload, "rate", raw_record)
 
         return CanonicalFxUpsertRequest(
@@ -516,7 +519,7 @@ class CanonicalMappingService:
             transaction_id=transaction_id,
             report_date_local=report_date_local,
             currency=currency,
-            functional_currency=self._mapping_optional_value(payload, "toCurrency") or functional_currency,
+            functional_currency=target_currency,
             fx_rate=fx_rate,
             fx_source="conversion_rates",
             provisional=fx_rate is None,

@@ -33,6 +33,11 @@ healthy and alerting. The first healthy evaluation establishes a baseline withou
 message. Failed channels retry the same transition on the next evaluation independently, while
 channels that already delivered it remain deduplicated.
 
+If SMTP accepts only some recipients, delivery remains failed and the transition is retried
+on the next evaluation. Already-accepting recipients may receive a duplicate; the shared
+event ID identifies the same transition. This avoids permanently dropping the alert for a
+temporarily refused recipient.
+
 Run an evaluation manually with:
 
 ```bash
@@ -73,6 +78,20 @@ PostgreSQL is configured with WAL archiving and a five-minute archive timeout. S
 ```
 
 The backup command runs `pg_basebackup`, verifies its manifest with `pg_verifybackup`, records a SHA-256 checksum and catalog entry, and retains 14 daily archives. Sunday backups are also retained for 8 weeks and first-of-month backups for 12 months. Copy the `postgres_backups` and `postgres_wal_archive` volumes to separate durable storage; retaining them only on the application host does not protect against host loss.
+
+New backup checksum files name the archive by basename, so each weekly/monthly
+copy can be verified independently after the daily copy expires. Run
+`sha256sum -c <archive-name>.sha256` from the directory containing that archive.
+WAL cleanup also accepts existing checksum files containing absolute daily paths.
+
+After successful backup verification and daily archive retention, WAL cleanup verifies the
+oldest retained daily backup's checksum and reads its starting WAL segment from
+`backup_label`. `pg_archivecleanup` removes only segments preceding that boundary. Missing
+or corrupt backup metadata stops cleanup and keeps WAL. The retained daily baseline
+supports the 14-day PITR window; older weekly/monthly backups include their own consistency
+WAL (`--wal-method=stream`) and remain restorable to backup completion, but do not promise
+continuous PITR from those older dates. Run backup and cleanup through the existing
+maintenance lock; do not invoke cleanup concurrently with backup retention or restore.
 
 ## Broker position repair by immutable replay
 

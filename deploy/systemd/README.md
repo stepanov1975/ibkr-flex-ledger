@@ -23,11 +23,18 @@ sudo install -m 0644 deploy/systemd/ibkr-flex-ledger-*.* /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now \
   ibkr-flex-ledger-ingestion.timer \
-  ibkr-flex-ledger-alerts.timer \
   ibkr-flex-ledger-retention.timer \
   ibkr-flex-ledger-backup.timer \
   ibkr-flex-ledger-restore-drill.timer
 systemctl list-timers 'ibkr-flex-ledger-*'
+```
+
+The dashboard shows SLO warnings without an outbound destination. Keep the alerts
+timer disabled for dashboard-only monitoring. After configuring a webhook or SMTP
+destination, enable outbound evaluation separately:
+
+```bash
+sudo systemctl enable --now ibkr-flex-ledger-alerts.timer
 ```
 
 Run and inspect one job before relying on its timer:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.config import AppSettings
 from app.db import IngestionRunAlreadyActiveError, IngestionRunRecord, IngestionRunRepositoryPort
 from app.jobs import JobOrchestratorPort, job_extract_missing_sections_from_diagnostics
+from app.ledger import snapshot_resolve_report_date_local
 
 
 def api_create_ingestion_router(
@@ -112,7 +113,14 @@ def api_create_ingestion_router(
                     flex_query_id=normalized_flex_query_id,
                 )
             else:
-                execution_result = target_orchestrator.job_execute(job_name="reprocess_run")
+                scoped_execute = getattr(target_orchestrator, "job_execute_reprocess_target", None)
+                if scoped_execute is not None:
+                    execution_result = scoped_execute(
+                        period_key=snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat()),
+                        flex_query_id=settings.ibkr_flex_query_id,
+                    )
+                else:
+                    execution_result = target_orchestrator.job_execute(job_name="reprocess_run")
             payload = {
                 "job_name": execution_result.job_name,
                 "status": execution_result.status,

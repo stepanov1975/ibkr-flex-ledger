@@ -13,7 +13,7 @@ mkdir -p "$stage" /backups/base /backups/weekly /backups/monthly /backups/catalo
 pg_basebackup -h /var/run/postgresql -U "$POSTGRES_USER" -D "$stage" --format=plain --checkpoint=fast --wal-method=stream --manifest-checksums=SHA256
 pg_verifybackup "$stage"
 tar -C "$stage" -czf "$archive" .
-sha256sum "$archive" > "$archive.sha256"
+(cd /backups/base && sha256sum "$BACKUP_STAMP.tar.gz") > "$archive.sha256"
 printf "%s\t%s\t%s\n" "$BACKUP_STAMP" "$archive" "verified" >> /backups/catalog/base-backups.tsv
 if [ "$(date -u +%u)" = "7" ]; then
     cp "$archive" "$archive.sha256" /backups/weekly/
@@ -30,3 +30,4 @@ find /backups/monthly -type f -name "*.tar.gz" -mtime +366 -delete
 find /backups/monthly -type f -name "*.tar.gz.sha256" -mtime +366 -delete
 printf "%s\n" "$archive"
 '
+docker compose exec -T postgres sh -s -- /backups/base /var/lib/postgresql/wal_archive < scripts/prune_wal_archive.sh

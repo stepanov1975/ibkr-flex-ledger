@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from math import ceil
 
 from app.db import IngestionSloRecord
@@ -23,7 +24,9 @@ class IngestionSloSummary:
     consecutive_failure_alert: bool
 
 
-def analytics_ingestion_slo_summary(rows: list[IngestionSloRecord]) -> IngestionSloSummary:
+def analytics_ingestion_slo_summary(
+    rows: list[IngestionSloRecord], measured_at_utc: datetime | None = None,
+) -> IngestionSloSummary:
     """Calculate the frozen success-rate and duration SLO signals."""
 
     completed = [row for row in rows if row.status in {"success", "failed"}]
@@ -34,6 +37,11 @@ def analytics_ingestion_slo_summary(rows: list[IngestionSloRecord]) -> Ingestion
     if durations:
         p95_duration_ms = durations[max(0, ceil(len(durations) * 0.95) - 1)]
     last_two = completed[-2:]
+    active_duration_breached = measured_at_utc is not None and any(
+        row.status == "started"
+        and (measured_at_utc - row.started_at_utc).total_seconds() > 30 * 60
+        for row in rows
+    )
     return IngestionSloSummary(
         run_count=len(completed),
         success_count=success_count,
@@ -44,6 +52,6 @@ def analytics_ingestion_slo_summary(rows: list[IngestionSloRecord]) -> Ingestion
         p95_duration_ms=p95_duration_ms,
         p95_target_ms=15 * 60 * 1000,
         duration_alert_threshold_ms=30 * 60 * 1000,
-        duration_breached=any(duration > 30 * 60 * 1000 for duration in durations),
+        duration_breached=active_duration_breached or any(duration > 30 * 60 * 1000 for duration in durations),
         consecutive_failure_alert=len(last_two) == 2 and all(row.status == "failed" for row in last_two),
     )

@@ -97,11 +97,13 @@ class SmtpAlertSender:
 					smtp.starttls(context=ssl.create_default_context())
 				if self._username is not None and self._password is not None:
 					smtp.login(self._username, self._password)
-				smtp.send_message(
+				refused = smtp.send_message(
 					message,
 					from_addr=self._sender,
 					to_addrs=self._recipients,
 				)
+				if refused:
+					raise AlertDeliveryError("email delivery failed")
 		except Exception:
 			raise AlertDeliveryError("email delivery failed") from None
 

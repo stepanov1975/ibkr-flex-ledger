@@ -438,18 +438,19 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 response = self._http_client.get(url, params=query_parameters)
                 response.raise_for_status()
                 return bytes(response.content)
-            except httpx.TimeoutException as error:
+            except httpx.TimeoutException:
                 if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
                     continue
-                raise FlexAdapterTimeoutError("Flex transport request timed out") from error
+                raise FlexAdapterTimeoutError("Flex transport request timed out") from None
             except httpx.HTTPStatusError as error:
-                raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from error
+                # HTTPX exception text includes the request URL and its Flex token.
+                raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from None
             except httpx.RequestError as error:
                 if isinstance(error.__cause__, (TimeoutError, socket.timeout)):
                     if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
                         continue
-                    raise FlexAdapterTimeoutError("Flex transport request timed out") from error
-                raise FlexAdapterConnectionError("Flex transport request failed") from error
+                    raise FlexAdapterTimeoutError("Flex transport request timed out") from None
+                raise FlexAdapterConnectionError("Flex transport request failed") from None
 
         raise FlexAdapterTimeoutError("Flex transport request timed out")
 

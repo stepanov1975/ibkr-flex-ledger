@@ -95,7 +95,7 @@ Goal: explicitly list which action types are auto-resolved vs mandatory manual.
 | `FORWARDSPLIT (FS)` | Auto | One-to-one deterministic split ratio present | N/A | Deterministic quantity/cost basis transform |
 | `REVERSESPLIT (RS)` | Auto | One-to-one deterministic reverse-split ratio present | N/A | Deterministic inverse quantity/cost basis transform |
 | `STOCKDIV (SD)` | Auto | Deterministic stock dividend factor available | N/A | Deterministic lot adjustment |
-| `CASHDIV (CD)` | Auto | Cash amount and withholding are explicit in source rows | N/A | Treated as cashflow with clear amount |
+| `CASHDIV (CD)` | Manual | N/A | Affected instrument remains provisional until payment and withholding are verified | CashTransactions is the cash accounting source; a CorporateActions row alone cannot establish whether the payment is already represented there |
 | `SPINOFF (SO)` | Manual | N/A | Block affected instrument recompute outputs | Requires discretionary cost-basis allocation |
 | `MERGER (TC)` | Manual | N/A | Block affected instrument recompute outputs | Consideration mix and ratio ambiguity |
 | `RIGHTSISSUE (RI/SR)` | Manual | N/A | Block affected instrument recompute outputs | Election/valuation ambiguity |

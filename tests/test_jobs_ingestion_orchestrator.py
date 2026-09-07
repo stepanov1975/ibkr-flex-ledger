@@ -895,6 +895,9 @@ class _CanonicalRepositoryStub:
         self.artifact_read_ids: list[UUID] = []
         self.bulk_upsert_calls = 0
 
+    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
+        return True
+
     def db_raw_record_list_changed_for_run(
         self,
         ingestion_run_id: UUID,

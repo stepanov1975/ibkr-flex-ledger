@@ -44,7 +44,7 @@ def operations_build_slo_status(
     rows: list[IngestionSloRecord],
     measured_at_utc: datetime,
 ) -> OperationsSloStatus:
-    summary = analytics_ingestion_slo_summary(rows)
+    summary = analytics_ingestion_slo_summary(rows, measured_at_utc=measured_at_utc)
     reasons = []
     if summary.success_breached:
         reasons.append("success_rate_below_threshold")

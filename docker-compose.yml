@@ -64,7 +64,7 @@ services:
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
     ports:
-      - "${APPLICATION_PORT}:8000"
+      - "127.0.0.1:${APPLICATION_PORT}:8000"
     volumes:
       - diagnostics_archive:/service/var/diagnostics-archive
     healthcheck:

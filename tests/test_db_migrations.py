@@ -15,6 +15,8 @@ from alembic import command
 from alembic.config import Config
 
 from app.db.portfolio import SQLAlchemyPortfolioService
+from app.db.canonical_persistence import SQLAlchemyCanonicalPersistenceService
+from app.jobs.canonical_pipeline import job_canonical_map_and_persist
 
 
 def _migration_build_database_url(base_url: str, database_name: str) -> str:
@@ -480,26 +482,31 @@ def test_reconciliation_normalizes_raw_values_and_commission_currency() -> None:
                         "OpenPositions",
                         "open",
                         {"conid": "123", "currency": "EUR", "position": " 1,234.50 ",
-                         "fifoPnlUnrealized": " -- ", "fxRateToBase": " 1.20 "},
+                         "fifoPnlUnrealized": " -- ", "fxRateToBase": " 1.20 ",
+                         "assetCategory": "STK", "symbol": "TEST"},
                     ),
                     (
                         "Trades",
                         "trade",
                         {"conid": "123", "currency": "EUR", "fifoPnlRealized": " 1,000.25 ",
                          "fxRateToBase": " 1.20 ", "ibCommission": " -2.50 ",
-                         "ibCommissionCurrency": "GBP", "fees": " -1.00 "},
+                         "ibCommissionCurrency": "GBP", "fees": " -1.00 ", "symbol": "TEST",
+                         "ibExecID": "exec", "transactionID": "trade", "buySell": "SELL", "quantity": "1",
+                         "tradePrice": "100", "dateTime": "20260821;120000"},
                     ),
                     (
                         "CashTransactions",
                         "cash-eur",
                         {"conid": "123", "currency": "EUR", "withholdingTax": " 10.00 ",
-                         "fxRateToBase": " 1.20 "},
+                         "fxRateToBase": " 1.20 ", "symbol": "TEST", "transactionID": "cash-eur",
+                         "type": "DIV", "amount": "0"},
                     ),
                     (
                         "CashTransactions",
                         "cash-jpy",
                         {"conid": "123", "currency": "JPY", "withholdingTax": " 5.00 ",
-                         "fxRateToBase": " N/A "},
+                         "fxRateToBase": " N/A ", "symbol": "TEST", "transactionID": "cash-jpy",
+                         "type": "DIV", "amount": "0"},
                     ),
                     (
                         "ConversionRates",
@@ -507,8 +514,15 @@ def test_reconciliation_normalizes_raw_values_and_commission_currency() -> None:
                         {"fromCurrency": "GBP", "toCurrency": "USD", "rate": " 1.30 ",
                          "reportDate": "2026-08-21"},
                     ),
+                    (
+                        "ConversionRates", "eur-usd",
+                        {"fromCurrency": "EUR", "toCurrency": "USD", "rate": "1.20", "reportDate": "2026-08-21"},
+                    ),
                 )
                 for section_name, source_row_ref, payload in raw_rows:
+                    row_tag = {"OpenPositions": "OpenPosition", "Trades": "Trade",
+                               "CashTransactions": "CashTransaction", "ConversionRates": "ConversionRate"}[section_name]
+                    source_row_ref = f"{section_name}:{row_tag}:{source_row_ref}"
                     connection.execute(
                         text(
                             "INSERT INTO raw_record (ingestion_run_id, account_id, period_key, flex_query_id, "
@@ -520,6 +534,11 @@ def test_reconciliation_normalizes_raw_values_and_commission_currency() -> None:
                          "source_row_ref": source_row_ref, "payload": json.dumps(payload)},
                     )
 
+            canonical = SQLAlchemyCanonicalPersistenceService(engine)
+            job_canonical_map_and_persist(
+                account_id="U_RECON", functional_currency="USD",
+                raw_records=canonical.db_raw_record_list_for_run(run_id), canonical_persistence_repository=canonical,
+            )
             rows = SQLAlchemyPortfolioService(engine=engine).db_reconciliation_sources(
                 account_id="U_RECON",
                 report_date_from=None,
@@ -528,10 +547,15 @@ def test_reconciliation_normalizes_raw_values_and_commission_currency() -> None:
             )
             assert len(rows) == 1
             assert Decimal(rows[0].broker_position_qty or "") == Decimal("1234.50")
-            assert Decimal(rows[0].broker_realized_pnl or "") == Decimal("1200.300")
+            assert rows[0].broker_realized_pnl is None  # Missing JPY withholding FX makes the complete total unknown.
             assert rows[0].broker_unrealized_pnl is None
-            assert Decimal(rows[0].broker_fees or "") == Decimal("-4.45")
+            assert Decimal(rows[0].broker_fees or "") == Decimal("4.45")
             assert rows[0].broker_withholding_tax is None
+            with engine.begin() as connection:
+                connection.execute(text("DELETE FROM event_cashflow WHERE currency='JPY'"))
+            complete = SQLAlchemyPortfolioService(engine).db_reconciliation_sources("U_RECON", None, None, None)[0]
+            assert Decimal(complete.broker_realized_pnl or "") == Decimal("1188.300")
+            assert Decimal(complete.broker_withholding_tax or "") == Decimal("12")
         finally:
             engine.dispose()
     finally:

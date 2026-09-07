@@ -356,3 +356,33 @@ def test_operations_page_preserves_existing_dashboard_and_links_to_portfolio() -
     assert "Corporate-action review queue" in response.text
     assert "Recent ingestion runs" in response.text
     assert 'href="/ui"' in response.text
+
+
+def test_portfolio_shows_provisional_rows_and_totals() -> None:
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+    script = TestClient(application).get("/ui").text.split("<script>", 1)[1].split("</script>", 1)[0]
+    script = script.rsplit("loadAll();", 1)[0]
+    context = quickjs.Context()
+    context.eval("""
+        function node(){return {children:[],textContent:'',className:'',checked:true,
+          append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
+        const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
+        const Intl={NumberFormat:function(){return {format:value=>String(value)}}};
+    """)
+    context.eval(script)
+    context.eval("""
+        let row={symbol:'TEST',position_qty:'1',currency:'USD',report_date_local:'2026-08-21',
+          realized_pnl:'10',unrealized_pnl:'5',total_pnl:'15',provisional:true,unresolved_case_count:1};
+        json=async()=>({items:[row]});loadPnl();
+    """)
+    while context.execute_pending_job():
+        pass
+    assert "Provisional" in context.eval("nodes.pnl.children[0].children[0].textContent")
+    assert "Provisional" in context.eval("nodes['pnl-state'].textContent")
+    assert context.eval("nodes['total-pnl'].className") == "metric bad"
+    context.eval("row.provisional=false;row.unresolved_case_count=0;loadPnl()")
+    while context.execute_pending_job():
+        pass
+    assert context.eval("nodes['pnl-state'].textContent") == ""
+    assert context.eval("nodes['total-pnl'].className") == "metric"

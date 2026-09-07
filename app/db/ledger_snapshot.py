@@ -135,7 +135,13 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     text(
                         "SELECT instrument_id FROM instrument "
                         "WHERE account_id = :account_id "
-                        "AND (conid = ANY(:conids) OR currency = ANY(:currencies)) "
+                        "AND (conid = ANY(:conids) OR currency = ANY(:currencies) OR EXISTS ("
+                        "SELECT 1 FROM event_trade_fill trade "
+                        "JOIN raw_record raw ON raw.raw_record_id = trade.source_raw_record_id "
+                        "WHERE trade.account_id = instrument.account_id "
+                        "AND trade.instrument_id = instrument.instrument_id "
+                        "AND COALESCE(trade.commission, 0) <> 0 "
+                        "AND UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')) = ANY(:currencies))) "
                         "ORDER BY instrument_id"
                     ),
                     {
@@ -240,6 +246,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
             "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
             "i.asset_category, "
+            "NULLIF(UPPER(BTRIM(rr.source_payload->>'ibCommissionCurrency')), '') AS commission_currency, "
             "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
             "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
@@ -290,6 +297,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 price=str(row["price"]),
                 fees=None if row["fees"] is None else str(row["fees"]),
                 commission=None if row["commission"] is None else str(row["commission"]),
+                commission_currency=row["commission_currency"],
                 functional_currency=row["functional_currency"],
                 currency=row["currency"],
                 transaction_id=row["transaction_id"],
@@ -332,7 +340,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement = (
             "SELECT "
             "event_cashflow_id, account_id, instrument_id, report_date_local, withholding_tax, fees, "
-            "functional_currency, amount, amount_in_base, currency "
+            "functional_currency, amount, amount_in_base, currency, cash_action "
             "FROM event_cashflow "
             "WHERE account_id = :account_id "
             "AND (CAST(:through_report_date_local AS date) IS NULL "
@@ -371,6 +379,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 amount=str(row["amount"]),
                 amount_in_base=None if row["amount_in_base"] is None else str(row["amount_in_base"]),
                 currency=row["currency"],
+                cash_action=row["cash_action"],
             )
             for row in rows
         ]

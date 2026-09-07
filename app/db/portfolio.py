@@ -141,15 +141,19 @@ class SQLAlchemyPortfolioService:
             raise RuntimeError("label create failed") from error
         return self._label(row)
 
-    def db_label_update(self, label_id: UUID, name: str | None, color: str | None) -> LabelRecord | None:
+    def db_label_update(
+        self, label_id: UUID, name: str | None, color: str | None, *, update_color: bool = False
+    ) -> LabelRecord | None:
         try:
             with self._engine.begin() as connection:
                 row = connection.execute(
                     text(
-                        "UPDATE label SET name=COALESCE(:name, name), color=COALESCE(:color, color), "
+                        "UPDATE label SET name=COALESCE(:name, name), "
+                        "color=CASE WHEN :update_color THEN :color ELSE color END, "
                         "updated_at_utc=now() WHERE label_id=:label_id RETURNING *"
                     ),
-                    {"label_id": label_id, "name": self._optional_text(name), "color": self._optional_text(color)},
+                    {"label_id": label_id, "name": self._optional_text(name), "color": self._optional_text(color),
+                     "update_color": update_color or color is not None},
                 ).mappings().one_or_none()
         except IntegrityError as error:
             raise ValueError("label name already exists") from error
@@ -158,7 +162,14 @@ class SQLAlchemyPortfolioService:
         return None if row is None else self._label(row)
 
     def db_label_delete(self, label_id: UUID) -> bool:
-        return self._delete("DELETE FROM label WHERE label_id=:id", label_id)
+        try:
+            with self._engine.begin() as connection:
+                result = connection.execute(text("DELETE FROM label WHERE label_id=:id"), {"id": label_id})
+        except IntegrityError as error:
+            raise ValueError("label has notes without another target; remove those notes before deleting the label") from error
+        except SQLAlchemyError as error:
+            raise RuntimeError("label delete failed") from error
+        return bool(result.rowcount)
 
     def db_instrument_label_assign(self, instrument_id: UUID, label_id: UUID) -> bool:
         try:
@@ -836,10 +847,26 @@ class SQLAlchemyPortfolioService:
         ):
             unions.append(
                 f"SELECT '{event_type}' AS event_type, event.{id_column} AS event_id, event.source_raw_record_id, "
-                "raw.section_name, raw.source_row_ref, raw.source_payload FROM " + table + " event "
+                "raw.section_name, raw.source_row_ref, raw.source_payload, raw.raw_artifact_id, "
+                "raw.ingestion_run_id FROM " + table + " event "
                 "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id WHERE event.account_id=:account_id "
                 "AND event.report_date_local<=:report_date AND event.instrument_id=:instrument_id"
             )
+        unions.append(
+            "SELECT 'open_position' AS event_type, raw.raw_record_id AS event_id, "
+            "raw.raw_record_id AS source_raw_record_id, raw.section_name, raw.source_row_ref, "
+            "raw.source_payload, raw.raw_artifact_id, raw.ingestion_run_id "
+            "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
+            "JOIN LATERAL (SELECT position.* FROM raw_record position "
+            "WHERE position.account_id=s.account_id AND position.ingestion_run_id=s.ingestion_run_id "
+            "AND position.section_name='OpenPositions' "
+            "AND position.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
+            "AND position.source_payload->>'conid'=i.conid "
+            "AND UPPER(BTRIM(position.source_payload->>'assetCategory')) NOT IN ('CASH', 'FX') "
+            "ORDER BY position.raw_record_id DESC LIMIT 1) raw ON true "
+            "WHERE s.account_id=:account_id AND s.report_date_local=:report_date "
+            "AND s.instrument_id=:instrument_id"
+        )
         try:
             with self._engine.connect() as connection:
                 rows = connection.execute(
@@ -870,61 +897,109 @@ class SQLAlchemyPortfolioService:
         row_fx_rate = (
             f"CASE WHEN {raw_currency}=s.currency THEN 1::numeric ELSE {raw_fx_rate} END"
         )
-        commission_currency = (
-            "COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), "
-            f"{raw_currency})"
+        def conversion_rate(currency: str) -> str:
+            return (
+                f"CASE WHEN {currency}=s.currency THEN 1::numeric ELSE "
+                "(SELECT fx.fx_rate FROM event_fx fx WHERE fx.account_id=s.account_id "
+                f"AND fx.currency={currency} AND fx.functional_currency=s.currency "
+                "AND fx.report_date_local<=event.report_date_local AND fx.fx_rate>0 "
+                "ORDER BY fx.report_date_local DESC, fx.ingestion_run_id DESC, "
+                "fx.source_raw_record_id DESC LIMIT 1) END"
+            )
+
+        event_conversion = conversion_rate("event.currency")
+        trade_fx_rate = (
+            "CASE WHEN event.currency=s.currency THEN 1::numeric ELSE COALESCE("
+            "CASE WHEN event.fx_rate_to_base>0 THEN event.fx_rate_to_base END, "
+            "CASE WHEN event.net_cash_in_base<>0 THEN ABS(event.net_cash_in_base / NULLIF(event.net_cash, 0)) END, "
+            f"({event_conversion})) END"
         )
-        commission_conversion_rate = (
-            f"(SELECT {raw_numeric('rate', 'fx_raw')} FROM raw_record fx_raw "
-            "WHERE fx_raw.account_id=s.account_id AND fx_raw.ingestion_run_id=s.ingestion_run_id "
-            "AND fx_raw.section_name='ConversionRates' "
-            f"AND UPPER(BTRIM(fx_raw.source_payload->>'fromCurrency'))={commission_currency} "
-            "AND COALESCE(NULLIF(UPPER(BTRIM(fx_raw.source_payload->>'toCurrency')), ''), s.currency)=s.currency "
-            f"AND {raw_numeric('rate', 'fx_raw')} IS NOT NULL "
-            "ORDER BY fx_raw.report_date_local DESC, fx_raw.raw_record_id DESC LIMIT 1)"
+        commission_currency = (
+            "COALESCE(NULLIF(UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')), ''), event.currency)"
         )
         commission_fx_rate = (
-            f"CASE WHEN {commission_currency}=s.currency THEN 1::numeric "
-            f"WHEN {commission_currency}={raw_currency} THEN {row_fx_rate} "
-            f"ELSE {commission_conversion_rate} END"
+            f"CASE WHEN {commission_currency}=event.currency THEN ({trade_fx_rate}) "
+            f"ELSE ({conversion_rate(commission_currency)}) END"
         )
         position = raw_numeric("position")
-        realized = raw_numeric("fifoPnlRealized")
         unrealized = raw_numeric("fifoPnlUnrealized")
-        commission = raw_numeric("ibCommission")
-        fees = raw_numeric("fees")
-        withholding_tax = raw_numeric("withholdingTax")
+        # Canonical identities deduplicate overlapping reports; amounts remain broker-reported.
+        trade_history = (
+            "FROM event_trade_fill event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=s.account_id AND event.instrument_id=s.instrument_id "
+            "AND event.report_date_local<=s.report_date_local "
+        )
+        cash_history = (
+            "FROM event_cashflow event WHERE event.account_id=s.account_id "
+            "AND event.instrument_id=s.instrument_id AND event.report_date_local<=s.report_date_local "
+        )
+
+        def converted_expense(amount: str, rate: str) -> str:
+            # Zero expenses need no FX, but a missing rate for a nonzero expense stays unknown.
+            return f"CASE WHEN COALESCE({amount}, 0)=0 THEN 0 ELSE ({amount}) * ({rate}) END"
+
+        def complete_total(value: str, history: str) -> str:
+            return (
+                "(SELECT CASE WHEN count(*)=0 THEN 0 WHEN bool_and(value IS NOT NULL) THEN sum(value) END "
+                f"FROM (SELECT ({value}) AS value {history}) amounts)"
+            )
+
+        trade_fees = (
+            f"({converted_expense('ABS(event.commission)', commission_fx_rate)}) + "
+            f"({converted_expense('ABS(event.fees)', trade_fx_rate)})"
+        )
+        cash_fees = converted_expense("event.fees", event_conversion)
+        cash_tax = converted_expense("event.withholding_tax", event_conversion)
+        cash_amount = (
+            "CASE WHEN event.amount_in_base IS NOT NULL AND event.functional_currency=s.currency "
+            f"THEN event.amount_in_base ELSE event.amount * ({event_conversion}) END"
+        )
+        cash_net = f"({cash_amount}) - ({cash_fees}) - ({cash_tax})"
+        cash_reported_fees = f"({cash_fees}) - CASE WHEN event.cash_action='Other Fees' THEN ({cash_amount}) ELSE 0 END"
+        cash_reported_tax = (
+            f"({cash_tax}) - CASE WHEN event.cash_action='Withholding Tax' THEN ({cash_amount}) ELSE 0 END"
+        )
+        broker_realized = (
+            f"{complete_total(f'event.realized_pnl * ({trade_fx_rate})', trade_history)} + "
+            f"{complete_total(cash_net, cash_history)}"
+        )
+        broker_fees = f"{complete_total(trade_fees, trade_history)} + {complete_total(cash_reported_fees, cash_history)}"
+        broker_tax = complete_total(cash_reported_tax, cash_history)
+
+        # Empty sections have a persisted sentinel; require successful processing of this source lineage.
+        complete_positions = (
+            "EXISTS(SELECT 1 FROM raw_record section "
+            "JOIN ingestion_run run ON run.ingestion_run_id=section.ingestion_run_id "
+            "LEFT JOIN raw_artifact artifact ON artifact.raw_artifact_id=section.raw_artifact_id "
+            "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+            "WHERE section.account_id=s.account_id AND section.ingestion_run_id=s.ingestion_run_id "
+            "AND section.report_date_local=s.report_date_local AND section.section_name='OpenPositions' "
+            "AND (completion.status='success' "
+            "OR (artifact.completed_ingestion_run_id IS NULL AND run.status='success')))"
+        )
+        absent_position = (
+            "NOT EXISTS(SELECT 1 FROM raw_record present WHERE present.account_id=s.account_id "
+            "AND present.ingestion_run_id=s.ingestion_run_id AND present.report_date_local=s.report_date_local "
+            "AND present.section_name='OpenPositions' AND present.source_payload->>'conid'=i.conid)"
+        )
+        closed_position = f"CASE WHEN ({complete_positions}) AND ({absent_position}) THEN 0::numeric END"
 
         query = text(
             "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, s.currency, s.position_qty, "
             "s.realized_pnl, s.unrealized_pnl, s.fees, s.withholding_tax, s.provisional, "
-            f"(SELECT {position} FROM raw_record raw WHERE raw.account_id=s.account_id "
+            f"COALESCE((SELECT {position} FROM raw_record raw WHERE raw.account_id=s.account_id "
             "AND raw.ingestion_run_id=s.ingestion_run_id "
             "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1) AS broker_position_qty, "
-            f"(SELECT CASE WHEN bool_and(({realized}) IS NULL OR ({row_fx_rate}) IS NOT NULL) "
-            f"THEN sum(({realized}) * ({row_fx_rate})) ELSE NULL END "
-            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
-            "AND raw.section_name='Trades' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid) AS broker_realized_pnl, "
-            f"(SELECT ({unrealized}) * ({row_fx_rate}) FROM raw_record raw "
+            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1), "
+            f"{closed_position}) AS broker_position_qty, "
+            f"({broker_realized}) AS broker_realized_pnl, "
+            f"COALESCE((SELECT ({unrealized}) * ({row_fx_rate}) FROM raw_record raw "
             "WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
             "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1) AS broker_unrealized_pnl, "
-            "(SELECT CASE WHEN bool_and((fee_row.commission IS NULL OR fee_row.commission_fx_rate IS NOT NULL) "
-            "AND (fee_row.fees IS NULL OR fee_row.fee_fx_rate IS NOT NULL)) "
-            "THEN sum(COALESCE(fee_row.commission * fee_row.commission_fx_rate, 0) + "
-            "COALESCE(fee_row.fees * fee_row.fee_fx_rate, 0)) ELSE NULL END FROM ("
-            f"SELECT ({commission}) AS commission, ({fees}) AS fees, "
-            f"({commission_fx_rate}) AS commission_fx_rate, ({row_fx_rate}) AS fee_fx_rate "
-            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
-            "AND raw.section_name='Trades' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid) fee_row) AS broker_fees, "
-            f"(SELECT CASE WHEN bool_and(({withholding_tax}) IS NULL OR ({row_fx_rate}) IS NOT NULL) "
-            f"THEN sum(({withholding_tax}) * ({row_fx_rate})) ELSE NULL END "
-            "FROM raw_record raw WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
-            "AND raw.section_name='CashTransactions' "
-            "AND raw.report_date_local=s.report_date_local AND raw.source_payload->>'conid'=i.conid) AS broker_withholding_tax, "
+            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1), "
+            f"{closed_position}) AS broker_unrealized_pnl, "
+            f"({broker_fees}) AS broker_fees, "
+            f"{broker_tax} AS broker_withholding_tax, "
             "(SELECT event_trade_fill_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
             "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_event_id, "
             "(SELECT source_raw_record_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "

@@ -657,6 +657,9 @@ class RawRecordReadRepositoryPort(Protocol):
 class CanonicalPersistenceRepositoryPort(Protocol):
     """Port definition for canonical event and instrument UPSERT operations."""
 
+    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
+        """Return whether retained run history permits duplicate/incremental skips."""
+
     def db_canonical_instrument_upsert_many(
         self,
         requests: list[CanonicalInstrumentUpsertRequest],
@@ -784,6 +787,7 @@ class LedgerTradeFillRecord:
         price: Trade price.
         fees: Optional fees amount.
         commission: Optional commission amount.
+        commission_currency: Commission currency, defaulting to trade currency when absent.
         functional_currency: Functional/base currency code.
         asset_category: Canonical instrument asset category.
         multiplier: Optional raw execution contract multiplier.
@@ -809,6 +813,7 @@ class LedgerTradeFillRecord:
     close_price: str | None = None
     asset_category: str = "STK"
     multiplier: str | None = None
+    commission_currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -835,6 +840,7 @@ class LedgerCashflowRecord:
     amount: str = "0"
     amount_in_base: str | None = None
     currency: str = "USD"
+    cash_action: str = ""
 
 
 @dataclass(frozen=True)

@@ -331,3 +331,17 @@ def test_smtp_sanitizes_message_construction_failure_without_exposing_routing() 
 	assert "secret-routing-value" not in str(raised.value)
 	assert raised.value.__cause__ is None
 	assert raised.value.__suppress_context__ is True
+
+
+def test_smtp_partial_recipient_refusal_is_retryable_failure(monkeypatch) -> None:
+	class PartialSmtp(_RecordingSmtp):
+		def send_message(self, message, from_addr, to_addrs):
+			return {"oncall@example.test": (450, b"Temporary refusal")}
+
+	monkeypatch.setattr(smtplib, "SMTP", PartialSmtp)
+	sender = SmtpAlertSender(
+		host="smtp.example.test", port=25, sender="alerts@example.test",
+		recipients=("owner@example.test", "oncall@example.test"), starttls=False,
+	)
+	with pytest.raises(AlertDeliveryError, match="^email delivery failed$"):
+		sender.send(_transition())

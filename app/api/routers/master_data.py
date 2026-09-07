@@ -86,7 +86,9 @@ def api_create_master_data_router(settings: AppSettings, repository: PortfolioRe
     @router.patch("/labels/{label_id}")
     def label_update(label_id: UUID, payload: LabelUpdatePayload) -> JSONResponse:
         try:
-            row = repository.db_label_update(label_id, payload.name, payload.color)
+            row = repository.db_label_update(
+                label_id, payload.name, payload.color, update_color="color" in payload.model_fields_set
+            )
         except ValueError as error:
             return _error(status.HTTP_409_CONFLICT, "LABEL_CONFLICT", str(error))
         if row is None:
@@ -95,7 +97,11 @@ def api_create_master_data_router(settings: AppSettings, repository: PortfolioRe
 
     @router.delete("/labels/{label_id}", status_code=status.HTTP_204_NO_CONTENT)
     def label_delete(label_id: UUID) -> JSONResponse:
-        if not repository.db_label_delete(label_id):
+        try:
+            deleted = repository.db_label_delete(label_id)
+        except ValueError as error:
+            return _error(status.HTTP_409_CONFLICT, "LABEL_IN_USE", str(error))
+        if not deleted:
             return _error(status.HTTP_404_NOT_FOUND, "NOT_FOUND", "label not found")
         return JSONResponse(content=None, status_code=status.HTTP_204_NO_CONTENT)
 

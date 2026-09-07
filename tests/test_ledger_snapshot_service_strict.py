@@ -292,7 +292,7 @@ def test_snapshot_uses_last_trade_fallback_without_completed_openpositions() -> 
     assert result.missing_solid_valuation_count == 0
     assert len(repository.snapshot_requests.requests) == 1
     snapshot = repository.snapshot_requests.requests[0]
-    assert snapshot.provisional is False
+    assert snapshot.provisional is True
     assert snapshot.valuation_source == "trades_last_trade_price"
     assert Decimal(snapshot.unrealized_pnl) == Decimal("0")
 
@@ -855,7 +855,7 @@ def test_snapshot_completed_artifact_preserves_cash_fx_event_position(
 
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.position_qty == "2"
-    assert snapshot.provisional is False
+    assert snapshot.provisional is True
     assert result.broker_position_match_count == 0
     assert result.broker_position_mismatch_count == 0
     assert result.broker_only_position_count == 0
@@ -1175,3 +1175,72 @@ def test_snapshot_exact_short_match_keeps_signed_fifo_cost() -> None:
         "U_TEST", str(uuid4()), "2026-08-20", "USD"
     )
     assert repository.snapshot_requests.requests[0].cost_basis == "-22"
+
+
+@pytest.mark.parametrize("raw_ids", [(3, 1, 2), (1, 3, 2)])
+def test_snapshot_fifo_preserves_numeric_transaction_order(raw_ids: tuple[int, int, int]) -> None:
+    instrument_id = uuid4()
+    trades = [
+        replace(
+            _trade(instrument_id, side, "1", price),
+            transaction_id=transaction_id,
+            source_raw_record_id=UUID(int=raw_id),
+        )
+        for side, price, transaction_id, raw_id in zip(
+            ("BUY", "BUY", "SELL"), ("10", "20", "30"), ("2", "10", "11"), raw_ids, strict=True
+        )
+    ]
+    repository = _RepositoryStub(trades=trades, valuations=[])
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", None, "2026-08-20", "USD")
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.realized_pnl) == Decimal("20")
+    assert Decimal(snapshot.cost_basis or "0") == Decimal("20")
+
+
+@pytest.mark.parametrize("factor", ["2", "0.5"])
+def test_snapshot_historical_fallback_mark_is_split_adjusted(factor: str) -> None:
+    instrument_id = uuid4()
+    trade = _trade(instrument_id, "BUY", "10", "100")
+    action = LedgerCorporateActionRecord(
+        instrument_id=instrument_id, report_date_local=date(2026, 8, 21),
+        action_type="FORWARDSPLIT", adjustment_factor=factor,
+    )
+    repository = _RepositoryStub(trades=[trade], valuations=[], corporate_actions=[action])
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", None, "2026-08-21", "USD")
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.position_qty) == Decimal("10") * Decimal(factor)
+    assert Decimal(snapshot.cost_basis or "0") == Decimal("1000")
+    assert Decimal(snapshot.unrealized_pnl) == Decimal("0")
+    assert snapshot.provisional is True
+
+
+@pytest.mark.parametrize(
+    ("commission_currency", "commission_fx", "expected_fees", "provisional"),
+    [("USD", None, "3.4", False), ("GBP", "1.5", "3.9", False), ("GBP", None, "2.4", True)],
+)
+def test_snapshot_converts_commission_currency_independently(
+    commission_currency: str, commission_fx: str | None, expected_fees: str, provisional: bool,
+) -> None:
+    instrument_id = uuid4()
+    trade = replace(
+        _trade(instrument_id, "BUY", "10", "100"), currency="EUR", fx_rate_to_base="1.2",
+        fees="-2", commission="-1", commission_currency=commission_currency,
+    )
+    fx_rates = [] if commission_fx is None else [LedgerFxRateRecord(
+        report_date_local=date(2026, 8, 20), currency=commission_currency, functional_currency="USD",
+        fx_rate=commission_fx, fx_source="test", ingestion_run_id=uuid4(), source_raw_record_id=uuid4(),
+    )]
+    repository = _RepositoryStub(
+        trades=[trade], valuations=[_broker_position(instrument_id, "10", currency="EUR", mark="100", fx="1.2")],
+        fx_rates=fx_rates, scope_ids=[str(instrument_id)], instrument_currencies=["EUR"],
+    )
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD", affected_conids=frozenset({"123"}),
+    )
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.fees) == Decimal(expected_fees)
+    assert Decimal(snapshot.cost_basis or "0") == Decimal("1200") + Decimal(expected_fees)
+    assert Decimal(snapshot.unrealized_pnl) == -Decimal(expected_fees)
+    assert snapshot.provisional is provisional
+    assert repository.fx_currencies is not None and commission_currency in repository.fx_currencies
+    assert ("FX_RATE_MISSING_ALL_SOURCES" in (snapshot.fx_source or "")) is provisional

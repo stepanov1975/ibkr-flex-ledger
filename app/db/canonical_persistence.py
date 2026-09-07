@@ -112,6 +112,25 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
 
         self._engine = engine
 
+    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
+        """Reject skip assumptions after any failed run for this account.
+
+        Canonical commits precede snapshot completion. A successful partial report
+        cannot certify that all failed writes were repaired. Run status is retained
+        even after diagnostic retention, so this conservative guard stays durable.
+        """
+
+        normalized_account_id = self._db_canonical_validate_non_empty_text(account_id, "account_id")
+        try:
+            with self._engine.connect() as connection:
+                return not bool(connection.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM ingestion_run "
+                         "WHERE account_id = :account_id AND status = 'failed')"),
+                    {"account_id": normalized_account_id},
+                ))
+        except SQLAlchemyError as error:
+            raise RuntimeError("canonical skip safety read failed") from error
+
     def db_raw_record_list_for_period(
         self,
         account_id: str,
@@ -510,6 +529,25 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     )
 
                 if normalized_fx_requests:
+                    # Replace pre-fix ordinal identities only when this date/pair
+                    # is being rebuilt. Older provenance can point to another date
+                    # because legacy FX UPSERTs preserved the first raw-row id.
+                    connection.execute(
+                        text(
+                            "DELETE FROM event_fx AS legacy USING raw_record AS source "
+                            "WHERE legacy.source_raw_record_id = source.raw_record_id "
+                            "AND legacy.account_id = :account_id "
+                            "AND legacy.report_date_local = CAST(:report_date_local AS date) "
+                            "AND legacy.currency = :currency "
+                            "AND legacy.functional_currency = :functional_currency "
+                            "AND legacy.fx_source = 'conversion_rates' "
+                            "AND source.section_name = 'ConversionRates' "
+                            "AND NULLIF(BTRIM(source.source_payload->>'transactionID'), '') IS NULL "
+                            "AND legacy.transaction_id = source.source_row_ref "
+                            "AND legacy.transaction_id <> :transaction_id"
+                        ),
+                        normalized_fx_requests,
+                    )
                     connection.execute(
                         text(
                             "INSERT INTO event_fx ("

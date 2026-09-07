@@ -61,14 +61,9 @@ def domain_classify_corporate_action(
             adjustment_factor=factor,
         )
 
-    if action_type == "CASHDIV":
-        has_amount = _domain_payload_decimal(source_payload, "amount") is not None
-        has_withholding = "withholdingTax" in source_payload
-        return CorporateActionClassification(
-            action_type=action_type,
-            requires_manual=not (has_amount and has_withholding),
-            adjustment_factor=None,
-        )
+    # CASHDIV needs explicit review: CorporateActions does not establish whether
+    # CashTransactions already contains its payment and withholding. Only cash
+    # transaction rows feed cash accounting until that identity is unambiguous.
 
     return CorporateActionClassification(
         action_type=action_type,

@@ -1016,3 +1016,26 @@ def test_mapping_build_canonical_batch_treats_report_date_null_sentinel_as_missi
 
     assert len(mapped_batch.cashflow_requests) == 1
     assert mapped_batch.cashflow_requests[0].report_date_local == "2026-02-14"
+
+
+def test_conversion_rate_identity_uses_own_date_and_pair_independent_of_row_ordinal() -> None:
+    first = RawRecordForMapping(
+        raw_record_id=uuid4(),
+        ingestion_run_id=uuid4(),
+        section_name="ConversionRates",
+        source_row_ref="ConversionRates:ConversionRate:idx=1",
+        report_date_local=date(2026, 8, 21),
+        source_payload={"fromCurrency": "EUR", "toCurrency": "USD", "reportDate": "20260820", "rate": "1.1"},
+    )
+    moved = replace(first, source_row_ref="ConversionRates:ConversionRate:idx=9")
+    tomorrow = replace(first, source_payload={**first.source_payload, "reportDate": "20260821"})
+    another_pair = replace(first, source_payload={**first.source_payload, "toCurrency": "GBP"})
+    broker_id = replace(first, source_payload={**first.source_payload, "transactionID": "BROKER-FX-1"})
+    requests = [
+        mapping_build_canonical_batch("A", "USD", [row]).fx_requests[0]
+        for row in (first, moved, tomorrow, another_pair, broker_id)
+    ]
+    assert requests[0].transaction_id == requests[1].transaction_id
+    assert requests[0].report_date_local == "2026-08-20"
+    assert len({request.transaction_id for request in (requests[0], *requests[2:])}) == 4
+    assert requests[-1].transaction_id == "BROKER-FX-1"

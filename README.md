@@ -153,6 +153,11 @@ Service endpoints:
 - Operations dashboard: `http://127.0.0.1:8000/ui/operations`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
 
+The published application port binds to host loopback. Remote access must go through an
+authenticating reverse proxy on the host (or an SSH tunnel); the application has no in-app
+authentication. A containerized proxy must use the private Compose network and the app's
+container port instead of exposing that port publicly.
+
 ### UI date and time display
 
 The dashboard displays date-only values as `dd/mm/yy` and timestamps as

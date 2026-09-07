@@ -166,6 +166,7 @@ class StockLedgerSnapshotService:
             required_currencies.add(normalized_functional_currency)
             required_currencies.update(self._repository.db_ledger_instrument_currency_list(instrument_ids))
             required_currencies.update(row.currency for row in trade_rows)
+            required_currencies.update(row.commission_currency for row in trade_rows if row.commission_currency)
             required_currencies.update(row.functional_currency for row in trade_rows)
             required_currencies.update(row.currency for row in cashflow_rows)
             required_currencies.update(row.functional_currency for row in cashflow_rows)
@@ -244,6 +245,22 @@ class StockLedgerSnapshotService:
                 if trade_fx_rate is None:
                     missing_fx = True
                     trade_fx_rate = Decimal("0")
+                commission = abs(Decimal(trade.commission or "0"))
+                commission_fx_rate = trade_fx_rate
+                commission_currency = (trade.commission_currency or trade.currency).strip().upper()
+                if commission and commission_currency != trade.currency.strip().upper():
+                    resolved_commission_fx_rate, commission_fx_source = self._resolve_fx_rate(
+                        currency=commission_currency,
+                        functional_currency=normalized_functional_currency,
+                        report_date_local=trade.report_date_local,
+                        fx_rate_rows=fx_rate_rows,
+                    )
+                    fx_sources.add(commission_fx_source)
+                    if resolved_commission_fx_rate is None:
+                        missing_fx = True
+                        commission_fx_rate = Decimal("0")
+                    else:
+                        commission_fx_rate = resolved_commission_fx_rate
                 converted_trades.append(
                     FifoTradeFillInput(
                         event_trade_fill_id=str(trade.event_trade_fill_id),
@@ -257,7 +274,8 @@ class StockLedgerSnapshotService:
                             * trade_fx_rate
                             / adjustment_factor
                         ),
-                        fees=self._trade_fee_total(trade) * trade_fx_rate,
+                        fees=abs(Decimal(trade.fees or "0")) * trade_fx_rate + commission * commission_fx_rate,
+                        transaction_id=trade.transaction_id,
                         withholding_tax=Decimal("0"),
                     )
                 )
@@ -276,6 +294,7 @@ class StockLedgerSnapshotService:
             cashflow_amount_total = Decimal("0")
             cashflow_fees_total = Decimal("0")
             withholding_tax_total = Decimal("0")
+            cashflow_deductions_total = Decimal("0")
             for cashflow in instrument_cashflows:
                 cashflow_fx_rate, cashflow_fx_source = self._resolve_fx_rate(
                     currency=cashflow.currency,
@@ -296,17 +315,26 @@ class StockLedgerSnapshotService:
                     cashflow_fx_rate = Decimal("0")
                 if amount_in_functional_currency:
                     assert cashflow_amount_in_base is not None
-                    cashflow_amount_total += cashflow_amount_in_base
+                    converted_amount = cashflow_amount_in_base
                     fx_sources.add("cashflow_amount_in_base")
                 else:
-                    cashflow_amount_total += Decimal(cashflow.amount) * cashflow_fx_rate
+                    converted_amount = Decimal(cashflow.amount) * cashflow_fx_rate
+                cashflow_amount_total += converted_amount
                 fx_sources.add(cashflow_fx_source)
-                cashflow_fees_total += Decimal(cashflow.fees or "0") * cashflow_fx_rate
-                withholding_tax_total += Decimal(cashflow.withholding_tax or "0") * cashflow_fx_rate
+                converted_fees = Decimal(cashflow.fees or "0") * cashflow_fx_rate
+                converted_tax = Decimal(cashflow.withholding_tax or "0") * cashflow_fx_rate
+                cashflow_deductions_total += converted_fees + converted_tax
+                cashflow_fees_total += converted_fees
+                withholding_tax_total += converted_tax
+                # Standalone expenses already affect net cash; classify their signed amount only for reporting.
+                if cashflow.cash_action == "Other Fees":
+                    cashflow_fees_total -= converted_amount
+                elif cashflow.cash_action == "Withholding Tax":
+                    withholding_tax_total -= converted_amount
 
             trade_fee_total = sum((trade.fees or Decimal("0") for trade in converted_trades), Decimal("0"))
             total_fee_impact = trade_fee_total + cashflow_fees_total
-            realized_pnl = fifo_result.realized_pnl + cashflow_amount_total - cashflow_fees_total - withholding_tax_total
+            realized_pnl = fifo_result.realized_pnl + cashflow_amount_total - cashflow_deductions_total
             snapshot_position_quantity = fifo_result.position_quantity
             snapshot_cost_basis = fifo_cost_basis
             unrealized_pnl = Decimal("0")
@@ -319,6 +347,7 @@ class StockLedgerSnapshotService:
                     valuation_record=None,
                     position_quantity=fifo_result.position_quantity,
                     report_date_local=parsed_report_date,
+                    corporate_actions=corporate_actions_by_instrument.get(instrument_id, []),
                 )
                 missing_valuation = fifo_result.position_quantity != Decimal("0") and local_mark_price is None
                 mark_price_base = Decimal("0")
@@ -452,7 +481,10 @@ class StockLedgerSnapshotService:
             total_pnl = realized_pnl + unrealized_pnl
             quantity_mismatch = ingestion_run_id is not None and snapshot_position_quantity != fifo_result.position_quantity
             broker_only = ingestion_run_id is not None and valuation_record is not None and not has_canonical_history
-            provisional = missing_valuation or missing_fx or quantity_mismatch or broker_only
+            provisional = (
+                missing_valuation or missing_fx or quantity_mismatch or broker_only
+                or valuation_source == "trades_last_trade_price"
+            )
             fx_source = ",".join(sorted(fx_sources)) if fx_sources else "base_currency"
 
             snapshot_requests.append(
@@ -560,6 +592,7 @@ class StockLedgerSnapshotService:
         valuation_record: LedgerOpenPositionValuationRecord | None,
         position_quantity: Decimal,
         report_date_local: date,
+        corporate_actions: list[LedgerCorporateActionRecord],
     ) -> tuple[Decimal | None, str]:
         """Resolve the frozen EOD mark hierarchy for one instrument."""
 
@@ -583,7 +616,8 @@ class StockLedgerSnapshotService:
         if eligible_trades:
             selected_trade = eligible_trades[-1]
             return (
-                Decimal(selected_trade.price) * self._trade_contract_multiplier(selected_trade),
+                Decimal(selected_trade.price) * self._trade_contract_multiplier(selected_trade)
+                / self._trade_adjustment_factor(selected_trade, corporate_actions),
                 "trades_last_trade_price",
             )
         return None, "EOD_MARK_MISSING_ALL_SOURCES"
@@ -728,23 +762,6 @@ class StockLedgerSnapshotService:
         if multiplier is None:
             raise ValueError("trade multiplier must be positive")
         return multiplier
-
-    def _trade_fee_total(self, trade_row: LedgerTradeFillRecord) -> Decimal:
-        """Build combined trade-fee impact from fees and commission fields.
-
-        Args:
-            trade_row: Trade-fill row.
-
-        Returns:
-            Decimal: Combined fee impact.
-
-        Raises:
-            RuntimeError: This helper does not raise runtime errors.
-        """
-
-        fees = abs(Decimal(trade_row.fees or "0"))
-        commission = abs(Decimal(trade_row.commission or "0"))
-        return fees + commission
 
     def _build_open_cost_basis(self, open_lots: tuple[FifoOpenLotResult, ...]) -> str | None:
         """Build open cost-basis aggregate from FIFO open lots.

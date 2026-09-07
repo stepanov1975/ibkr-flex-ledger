@@ -20,6 +20,7 @@ class FifoTradeFillInput:
         price: Trade price.
         fees: Optional fee impact associated with the trade.
         withholding_tax: Optional withholding-tax impact associated with the trade.
+        transaction_id: Broker identity used before raw row IDs for tied timestamps.
     """
 
     source_raw_record_id: str
@@ -30,6 +31,7 @@ class FifoTradeFillInput:
     fees: Decimal | None
     withholding_tax: Decimal | None
     event_trade_fill_id: str | None = None
+    transaction_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +137,14 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         request.trades,
         key=lambda trade: (
             _fifo_parse_timestamp_utc(trade.trade_timestamp_utc),
+            (
+                Decimal(trade.transaction_id)
+                if trade.transaction_id is not None and trade.transaction_id.isascii()
+                and trade.transaction_id.isdigit() else Decimal("-1")
+            ),
+            trade.transaction_id or "",
             trade.source_raw_record_id,
+            trade.event_trade_fill_id or "",
         ),
     )
 

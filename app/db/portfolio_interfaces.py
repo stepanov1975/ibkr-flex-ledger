@@ -158,6 +158,8 @@ class ProvenanceRecord:
     section_name: str
     source_row_ref: str
     source_payload: dict[str, object]
+    raw_artifact_id: UUID | None = None
+    ingestion_run_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -219,7 +221,9 @@ class PortfolioRepositoryPort(Protocol):
 
     def db_label_create(self, name: str, color: str | None) -> LabelRecord: ...
 
-    def db_label_update(self, label_id: UUID, name: str | None, color: str | None) -> LabelRecord | None: ...
+    def db_label_update(
+        self, label_id: UUID, name: str | None, color: str | None, *, update_color: bool = False
+    ) -> LabelRecord | None: ...
 
     def db_label_delete(self, label_id: UUID) -> bool: ...
 

@@ -284,6 +284,11 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 raw_rows = self._raw_read_repository.db_raw_record_list_for_artifact(
                     raw_artifact_id=candidate.raw_artifact_id,
                 )
+                raw_row_run_ids = {row.ingestion_run_id for row in raw_rows}
+                if len(raw_row_run_ids) != 1:
+                    raise RuntimeError("raw artifact rows must reference exactly one ingestion run")
+                semantic_run_id = next(iter(raw_row_run_ids))
+                artifact_details["ingestion_run_id"] = str(semantic_run_id)
                 timeline.append(
                     domain_build_stage_event(
                         stage="artifact_raw_read",
@@ -331,7 +336,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 )
                 snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                     account_id=config.account_id,
-                    ingestion_run_id=str(candidate.ingestion_run_id),
+                    ingestion_run_id=str(semantic_run_id),
                     report_date_local=candidate.report_date_local.isoformat(),
                     functional_currency=config.functional_currency,
                 )

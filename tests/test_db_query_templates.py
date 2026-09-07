@@ -424,7 +424,7 @@ def test_manual_case_update_preserves_calculation_provisional() -> None:
 
 
 def test_reconciliation_sources_use_snapshot_lineage_and_functional_currency() -> None:
-    """Compare one snapshot only with broker rows from its source run in its currency."""
+    """Use snapshot lineage for marks and cumulative canonical identities for activity."""
 
     connection = _ConnectionStub(rows=[])
     service = SQLAlchemyPortfolioService(engine=_EngineStub(connection=connection))
@@ -437,12 +437,14 @@ def test_reconciliation_sources_use_snapshot_lineage_and_functional_currency() -
     )
 
     executed_query = connection.executed_queries[0]
-    assert executed_query.count("raw.ingestion_run_id=s.ingestion_run_id") >= 5
-    assert "raw.source_payload->>'ibCommission'" in executed_query
+    assert executed_query.count("raw.ingestion_run_id=s.ingestion_run_id") == 2
+    assert "ABS(event.commission)" in executed_query
+    assert "FROM event_trade_fill event JOIN raw_record raw" in executed_query
+    assert "event.report_date_local<=s.report_date_local" in executed_query
     assert "raw.source_payload->>'commission'" not in executed_query
     assert "raw.source_payload->>'ibCommissionCurrency'" in executed_query
     assert "raw.source_payload->>'fxRateToBase'" in executed_query
-    assert "fx_raw.section_name='ConversionRates'" in executed_query
+    assert "fx.report_date_local<=event.report_date_local" in executed_query
     assert "REPLACE(BTRIM" in executed_query
     assert "IN ('', '-', '--', 'N/A')" in executed_query
     assert "UPPER(BTRIM(raw.source_payload->>'currency'))=s.currency" in executed_query
