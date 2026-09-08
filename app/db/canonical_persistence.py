@@ -602,6 +602,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "AND previous.raw_record_id=e.source_raw_record_id "
                             "AND incoming.raw_record_id=CAST(:source_raw_record_id AS uuid) "
                             "AND (previous.source_payload<>incoming.source_payload "
+                            "OR (e.requires_manual AND NOT :requires_manual) "
                             "OR e.report_date_local<>CAST(:report_date_local AS date) "
                             "OR e.instrument_id IS DISTINCT FROM COALESCE(CAST(:instrument_id AS uuid), e.instrument_id)) "
                             "AND p.account_id=e.account_id "

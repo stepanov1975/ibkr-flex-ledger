@@ -803,3 +803,30 @@ def test_preview_fingerprint_preserves_sub_float_canonical_price_changes(databas
     response = client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]})
     assert response.status_code == 409
     assert _state(database) == before
+
+
+@pytest.mark.parametrize("previously_acknowledged", [False, True])
+def test_identical_legacy_description_replay_rebuilds_newly_automatic_history(database, split_case, previously_acknowledged):
+    from app.jobs.canonical_pipeline import job_canonical_map_and_persist
+    harness, _, _ = split_case
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(b'Broker split with missing ratio', b'SPLIT 3 FOR 2 (broker)')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    # Reproduce pre-upgrade state: the same explicit description was manual,
+    # and old FIFO calculations had not applied its newly supported factor.
+    with database.begin() as c:
+        run_id = c.scalar(text("SELECT ingestion_run_id FROM event_corp_action"))
+        c.execute(text("UPDATE event_corp_action SET requires_manual=true, provisional=true"))
+        c.execute(text("UPDATE corporate_action_manual_case SET status=:status"), {"status": "resolved" if previously_acknowledged else "open"})
+        c.execute(text("UPDATE pnl_snapshot_daily SET position_qty=2, cost_basis=201, unrealized_pnl=19, total_pnl=19, calculation_provisional=false, provisional=true"))
+        c.execute(text("UPDATE position_lot SET open_quantity=2, remaining_quantity=2, open_price=100, cost_basis_open=201"))
+    raw_before = _state(database)["raw_record"]
+    job_canonical_map_and_persist(
+        account_id="INTEGRITY", functional_currency="USD",
+        raw_records=harness[3].db_raw_record_list_for_run(run_id),
+        canonical_persistence_repository=harness[3],
+    )
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+        assert c.execute(text("SELECT position_qty, cost_basis, unrealized_pnl, provisional FROM pnl_snapshot_daily")).one() == (3, 201, 129, False)
+        assert c.scalar(text("SELECT remaining_quantity FROM position_lot WHERE status='open'")) == 3
+    assert _state(database)["raw_record"] == raw_before
