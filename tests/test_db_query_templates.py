@@ -425,7 +425,7 @@ def test_manual_case_update_preserves_calculation_provisional() -> None:
 
     service.db_manual_case_update(case_id, "resolved", "owner", "resolved")
 
-    snapshot_update_query = connection.executed_queries[2]
+    snapshot_update_query = connection.executed_queries[3]
     assert "calculation_provisional OR EXISTS" in snapshot_update_query
 
 

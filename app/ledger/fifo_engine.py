@@ -95,6 +95,7 @@ class FifoOpenLotResult:
         remaining_quantity: Remaining lot quantity.
         open_price: Opening trade price.
         cost_basis_open: Opening lot cost basis.
+        cost_basis_remaining: Signed cost basis of the unconsumed shares.
         realized_pnl_to_date: Realized PnL posted to this lot.
         closed_report_date_local: Action date if split rounding eliminated the remainder.
         closed_at_utc: Execution timestamp if a trade closed the remainder.
@@ -107,6 +108,7 @@ class FifoOpenLotResult:
     remaining_quantity: Decimal
     open_price: Decimal
     cost_basis_open: Decimal
+    cost_basis_remaining: Decimal
     realized_pnl_to_date: Decimal
     closed_report_date_local: date | None = None
     closed_at_utc: str | None = None
@@ -289,6 +291,7 @@ def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None, closed_
         remaining_quantity=Decimal("0") if closed_date else (lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity),
         open_price=lot.open_price,
         cost_basis_open=lot.cost_basis_open,
+        cost_basis_remaining=Decimal("0") if closed_date else lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1),
         realized_pnl_to_date=lot.realized_pnl_to_date,
         closed_report_date_local=closed_date,
         closed_at_utc=closed_at,
@@ -320,6 +323,7 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) 
         if quantity > 0:
             recipient = lot
         else:
+            recipient.cost_basis_open += lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1)
             recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
             recipient.open_price += lot.open_price * lot.remaining_quantity / recipient.remaining_quantity
     open_lots[:] = [lot for lot, quantity in survivors]
@@ -331,7 +335,6 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) 
         lot.open_price /= lot_factor
         lot.open_quantity = (lot.open_quantity * lot_factor).quantize(precision)
         lot.remaining_quantity = remaining_quantity
-        lot.cost_basis_open = lot.unit_basis * lot.open_quantity * (1 if lot.direction == "long" else -1)
     return closed_lots
 
 

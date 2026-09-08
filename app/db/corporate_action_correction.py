@@ -67,7 +67,8 @@ class SQLAlchemySplitCorrectionService:
                     "SELECT EXISTS (SELECT 1 FROM ("
                     "SELECT report_date_local FROM event_trade_fill WHERE account_id=:account_id AND instrument_id=:instrument_id "
                     "UNION ALL SELECT report_date_local FROM event_cashflow WHERE account_id=:account_id AND instrument_id=:instrument_id "
-                    "UNION ALL SELECT report_date_local FROM event_corp_action WHERE account_id=:account_id AND instrument_id=:instrument_id"
+                    "UNION ALL SELECT report_date_local FROM event_corp_action WHERE account_id=:account_id AND instrument_id=:instrument_id "
+                    "AND NOT requires_manual AND reorg_code IN ('FORWARDSPLIT', 'REVERSESPLIT', 'STOCKDIV')"
                     ") activity WHERE report_date_local>:last_snapshot_date)"
                 ), {**params, "last_snapshot_date": before[-1]["report_date_local"]})
                 if newer_activity:
@@ -158,7 +159,7 @@ class SQLAlchemySplitCorrectionService:
     def _lots(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(text(
             "SELECT l.open_event_trade_fill_id, l.remaining_quantity, l.open_price, l.cost_basis_open, "
-            "l.cost_basis_open / (l.open_quantity * CASE WHEN t.side='SELL' THEN -1 ELSE 1 END) AS unit_basis "
+            "l.cost_basis_remaining / (l.remaining_quantity * CASE WHEN t.side='SELL' THEN -1 ELSE 1 END) AS unit_basis "
             "FROM position_lot l JOIN event_trade_fill t ON t.event_trade_fill_id=l.open_event_trade_fill_id "
             "WHERE l.account_id=:account_id AND l.instrument_id=:instrument_id "
             "AND l.status='open' ORDER BY l.opened_at_utc, l.open_event_trade_fill_id"

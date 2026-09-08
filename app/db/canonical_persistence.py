@@ -701,7 +701,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         "FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) "
                         "WHERE p.instrument_id=ANY(CAST(:instrument_ids AS uuid[])) AND p.calculation_provisional "
                         "AND NOT EXISTS (SELECT 1 FROM event_corp_action pending "
-                        "WHERE pending.instrument_id=p.instrument_id AND pending.requires_manual) "
+                        "WHERE pending.instrument_id=p.instrument_id AND pending.requires_manual "
+                        "AND pending.report_date_local<=p.report_date_local) "
                         "ORDER BY p.report_date_local, p.instrument_id"
                     ), history_scope).mappings().all()
                     from app.ledger.snapshot_service import StockLedgerSnapshotService

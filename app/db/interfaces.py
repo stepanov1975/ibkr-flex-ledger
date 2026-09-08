@@ -910,6 +910,7 @@ class PositionLotUpsertRequest:
         remaining_quantity: Remaining lot quantity.
         open_price: Lot open price.
         cost_basis_open: Lot open cost basis.
+        cost_basis_remaining: Signed basis of the remaining shares.
         realized_pnl_to_date: Realized PnL associated with this lot.
         status: Lot status (`open` or `closed`).
     """
@@ -924,6 +925,7 @@ class PositionLotUpsertRequest:
     remaining_quantity: str
     open_price: str
     cost_basis_open: str
+    cost_basis_remaining: str
     realized_pnl_to_date: str
     status: str
 

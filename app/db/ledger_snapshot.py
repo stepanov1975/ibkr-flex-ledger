@@ -643,15 +643,16 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     text(
                         "INSERT INTO position_lot ("
                         "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, closed_at_utc, "
-                        "open_quantity, remaining_quantity, open_price, cost_basis_open, realized_pnl_to_date, status"
+                        "open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, realized_pnl_to_date, status"
                         ") VALUES ("
                         "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
                         "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                         "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
-                        "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), CAST(:cost_basis_open AS numeric), "
+                        "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), "
                         "CAST(:realized_pnl_to_date AS numeric), :status"
                         ") ON CONFLICT (position_lot_id) DO UPDATE SET "
                         "remaining_quantity = EXCLUDED.remaining_quantity, "
+                        "cost_basis_remaining = EXCLUDED.cost_basis_remaining, "
                         "closed_at_utc = EXCLUDED.closed_at_utc, "
                         "realized_pnl_to_date = EXCLUDED.realized_pnl_to_date, "
                         "status = EXCLUDED.status, "
@@ -715,6 +716,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 newer_rows = connection.execute(text(
                     "SELECT instrument_id FROM event_trade_fill WHERE account_id=:account_id AND report_date_local>:through_date "
                     "UNION SELECT instrument_id FROM event_corp_action WHERE account_id=:account_id AND report_date_local>:through_date "
+                    "AND NOT requires_manual AND reorg_code IN ('FORWARDSPLIT', 'REVERSESPLIT', 'STOCKDIV') "
                     "UNION SELECT instrument_id FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local>:through_date"
                 ), {"account_id": normalized_account_id, "through_date": through_date}).mappings().all()
                 newer_ids = {str(row["instrument_id"]) for row in newer_rows if row["instrument_id"] is not None}
@@ -729,16 +731,17 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         text(
                             "INSERT INTO position_lot ("
                             "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, "
-                            "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, "
+                            "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, "
                             "realized_pnl_to_date, status) VALUES ("
                             "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
                             "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                             "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
                             "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), "
-                            "CAST(:cost_basis_open AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
+                            "CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
                             "ON CONFLICT (position_lot_id) DO UPDATE SET "
                             "open_quantity = EXCLUDED.open_quantity, "
                             "remaining_quantity = EXCLUDED.remaining_quantity, "
+                            "cost_basis_remaining = EXCLUDED.cost_basis_remaining, "
                             "open_price = EXCLUDED.open_price, "
                             "cost_basis_open = EXCLUDED.cost_basis_open, "
                             "closed_at_utc = EXCLUDED.closed_at_utc, "
@@ -1016,6 +1019,10 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "cost_basis_open": self._db_ledger_validate_non_empty_text(
                 request.cost_basis_open,
                 "request.cost_basis_open",
+            ),
+            "cost_basis_remaining": self._db_ledger_validate_non_empty_text(
+                request.cost_basis_remaining,
+                "request.cost_basis_remaining",
             ),
             "realized_pnl_to_date": self._db_ledger_validate_non_empty_text(
                 request.realized_pnl_to_date,

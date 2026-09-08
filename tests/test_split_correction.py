@@ -59,6 +59,21 @@ def split_case(database, request):
             b'buySell="SELL" quantity="-1" tradePrice="200" currency="USD" '
             b'reportDate="20260820" dateTime="20260820;120200"',
         )
+    if getattr(request, "param", None) == "partial_tiny":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(b'type="FS"', b'type="RS"').replace(
+            b'buySell="BUY" quantity="2"', b'buySell="BUY" quantity="10"',
+        ).replace(b'ibCommission="1" commission="1"', b'ibCommission="0" commission="0"').replace(
+            b'position="3"', b'position="0.5"',
+        ).replace(b'costBasisMoney="201"', b'costBasisMoney="501"').replace(
+            b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="-446"',
+        ).replace(
+            b'</Trades>', b'<Trade transactionID="PARTIAL" ibExecID="PARTIAL" conid="900001" symbol="SEED" '
+            b'assetCategory="STK" buySell="SELL" quantity="5" tradePrice="100" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120100" ibCommission="0" fxRateToBase="1" />'
+            b'<Trade transactionID="TINY" ibExecID="TINY" conid="900001" symbol="SEED" '
+            b'assetCategory="STK" buySell="BUY" quantity="0.00000001" tradePrice="100000000" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120200" ibCommission="0" fxRateToBase="1" /></Trades>',
+        )
     if getattr(request, "param", None) == "flat":
         harness[1].payload_bytes = harness[1].payload_bytes.replace(b'position="3"', b'position="0"').replace(
             b'costBasisMoney="201"', b'costBasisMoney="0"',
@@ -750,8 +765,9 @@ def test_reassigned_split_rebuilds_both_instruments_when_restored(database, spli
         assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional OR calculation_provisional")) == 0
 
 
+@pytest.mark.parametrize("future_manual_action", [False, True])
 @pytest.mark.parametrize("previous_manual_case", [False, True])
-def test_changed_automatic_split_rebuilds_historical_realization(database, previous_manual_case):
+def test_changed_automatic_split_rebuilds_historical_realization(database, previous_manual_case, future_manual_action):
     harness = ingestion_tests._harness(database)
     automatic = _SEEDED_PAYLOAD.replace(
         b'reportDate="20260821" dateTime="20260821;120000"', b'reportDate="20260820" dateTime="20260820;120000"',
@@ -778,9 +794,16 @@ def test_changed_automatic_split_rebuilds_historical_realization(database, previ
     ).replace(b'reportDate="20260821" position="2"', b'reportDate="20260822" position="3"').replace(
         b'costBasisMoney="134"', b'costBasisMoney="150.75"',
     ).replace(b'fifoPnlUnrealized="86"', b'fifoPnlUnrealized="179.25"')
+    if future_manual_action:
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(
+            b'</CorporateActions>', b'<CorporateAction actionID="FUTURE" transactionID="FUTURE" conid="900001" '
+            b'symbol="SEED" type="SO" currency="USD" reportDate="20260901" description="Future spinoff" /></CorporateActions>',
+        )
     assert harness[0].job_execute("ingestion_run").status == "success"
     with database.connect() as c:
-        assert c.execute(text("SELECT realized_pnl, provisional FROM pnl_snapshot_daily ORDER BY report_date_local")).all() == [(Decimal("69.75"), True), (Decimal("69.75"), False)]
+        assert c.execute(text("SELECT realized_pnl, provisional FROM pnl_snapshot_daily ORDER BY report_date_local")).all() == [(Decimal("69.75"), True), (Decimal("69.75"), future_manual_action)]
+        assert c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'")) == 3
+        assert c.scalar(text("SELECT sum(cost_basis_remaining) FROM position_lot WHERE status='open'")) == Decimal("150.75")
 
 
 @pytest.mark.parametrize("split_case", ["flat"], indirect=True)
@@ -830,3 +853,71 @@ def test_identical_legacy_description_replay_rebuilds_newly_automatic_history(da
         assert c.execute(text("SELECT position_qty, cost_basis, unrealized_pnl, provisional FROM pnl_snapshot_daily")).one() == (3, 201, 129, False)
         assert c.scalar(text("SELECT remaining_quantity FROM position_lot WHERE status='open'")) == 3
     assert _state(database)["raw_record"] == raw_before
+
+
+@pytest.mark.parametrize("requested_status", ["open", "dismissed"])
+def test_legacy_status_endpoint_cannot_reopen_applied_correction(database, split_case, requested_status):
+    _, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}"
+    preview = client.post(base + "/split/preview", json=_RATIO).json()
+    assert client.post(base + "/split/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    before = _state(database)
+    response = client.patch(base, json={"status": requested_status, "resolution_note": "Change status"})
+    assert response.status_code == 400
+    assert "handled" in response.text.lower()
+    assert _state(database) == before
+
+
+@pytest.mark.parametrize("split_case", ["partial_tiny"], indirect=True)
+def test_partial_tiny_correction_persists_distinct_opening_and_remaining_basis(database, split_case):
+    _, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    ratio = {**_RATIO, "new_shares": "1", "old_shares": "10"}
+    before = _state(database)
+    preview = client.post(base + "/preview", json=ratio)
+    assert preview.status_code == 200, preview.text
+    result = preview.json()
+    assert _state(database) == before
+    assert len(result["lots_after"]) == 1
+    assert Decimal(result["lots_after"][0]["cost_basis_open"]) == 1001
+    assert Decimal(result["lots_after"][0]["unit_basis"]) == 1002
+    assert client.post(base + "/apply", json={**ratio, "preview_token": result["preview_token"]}).status_code == 200
+    with database.connect() as c:
+        assert c.execute(text("SELECT cost_basis_open, cost_basis_remaining FROM position_lot WHERE status='open'")).one() == (1001, 501)
+        assert c.scalar(text("SELECT cost_basis_remaining FROM position_lot WHERE status='closed'")) == 0
+        assert c.execute(text("SELECT cost_basis, unrealized_pnl, provisional FROM pnl_snapshot_daily")).one() == (501, -446, False)
+
+
+@pytest.mark.parametrize("opening_basis", [1000, -1000])
+@pytest.mark.parametrize("remaining", [5, 0])
+def test_remaining_basis_migration_backfills_existing_long_short_and_closed_lots(database, split_case, opening_basis, remaining):
+    from alembic import command
+    from alembic.config import Config
+    command.downgrade(Config("alembic.ini"), "20260908_09")
+    with database.begin() as c:
+        c.execute(text("UPDATE position_lot SET open_quantity=10, remaining_quantity=:remaining, cost_basis_open=:basis, status=:status"),
+                  {"remaining": remaining, "basis": opening_basis, "status": "open" if remaining else "closed"})
+        before = c.scalar(text("SELECT to_jsonb(l) FROM position_lot l"))
+    command.upgrade(Config("alembic.ini"), "head")
+    with database.connect() as c:
+        after = c.scalar(text("SELECT to_jsonb(l) FROM position_lot l"))
+        assert after.pop("cost_basis_remaining") == opening_basis * remaining / 10
+        assert after == before
+
+
+
+def test_future_manual_action_does_not_block_earlier_split_correction(database, split_case):
+    harness, case, client = split_case
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'</CorporateActions>', b'<CorporateAction actionID="FUTURE" transactionID="FUTURE" conid="900001" '
+        b'symbol="SEED" type="SO" currency="USD" reportDate="20260901" description="Future spinoff" /></CorporateActions>',
+    )
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO)
+    assert preview.status_code == 200, preview.text
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview.json()["preview_token"]}).status_code == 200
+    with database.connect() as c:
+        assert c.scalar(text("SELECT remaining_quantity FROM position_lot WHERE status='open'")) == 3
+        assert c.scalar(text("SELECT calculation_provisional FROM pnl_snapshot_daily")) is False
+        assert c.scalar(text("SELECT count(*) FROM event_corp_action WHERE requires_manual")) == 1

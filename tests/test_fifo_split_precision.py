@@ -88,3 +88,34 @@ def test_zero_remaining_allocation_does_not_move_completed_lot_realizations():
     assert after.closed_lots[0].realized_pnl_to_date == before.open_lots[0].realized_pnl_to_date
     assert after.closed_lots[0].remaining_quantity == 0
     assert after.closed_lots[0].closed_report_date_local == date(2026, 8, 21)
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+@pytest.mark.parametrize("fees", [Decimal("0"), Decimal("0.25")])
+def test_tiny_transfer_preserves_partial_survivor_opening_and_remaining_basis(side, fees):
+    closing_side = "SELL" if side == "BUY" else "BUY"
+    trades = [replace(trade, fees=fees) for trade in (
+        _trade(0, "10", "100", side),
+        _trade(1, "5", "100", closing_side),
+        _trade(2, "0.00000001", "100000000", side),
+    )]
+    before = fifo_compute_instrument(_request(trades))
+    survivor, donor = before.open_lots
+    opening_basis = survivor.cost_basis_open + donor.cost_basis_open
+    remaining_basis = survivor.cost_basis_open / 2 + donor.cost_basis_open
+    splits = (FifoSplitInput(date(2026, 8, 21), Decimal("0.1")), FifoSplitInput(date(2026, 8, 22), Decimal("0.5")))
+    result = fifo_compute_instrument(_request(trades, splits))
+    assert result.open_lots[0].cost_basis_open == opening_basis
+    assert result.open_lots[0].cost_basis_remaining == remaining_basis
+    assert result.closed_lots[0].cost_basis_remaining == 0
+    assert abs(result.position_quantity) == Decimal("0.25")
+    close_half = replace(_trade(3, "0.125", "2000", closing_side, report_day=22, execution_day=22), fees=fees)
+    partial = fifo_compute_instrument(_request([*trades, close_half], splits))
+    assert partial.open_lots[0].cost_basis_open == opening_basis
+    assert partial.open_lots[0].cost_basis_remaining == remaining_basis / 2
+    close_rest = replace(close_half, source_raw_record_id="4", trade_timestamp_utc="2026-08-22T12:00:04+00:00")
+    closed = fifo_compute_instrument(_request([*trades, close_half, close_rest], splits))
+    assert closed.open_lots == ()
+    assert all(lot.cost_basis_remaining == 0 for lot in closed.closed_lots)
+    proceeds = Decimal("500") if side == "BUY" else Decimal("-500")
+    assert closed.realized_pnl == before.realized_pnl + proceeds - remaining_basis - fees * 2

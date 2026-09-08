@@ -416,6 +416,7 @@ def _position_lot_request(instrument_id: str) -> PositionLotUpsertRequest:
         remaining_quantity="1",
         open_price="100",
         cost_basis_open="100",
+        cost_basis_remaining="100",
         realized_pnl_to_date="0",
         status="open",
     )

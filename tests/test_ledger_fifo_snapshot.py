@@ -328,7 +328,7 @@ def test_splits_preserve_partial_close_basis_for_long_and_short_lots():
         lot = result.open_lots[0]
         assert result.realized_pnl == Decimal(expected_realized)
         assert abs(result.position_quantity) == Decimal("0.66666667")
-        basis = lot.cost_basis_open / lot.open_quantity * lot.remaining_quantity
+        basis = lot.cost_basis_remaining
         expected_basis = Decimal("202" if opening_side == "BUY" else "-198")
         assert basis.quantize(Decimal("0.00000001")) == expected_basis
         # Closing the surviving split-adjusted lot realizes all remaining basis.

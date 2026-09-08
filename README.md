@@ -542,12 +542,16 @@ automatically during ingestion, along with supported structured ratios. Fraction
 adjusted share quantities use the database's eight-decimal share precision. Lots
 eliminated by split rounding retain their realized gains and close on the action's
 business date. Fully traded lots retain their execution closing time and corrected
-quantity, basis, and realized P&L including closing fees. Reconciliation removes
+quantity, basis, and realized P&L including closing fees. Opening and remaining
+basis are stored separately so tiny-lot transfers into partially sold lots do not
+inflate historical basis; migration `20260908_10` backfills existing remaining basis. Reconciliation removes
 derived lots that no longer represent an opening fill in the corrected FIFO history.
 Revisions to automatic splits also invalidate and rebuild historical calculations.
 Instrument reassignment rebuilds both the previous and current instruments.
 Older-period replay preserves newer lot projections; restoring a saved correction
-rebuilds both affected history and its latest eligible lot projection.
+rebuilds both affected history and its latest eligible lot projection. Future
+manual actions do not block earlier snapshot or lot rebuilds. The legacy status
+endpoint rejects status changes on handled actions while allowing metadata edits.
 Migration `20260908_09` backfills approval dates and moves incompatible
 legacy automatic splits into manual review.
 

@@ -533,6 +533,7 @@ class StockLedgerSnapshotService:
                         remaining_quantity=str(abs(open_lot.remaining_quantity)),
                         open_price=str(open_lot.open_price),
                         cost_basis_open=str(open_lot.cost_basis_open),
+                        cost_basis_remaining=str(open_lot.cost_basis_remaining),
                         realized_pnl_to_date=str(open_lot.realized_pnl_to_date),
                         status="open" if open_lot.remaining_quantity else "closed",
                     )
@@ -785,9 +786,7 @@ class StockLedgerSnapshotService:
 
         open_cost_basis = sum(
             (
-                (lot.cost_basis_open / lot.open_quantity) * lot.remaining_quantity
-                for lot in open_lots
-                if lot.open_quantity != Decimal("0")
+                lot.cost_basis_remaining for lot in open_lots
             ),
             Decimal("0"),
         )

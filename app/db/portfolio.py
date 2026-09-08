@@ -301,6 +301,15 @@ class SQLAlchemyPortfolioService:
             raise ValueError("resolution_note is required when closing a case")
         try:
             with self._engine.begin() as connection:
+                existing = connection.execute(text(
+                    "SELECT c.status, e.requires_manual FROM corporate_action_manual_case c "
+                    "JOIN event_corp_action e USING(event_corp_action_id) "
+                    "WHERE c.case_id=:case_id FOR UPDATE OF c, e"
+                ), {"case_id": case_id}).mappings().one_or_none()
+                if existing is None:
+                    return None
+                if not existing["requires_manual"] and status != existing["status"]:
+                    raise ValueError("Handled actions cannot change review status. Changed broker data reopens actions that need review.")
                 row = connection.execute(
                     text(
                         "UPDATE corporate_action_manual_case SET status=:status, owner=:owner, "
