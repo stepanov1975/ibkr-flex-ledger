@@ -309,7 +309,6 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> Non
         else:
             recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
             recipient.open_price += lot.open_price * lot.remaining_quantity / recipient.remaining_quantity
-            recipient.realized_pnl_to_date += lot.realized_pnl_to_date
     open_lots[:] = [lot for lot, quantity in survivors]
     for lot, remaining_quantity in survivors:
         # Use the allocated quantity to retain this lot's unconsumed cost and

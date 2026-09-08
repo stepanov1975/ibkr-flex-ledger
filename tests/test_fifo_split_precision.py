@@ -69,3 +69,19 @@ def test_execution_order_is_preserved_within_each_split_interval(split_day):
     after = fifo_compute_instrument(_request(trades, (FifoSplitInput(date(2026, 8, split_day), Decimal("2")),)))
     assert before.realized_pnl == 198
     assert after.realized_pnl == before.realized_pnl
+
+
+def test_zero_remaining_allocation_does_not_move_completed_lot_realizations():
+    trades = [
+        _trade(0, "1.00000001", "100"),
+        _trade(1, "100", "100"),
+        _trade(2, "1", "200", "SELL"),
+    ]
+    before = fifo_compute_instrument(_request(trades))
+    assert before.open_lots[0].realized_pnl_to_date > 0
+    assert before.open_lots[1].realized_pnl_to_date == 0
+    after = fifo_compute_instrument(_request(trades, (FifoSplitInput(date(2026, 8, 21), Decimal("0.1")),)))
+    assert after.realized_pnl == before.realized_pnl
+    assert len(after.open_lots) == 1
+    assert after.open_lots[0].open_event_trade_fill_id == before.open_lots[1].open_event_trade_fill_id
+    assert after.open_lots[0].realized_pnl_to_date == 0

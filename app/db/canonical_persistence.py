@@ -588,6 +588,23 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     )
 
                 if corp_action_requests_with_action_id:
+                    # Compare before replacing canonical provenance. A changed
+                    # corrected action makes historical calculations stale even
+                    # when the replacement can be handled automatically.
+                    connection.execute(text(
+                        "UPDATE pnl_snapshot_daily p SET calculation_provisional=true, provisional=true "
+                        "FROM event_corp_action e, corporate_action_manual_case c, raw_record previous, raw_record incoming "
+                        "WHERE e.account_id=:account_id AND e.action_id=:action_id "
+                        "AND c.event_corp_action_id=e.event_corp_action_id AND c.split_factor IS NOT NULL "
+                        "AND previous.raw_record_id=e.source_raw_record_id "
+                        "AND incoming.raw_record_id=CAST(:source_raw_record_id AS uuid) "
+                        "AND (previous.source_payload<>incoming.source_payload "
+                        "OR e.report_date_local<>CAST(:report_date_local AS date) "
+                        "OR e.instrument_id IS DISTINCT FROM COALESCE(CAST(:instrument_id AS uuid), e.instrument_id)) "
+                        "AND p.account_id=e.account_id "
+                        "AND (p.instrument_id=e.instrument_id OR p.instrument_id=CAST(:instrument_id AS uuid)) "
+                        "AND p.report_date_local>=LEAST(e.report_date_local, CAST(:report_date_local AS date))"
+                    ), corp_action_requests_with_action_id)
                     connection.execute(
                         text(
                             "INSERT INTO event_corp_action ("

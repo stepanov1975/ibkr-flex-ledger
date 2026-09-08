@@ -93,6 +93,7 @@ class SQLAlchemySplitCorrectionService:
                         functional_currency=snapshot["currency"],
                         affected_conids=frozenset({case["conid"]}),
                         affected_currencies=frozenset(),
+                        reconcile_position_lots=snapshot["report_date_local"] == before[-1]["report_date_local"],
                     )
                 # A manual case previously marked every date for this instrument
                 # provisional. Clear that cause on earlier dates without changing

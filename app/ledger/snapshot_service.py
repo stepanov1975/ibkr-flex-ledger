@@ -76,6 +76,7 @@ class StockLedgerSnapshotService:
         functional_currency: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
+        reconcile_position_lots: bool = True,
     ) -> SnapshotBuildResult:
         """Build and persist day-level snapshots for one account context.
 
@@ -84,6 +85,8 @@ class StockLedgerSnapshotService:
             ingestion_run_id: Optional ingestion run identifier.
             report_date_local: Flex statement business date in YYYY-MM-DD format.
             functional_currency: Explicit functional/base currency code.
+            reconcile_position_lots: Update the current lot projection; defer until
+                the final date when replaying historical snapshots in one transaction.
 
         Returns:
             SnapshotBuildResult: Persistence summary for this snapshot build run.
@@ -546,18 +549,19 @@ class StockLedgerSnapshotService:
                 for request in snapshot_requests
                 if request.instrument_id in selected_instrument_ids
             ]
-        self._repository.db_position_lot_reconcile_open(
-            account_id=normalized_account_id,
-            closed_at_utc=closed_at_utc,
-            requests=position_lot_requests,
-            instrument_ids=instrument_ids,
-        )
+        if reconcile_position_lots:
+            self._repository.db_position_lot_reconcile_open(
+                account_id=normalized_account_id,
+                closed_at_utc=closed_at_utc,
+                requests=position_lot_requests,
+                instrument_ids=instrument_ids,
+            )
         self._repository.db_pnl_snapshot_daily_upsert_many(snapshot_requests)
 
         return SnapshotBuildResult(
             report_date_local=normalized_report_date,
             snapshot_row_count=len(snapshot_requests),
-            position_lot_row_count=len(position_lot_requests),
+            position_lot_row_count=len(position_lot_requests) if reconcile_position_lots else 0,
             missing_solid_valuation_count=missing_solid_valuation_count,
             broker_position_match_count=broker_position_match_count,
             broker_position_mismatch_count=broker_position_mismatch_count,
