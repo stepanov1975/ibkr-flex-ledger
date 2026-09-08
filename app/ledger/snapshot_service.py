@@ -18,6 +18,7 @@ from app.db import (
     PositionLotUpsertRequest,
 )
 
+from .snapshot_dates import snapshot_report_date_start_utc
 from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoSplitInput, FifoTradeFillInput, fifo_compute_instrument
 
 
@@ -511,7 +512,7 @@ class StockLedgerSnapshotService:
             if missing_valuation:
                 missing_solid_valuation_count += 1
 
-            for open_lot in fifo_result.open_lots:
+            for open_lot in (*fifo_result.open_lots, *fifo_result.split_closed_lots):
                 position_lot_requests.append(
                     PositionLotUpsertRequest(
                         position_lot_id=self._build_position_lot_id(
@@ -523,13 +524,13 @@ class StockLedgerSnapshotService:
                         instrument_id=instrument_id,
                         open_event_trade_fill_id=open_lot.open_event_trade_fill_id,
                         opened_at_utc=datetime.fromisoformat(open_lot.opened_at_utc),
-                        closed_at_utc=None,
+                        closed_at_utc=None if open_lot.closed_report_date_local is None else snapshot_report_date_start_utc(open_lot.closed_report_date_local),
                         open_quantity=str(abs(open_lot.open_quantity)),
                         remaining_quantity=str(abs(open_lot.remaining_quantity)),
                         open_price=str(open_lot.open_price),
                         cost_basis_open=str(open_lot.cost_basis_open),
                         realized_pnl_to_date=str(open_lot.realized_pnl_to_date),
-                        status="open",
+                        status="open" if open_lot.closed_report_date_local is None else "closed",
                     )
                 )
 

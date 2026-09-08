@@ -571,6 +571,9 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement = (
             "SELECT event.instrument_id, event.report_date_local, event.reorg_code AS action_type, "
             "raw.source_payload, CASE WHEN raw.source_payload = correction_raw.source_payload "
+            "AND manual_case.resolution_report_date_local=event.report_date_local "
+            "AND manual_case.instrument_id=event.instrument_id AND manual_case.action_type=event.reorg_code "
+            "AND correction_raw.source_payload->>'conid'=event.conid AND event.action_id IS NOT NULL "
             "THEN manual_case.split_factor END AS manual_factor "
             "FROM event_corp_action event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
             "LEFT JOIN corporate_action_manual_case manual_case USING (event_corp_action_id) "

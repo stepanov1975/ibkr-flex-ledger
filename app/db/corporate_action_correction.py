@@ -75,9 +75,9 @@ class SQLAlchemySplitCorrectionService:
                 lots_before = self._lots(connection, params)
                 connection.execute(text(
                     "UPDATE corporate_action_manual_case SET split_factor=:factor, "
-                    "resolution_source_raw_record_id=:source_id, status='resolved', resolution_note=:note, "
+                    "resolution_source_raw_record_id=:source_id, resolution_report_date_local=:start_date, action_type=:action_type, status='resolved', resolution_note=:note, "
                     "resolved_at_utc=now(), updated_at_utc=now() WHERE case_id=:case_id"
-                ), {**params, "factor": factor, "source_id": case["source_raw_record_id"], "note": note.strip()})
+                ), {**params, "factor": factor, "source_id": case["source_raw_record_id"], "action_type": case["reorg_code"], "note": note.strip()})
                 connection.execute(text(
                     "UPDATE event_corp_action SET requires_manual=false, provisional=false "
                     "WHERE event_corp_action_id=:event_id"

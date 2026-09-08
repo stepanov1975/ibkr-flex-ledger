@@ -641,6 +641,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         "AND original.raw_record_id=c.resolution_source_raw_record_id "
                         "AND current.raw_record_id=e.source_raw_record_id "
                         "AND original.source_payload=current.source_payload "
+                        "AND c.resolution_report_date_local=e.report_date_local AND c.instrument_id=e.instrument_id "
+                        "AND c.action_type=e.reorg_code AND original.source_payload->>'conid'=e.conid "
                         "AND e.action_id IS NOT NULL AND e.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
                         "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
                     ), correction_scope)
@@ -649,7 +651,10 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         "FROM event_corp_action e, raw_record original, raw_record current "
                         "WHERE c.event_corp_action_id=e.event_corp_action_id AND e.requires_manual "
                         "AND c.status<>'open' AND original.raw_record_id=c.resolution_source_raw_record_id "
-                        "AND current.raw_record_id=e.source_raw_record_id AND original.source_payload<>current.source_payload "
+                        "AND current.raw_record_id=e.source_raw_record_id AND (original.source_payload<>current.source_payload "
+                        "OR c.resolution_report_date_local IS DISTINCT FROM e.report_date_local "
+                        "OR c.instrument_id IS DISTINCT FROM e.instrument_id OR c.action_type<>e.reorg_code "
+                        "OR original.source_payload->>'conid' IS DISTINCT FROM e.conid) "
                         "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
                     ), correction_scope)
                     connection.execute(text(

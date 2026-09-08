@@ -73,17 +73,19 @@ class FifoLedgerComputationResult:
         realized_pnl: Realized PnL including trade fee/withholding impacts.
         unrealized_pnl: Unrealized PnL on open lots at mark price.
         open_lots: Open-lot details for persistence.
+        split_closed_lots: Lots eliminated by split rounding, with their action dates.
     """
 
     position_quantity: Decimal
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     open_lots: tuple["FifoOpenLotResult", ...]
+    split_closed_lots: tuple["FifoOpenLotResult", ...] = ()
 
 
 @dataclass(frozen=True)
 class FifoOpenLotResult:
-    """Open-lot details produced by FIFO computation for persistence layers.
+    """Lot details produced by FIFO computation for persistence layers.
 
     Attributes:
         open_event_trade_fill_id: Opening trade-fill identifier.
@@ -94,6 +96,7 @@ class FifoOpenLotResult:
         open_price: Opening trade price.
         cost_basis_open: Opening lot cost basis.
         realized_pnl_to_date: Realized PnL posted to this lot.
+        closed_report_date_local: Action date if split rounding eliminated the remainder.
     """
 
     open_event_trade_fill_id: str
@@ -104,6 +107,7 @@ class FifoOpenLotResult:
     open_price: Decimal
     cost_basis_open: Decimal
     realized_pnl_to_date: Decimal
+    closed_report_date_local: date | None = None
 
 
 @dataclass
@@ -173,10 +177,11 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
     open_lots: list[_OpenFifoLot] = []
     realized_pnl = Decimal("0")
     split_index = 0
+    split_closed_lots: list[FifoOpenLotResult] = []
 
     for trade in sorted_trades:
         while split_index < len(splits) and splits[split_index].report_date_local <= (trade.report_date_local or date.min):
-            _fifo_split_open_lots(open_lots, splits[split_index].adjustment_factor)
+            split_closed_lots.extend(_fifo_split_open_lots(open_lots, splits[split_index]))
             split_index += 1
         side = trade.side.strip().upper()
         quantity = abs(trade.quantity)
@@ -248,7 +253,7 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
             )
 
     for split in splits[split_index:]:
-        _fifo_split_open_lots(open_lots, split.adjustment_factor)
+        split_closed_lots.extend(_fifo_split_open_lots(open_lots, split))
 
     open_quantity = sum(
         ((lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity) for lot in open_lots),
@@ -267,32 +272,35 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         position_quantity=open_quantity,
         realized_pnl=realized_pnl,
         unrealized_pnl=unrealized_pnl,
-        open_lots=tuple(
-            FifoOpenLotResult(
-                open_event_trade_fill_id=lot.open_event_trade_fill_id,
-                source_raw_record_id=lot.source_raw_record_id,
-                opened_at_utc=lot.opened_at_utc,
-                open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
-                remaining_quantity=lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity,
-                open_price=lot.open_price,
-                cost_basis_open=lot.cost_basis_open,
-                realized_pnl_to_date=lot.realized_pnl_to_date,
-            )
-            for lot in open_lots
-        ),
+        open_lots=tuple(_fifo_lot_result(lot) for lot in open_lots),
+        split_closed_lots=tuple(split_closed_lots),
     )
 
 
-def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> None:
+def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None) -> FifoOpenLotResult:
+    return FifoOpenLotResult(
+        open_event_trade_fill_id=lot.open_event_trade_fill_id,
+        source_raw_record_id=lot.source_raw_record_id,
+        opened_at_utc=lot.opened_at_utc,
+        open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
+        remaining_quantity=Decimal("0") if closed_date else (lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity),
+        open_price=lot.open_price,
+        cost_basis_open=lot.cost_basis_open,
+        realized_pnl_to_date=lot.realized_pnl_to_date,
+        closed_report_date_local=closed_date,
+    )
+
+
+def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) -> list[FifoOpenLotResult]:
     """Allocate share rounding across surviving FIFO lots, preserving their basis."""
     if not open_lots:
-        return
+        return []
     adjusted_quantity = Decimal("0")
     rounded_quantity = Decimal("0")
     precision = Decimal("0.00000001")
     allocations = []
     for lot in open_lots:
-        adjusted_quantity += lot.remaining_quantity * factor
+        adjusted_quantity += lot.remaining_quantity * split.adjustment_factor
         next_quantity = adjusted_quantity.quantize(precision)
         remaining_quantity = next_quantity - rounded_quantity
         allocations.append((lot, remaining_quantity))
@@ -300,6 +308,7 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> Non
     survivors = [(lot, quantity) for lot, quantity in allocations if quantity > 0]
     if not survivors:
         raise ValueError("split creates a position below the supported eight-decimal share precision")
+    closed_lots = [_fifo_lot_result(lot, split.report_date_local) for lot, quantity in allocations if quantity == 0]
     # A zero-share allocation must not discard its cost. Carry it into the
     # next surviving FIFO lot, or the last survivor for trailing fractions.
     recipient = survivors[-1][0]
@@ -319,6 +328,7 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> Non
         lot.open_quantity = (lot.open_quantity * lot_factor).quantize(precision)
         lot.remaining_quantity = remaining_quantity
         lot.cost_basis_open = lot.unit_basis * lot.open_quantity * (1 if lot.direction == "long" else -1)
+    return closed_lots
 
 
 def _fifo_parse_timestamp_utc(timestamp_value: str) -> datetime:

@@ -1,6 +1,7 @@
 """Atomic split preview/application using real PostgreSQL and FIFO accounting."""
 
 from decimal import Decimal
+import json
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -57,6 +58,18 @@ def split_case(database, request):
             b'reportDate="20260820" dateTime="20260820;120200"',
             b'buySell="SELL" quantity="-1" tradePrice="200" currency="USD" '
             b'reportDate="20260820" dateTime="20260820;120200"',
+        )
+    if getattr(request, "param", None) == "inferred_date":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(
+            b'type="FS" currency="USD" reportDate="20260821"', b'type="FS" currency="USD"',
+        )
+    if getattr(request, "param", None) == "tiny_lot":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(b'type="FS"', b'type="RS"').replace(
+            b'buySell="BUY" quantity="2"', b'buySell="BUY" quantity="0.00000001"',
+        ).replace(b'position="3"', b'position="10"').replace(
+            b'</Trades>', b'<Trade transactionID="BUY2" ibExecID="BUY2" conid="900001" symbol="SEED" '
+            b'assetCategory="STK" buySell="BUY" quantity="100" tradePrice="100" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120100" ibCommission="0" fxRateToBase="1" /></Trades>',
         )
     assert harness[0].job_execute("ingestion_run").status == "success"
     case = SQLAlchemyPortfolioService(database).db_manual_case_list("open")[0]
@@ -413,3 +426,130 @@ def test_later_source_invalidation_marks_historical_snapshots_uncertain(database
     SQLAlchemyPortfolioService(database).db_manual_case_update(case.case_id, "resolved", None, "Investigating")
     with database.connect() as c:
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-21'")) is True
+
+
+@pytest.mark.parametrize("split_case", ["inferred_date"], indirect=True)
+def test_identical_payload_with_new_inferred_date_requires_another_review(database, split_case):
+    harness, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(b'reportDate="20260821" position="3"', b'reportDate="20260822" position="3"')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    # Incremental ingestion skips an identical row; full replay must still
+    # bind the correction when that row is mapped in its new statement context.
+    with database.connect() as c:
+        period = c.scalar(text("SELECT period_key FROM raw_artifact ORDER BY created_at_utc DESC LIMIT 1"))
+    assert ingestion_tests._replay(harness, period).status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is True
+        assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "open"
+    assert client.get("/corporate-actions/cases").json()["items"][0]["can_correct_split"] is True
+
+
+@pytest.mark.parametrize("split_case", ["tiny_lot"], indirect=True)
+def test_lot_eliminated_by_split_closes_on_action_business_date(database, split_case):
+    from app.ledger.snapshot_dates import snapshot_resolve_report_date_local
+    _, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    ratio = {**_RATIO, "new_shares": "1", "old_shares": "10"}
+    preview = client.post(base + "/preview", json=ratio)
+    assert preview.status_code == 200, preview.text
+    applied = client.post(base + "/apply", json={**ratio, "preview_token": preview.json()["preview_token"]})
+    assert applied.status_code == 200, applied.text
+    with database.connect() as c:
+        closed = c.execute(text("SELECT opened_at_utc, closed_at_utc FROM position_lot WHERE status='closed'")).one()
+        assert closed.closed_at_utc >= closed.opened_at_utc
+        assert snapshot_resolve_report_date_local(closed.closed_at_utc.isoformat()) == "2026-08-21"
+
+
+@pytest.mark.parametrize("payload,manual", [
+    ({"ratio": "0.1"}, True), ({"ratio": "1.5"}, False),
+    ({"newQuantity": "1", "oldQuantity": "10"}, True),
+    ({"newQuantity": "3", "oldQuantity": "2"}, False),
+    ({"description": "SPLIT 1 FOR 10 (SEED)"}, True),
+    ({"description": "SPLIT 3 FOR 2 (SEED)"}, False),
+    ({"ratio": "NaN"}, True),
+    ({"newQuantity": "1.0000000000000000000000000001", "oldQuantity": "1"}, True),
+    ({"newQuantity": "1.0000000000000000000000000005", "oldQuantity": "1"}, True),
+    ({"newQuantity": "10000000000000000000000001", "oldQuantity": "10000000000000000000000000"}, False),
+])
+def test_upgrade_reclassifies_only_incompatible_legacy_splits(database, split_case, payload, manual):
+    from alembic import command
+    from alembic.config import Config
+    harness, _, _ = split_case
+    command.downgrade(Config("alembic.ini"), "20260908_08")
+    with database.begin() as c:
+        c.execute(text("UPDATE raw_record SET source_payload=source_payload || CAST(:payload AS jsonb) WHERE section_name='CorporateActions'"), {"payload": json.dumps(payload)})
+        c.execute(text("UPDATE event_corp_action SET requires_manual=false, provisional=false"))
+        c.execute(text("DELETE FROM corporate_action_manual_case"))
+        c.execute(text("UPDATE pnl_snapshot_daily SET calculation_provisional=false, provisional=false"))
+    command.upgrade(Config("alembic.ini"), "head")
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is manual
+        assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == ("open" if manual else None)
+        assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is manual
+    harness[1].payload_bytes = _SEEDED_PAYLOAD.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    )
+    assert harness[0].job_execute("ingestion_run").status == "success"
+
+
+@pytest.mark.parametrize("split_case", ["inferred_date"], indirect=True)
+@pytest.mark.parametrize("moved", [False, True])
+def test_upgrade_backfills_original_approved_date_and_reopens_stale_corrections(database, split_case, moved):
+    from alembic import command
+    from alembic.config import Config
+    from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
+    _, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    command.downgrade(Config("alembic.ini"), "20260908_08")
+    if moved:
+        with database.begin() as c:
+            c.execute(text("UPDATE event_corp_action SET report_date_local='2026-08-22'"))
+    command.upgrade(Config("alembic.ini"), "head")
+    with database.connect() as c:
+        assert str(c.scalar(text("SELECT resolution_report_date_local FROM corporate_action_manual_case"))) == "2026-08-21"
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is moved
+        assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == ("open" if moved else "resolved")
+        assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is moved
+    actions = SQLAlchemyLedgerSnapshotService(database).db_ledger_corporate_action_list_for_account("INTEGRITY", "2026-08-22")
+    assert len(actions) == (0 if moved else 1)
+    if actions:
+        assert Decimal(actions[0].adjustment_factor) == Decimal("1.5")
+
+
+def test_upgrade_preserves_unchanged_acknowledged_manual_case(database, split_case):
+    from alembic import command
+    from alembic.config import Config
+    _, case, _ = split_case
+    SQLAlchemyPortfolioService(database).db_manual_case_update(case.case_id, "resolved", None, "Investigating")
+    command.downgrade(Config("alembic.ini"), "20260908_08")
+    before = _state(database)
+    command.upgrade(Config("alembic.ini"), "head")
+    with database.connect() as c:
+        assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "resolved"
+        assert c.scalar(text("SELECT resolution_note FROM corporate_action_manual_case")) == "Investigating"
+    assert _state(database)["pnl_snapshot_daily"] == before["pnl_snapshot_daily"]
+
+
+@pytest.mark.parametrize("source_date,expected", [("21-OCT-26", "2026-10-21"), ("21-OCT-26;120000", "2026-10-21"), ("02-JAN-69", "1969-01-02")])
+def test_upgrade_preserves_approval_with_uppercase_month_date(database, split_case, source_date, expected):
+    from alembic import command
+    from alembic.config import Config
+    _, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    command.downgrade(Config("alembic.ini"), "20260908_08")
+    with database.begin() as c:
+        c.execute(text("UPDATE raw_record SET source_payload=jsonb_set(source_payload, '{reportDate}', CAST(:source_date AS jsonb)) WHERE section_name='CorporateActions'"), {"source_date": json.dumps(source_date)})
+        c.execute(text("UPDATE event_corp_action SET report_date_local=:expected"), {"expected": expected})
+    command.upgrade(Config("alembic.ini"), "head")
+    with database.connect() as c:
+        assert str(c.scalar(text("SELECT resolution_report_date_local FROM corporate_action_manual_case"))) == expected
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False

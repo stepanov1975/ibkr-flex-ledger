@@ -532,11 +532,14 @@ lots and snapshots, including realized P&L after subsequent sales. Earlier snaps
 retain their amounts while their manual-review flags are refreshed. A failed rebuild
 rolls back the whole correction; ingestion and corrections cannot run concurrently.
 
-Corrections retain a link to the immutable broker source. Identical replay preserves
-the factor; changed source data invalidates it and returns unresolved accounting to
+Corrections retain the immutable broker source, approved action date, and security
+identity. Identical replay preserves the factor; changed source data or context invalidates it and returns unresolved accounting to
 the queue. Explicit broker descriptions such as `SPLIT 3 FOR 2 (...)` are handled
 automatically during ingestion, along with supported structured ratios. Fractional
-adjusted share quantities use the database's eight-decimal share precision.
+adjusted share quantities use the database's eight-decimal share precision. Lots
+eliminated by split rounding retain their realized gains and close on the action's
+business date. Migration `20260908_09` backfills approval dates and moves incompatible
+legacy automatic splits into manual review.
 
 Spinoffs, identifier changes, cash matching and other unsupported treatments display
 **Accounting support required**, with no completion button. The queue includes these

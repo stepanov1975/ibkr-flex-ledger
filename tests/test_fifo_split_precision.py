@@ -85,3 +85,6 @@ def test_zero_remaining_allocation_does_not_move_completed_lot_realizations():
     assert len(after.open_lots) == 1
     assert after.open_lots[0].open_event_trade_fill_id == before.open_lots[1].open_event_trade_fill_id
     assert after.open_lots[0].realized_pnl_to_date == 0
+    assert after.split_closed_lots[0].realized_pnl_to_date == before.open_lots[0].realized_pnl_to_date
+    assert after.split_closed_lots[0].remaining_quantity == 0
+    assert after.split_closed_lots[0].closed_report_date_local == date(2026, 8, 21)
