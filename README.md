@@ -534,11 +534,17 @@ rolls back the whole correction; ingestion and corrections cannot run concurrent
 
 Corrections retain the immutable broker source, approved action date, and security
 identity. Identical replay preserves the factor; changed source data or context invalidates it and returns unresolved accounting to
-the queue. Explicit broker descriptions such as `SPLIT 3 FOR 2 (...)` are handled
+the queue. Restoring the approved source rebuilds invalidated historical snapshots
+before reactivating the correction. Explicit broker descriptions such as `SPLIT 3 FOR 2 (...)` are handled
 automatically during ingestion, along with supported structured ratios. Fractional
 adjusted share quantities use the database's eight-decimal share precision. Lots
 eliminated by split rounding retain their realized gains and close on the action's
-business date. Migration `20260908_09` backfills approval dates and moves incompatible
+business date. Fully traded lots retain their execution closing time and corrected
+quantity, basis, and realized P&L including closing fees. Reconciliation removes
+derived lots that no longer represent an opening fill in the corrected FIFO history.
+Older-period replay preserves newer lot projections; restoring a saved correction
+rebuilds both affected history and its latest eligible lot projection.
+Migration `20260908_09` backfills approval dates and moves incompatible
 legacy automatic splits into manual review.
 
 Spinoffs, identifier changes, cash matching and other unsupported treatments display

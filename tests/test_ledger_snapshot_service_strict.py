@@ -163,18 +163,20 @@ class _RepositoryStub:
         """Capture position-lot upsert payload for assertions."""
         self.position_requests.requests = requests
 
-    def db_position_lot_reconcile_open(
+    def db_position_lot_reconcile(
         self,
         account_id: str,
-        closed_at_utc: datetime,
+        through_report_date_local: str,
         requests: list[PositionLotUpsertRequest],
         instrument_ids: tuple[str, ...] | None = None,
-    ) -> None:
-        """Capture the reconciled open-lot projection."""
-        _ = (account_id, closed_at_utc)
+    ) -> int:
+        """Capture the reconciled lot history."""
+        _ = (account_id, through_report_date_local)
         self.reconciled_instrument_ids = instrument_ids
         self.reconcile_call_count += 1
         self.position_requests.requests = requests
+
+        return len(requests)
 
     def db_pnl_snapshot_daily_upsert_many(
         self,
@@ -528,7 +530,9 @@ def test_snapshot_reconciles_empty_open_lot_projection_after_full_close() -> Non
     )
 
     assert repository.reconcile_call_count == 1
-    assert repository.position_requests.requests == []
+    assert len(repository.position_requests.requests) == 1
+    assert repository.position_requests.requests[0].status == "closed"
+    assert repository.position_requests.requests[0].remaining_quantity == "0"
 
 
 def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
@@ -1098,7 +1102,9 @@ def test_snapshot_option_fifo_applies_execution_multiplier_to_realized_pnl() -> 
 
     snapshot = repository.snapshot_requests.requests[0]
     assert snapshot.realized_pnl == "120.00"
-    assert repository.position_requests.requests == []
+    assert len(repository.position_requests.requests) == 1
+    assert repository.position_requests.requests[0].status == "closed"
+    assert repository.position_requests.requests[0].remaining_quantity == "0"
 
 
 def test_snapshot_option_close_mark_applies_execution_multiplier() -> None:

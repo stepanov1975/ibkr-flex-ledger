@@ -21,6 +21,7 @@ from app.db.interfaces import (
     RawRecordForCanonicalMapping,
     RawRecordReadRepositoryPort,
 )
+from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
 class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, RawRecordReadRepositoryPort):
@@ -685,6 +686,39 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "AND event.manual_case_id IS DISTINCT FROM manual_case.case_id"
                         )
                     )
+                    # A restored correction may reactivate after later statements
+                    # invalidated its historical snapshots. Recompute those dates
+                    # in this transaction. The lot horizon guard lets only the
+                    # latest eligible date update the current projection.
+                    snapshots = connection.execute(text(
+                        "SELECT DISTINCT p.account_id, p.report_date_local, p.ingestion_run_id, p.currency, i.conid "
+                        "FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) "
+                        "JOIN event_corp_action e ON e.account_id=p.account_id AND e.instrument_id=p.instrument_id "
+                        "JOIN corporate_action_manual_case c USING(event_corp_action_id) "
+                        "WHERE c.split_factor IS NOT NULL AND NOT e.requires_manual AND p.calculation_provisional "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[])) ORDER BY p.report_date_local"
+                    ), correction_scope).mappings().all()
+                    from app.ledger.snapshot_service import StockLedgerSnapshotService
+
+                    ledger = StockLedgerSnapshotService(SQLAlchemyLedgerSnapshotService(self._engine, connection=connection))
+                    for snapshot in snapshots:
+                        ledger.ledger_snapshot_build_and_persist(
+                            account_id=snapshot["account_id"],
+                            ingestion_run_id=None if snapshot["ingestion_run_id"] is None else str(snapshot["ingestion_run_id"]),
+                            report_date_local=str(snapshot["report_date_local"]),
+                            functional_currency=snapshot["currency"],
+                            affected_conids=frozenset({snapshot["conid"]}),
+                            affected_currencies=frozenset(),
+                        )
+                    connection.execute(text(
+                        "UPDATE pnl_snapshot_daily p SET provisional=p.calculation_provisional OR EXISTS "
+                        "(SELECT 1 FROM corporate_action_manual_case pending WHERE pending.instrument_id=p.instrument_id AND pending.status='open') "
+                        "OR EXISTS (SELECT 1 FROM event_corp_action pending WHERE pending.instrument_id=p.instrument_id AND pending.requires_manual) "
+                        "FROM event_corp_action e JOIN corporate_action_manual_case c USING(event_corp_action_id) "
+                        "WHERE p.account_id=e.account_id AND p.instrument_id=e.instrument_id "
+                        "AND c.split_factor IS NOT NULL AND NOT e.requires_manual "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
         except SQLAlchemyError as error:
             raise RuntimeError("canonical bulk upsert failed") from error
 

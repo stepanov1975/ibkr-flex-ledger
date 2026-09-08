@@ -59,6 +59,8 @@ def split_case(database, request):
             b'buySell="SELL" quantity="-1" tradePrice="200" currency="USD" '
             b'reportDate="20260820" dateTime="20260820;120200"',
         )
+    if getattr(request, "param", None) == "short":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(b'buySell="BUY" quantity="2"', b'buySell="SELL" quantity="-2"')
     if getattr(request, "param", None) == "inferred_date":
         harness[1].payload_bytes = harness[1].payload_bytes.replace(
             b'type="FS" currency="USD" reportDate="20260821"', b'type="FS" currency="USD"',
@@ -391,17 +393,17 @@ def test_sparse_snapshot_rebuild_does_not_close_lots_before_they_open(database, 
         assert c.scalar(text("SELECT count(*) FROM position_lot WHERE closed_at_utc<opened_at_utc")) == 0
 
 
-@pytest.mark.parametrize("move_action_date", [False, True])
-def test_later_source_invalidation_marks_historical_snapshots_uncertain(database, split_case, move_action_date):
+@pytest.mark.parametrize("move_action_date", [None, "20260820", "20260822"])
+def test_later_source_invalidation_marks_historical_snapshots_uncertain(database, split_case, move_action_date, monkeypatch):
     harness, case, client = split_case
-    with database.begin() as c:
-        c.execute(text(
-            "INSERT INTO pnl_snapshot_daily (account_id, report_date_local, instrument_id, position_qty, "
-            "cost_basis, realized_pnl, unrealized_pnl, total_pnl, fees, withholding_tax, currency, "
-            "calculation_provisional, provisional, valuation_source, fx_source, ingestion_run_id) "
-            "SELECT account_id, '2026-08-20', instrument_id, 2, 201, 0, 19, 19, fees, withholding_tax, currency, "
-            "false, false, valuation_source, fx_source, ingestion_run_id FROM pnl_snapshot_daily"
-        ))
+    original_payload = harness[1].payload_bytes
+    harness[1].payload_bytes = original_payload.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260820">',
+    ).replace(b'reportDate="20260821" position="3"', b'reportDate="20260820" position="2"').replace(
+        b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="19"',
+    )
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    harness[1].payload_bytes = original_payload
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()
     assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
@@ -414,11 +416,11 @@ def test_later_source_invalidation_marks_historical_snapshots_uncertain(database
     )
     if move_action_date:
         harness[1].payload_bytes = harness[1].payload_bytes.replace(
-            b'currency="USD" reportDate="20260821"', b'currency="USD" reportDate="20260822"',
+            b'currency="USD" reportDate="20260821"', b'currency="USD" reportDate="' + move_action_date.encode() + b'"',
         )
     assert harness[0].job_execute("ingestion_run").status == "success"
     with database.connect() as c:
-        assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-20'")) is False
+        assert c.scalar(text("SELECT calculation_provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-20'")) is (move_action_date == "20260820")
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "open"
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-21'")) is True
         assert c.scalar(text("SELECT calculation_provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-21'")) is True
@@ -426,6 +428,42 @@ def test_later_source_invalidation_marks_historical_snapshots_uncertain(database
     SQLAlchemyPortfolioService(database).db_manual_case_update(case.case_id, "resolved", None, "Investigating")
     with database.connect() as c:
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily WHERE report_date_local='2026-08-21'")) is True
+
+
+    # A later statement restores the approved action, so all invalidated dates
+    # must be recomputed rather than leaving a resolved case with stale history.
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'<FlexStatement reportDate="20260822">', b'<FlexStatement reportDate="20260823">',
+    ).replace(b'reportDate="20260822" position="3"', b'reportDate="20260823" position="3"').replace(
+        b'updated, missing ratio', b'missing ratio',
+    )
+    if move_action_date:
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(
+            b'type="FS" currency="USD" reportDate="' + move_action_date.encode() + b'"',
+            b'type="FS" currency="USD" reportDate="20260821"',
+        )
+    from app.ledger import StockLedgerSnapshotService
+    build = StockLedgerSnapshotService.ledger_snapshot_build_and_persist
+    before_restore = _state(database)
+
+    def fail_historical_rebuild(self, **kwargs):
+        result = build(self, **kwargs)
+        if kwargs["report_date_local"] == "2026-08-21":
+            raise RuntimeError("Historical rebuild failed")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(StockLedgerSnapshotService, "ledger_snapshot_build_and_persist", fail_historical_rebuild)
+        assert harness[0].job_execute("ingestion_run").status == "failed"
+    after_failure = _state(database)
+    for table in ("event_corp_action", "corporate_action_manual_case", "pnl_snapshot_daily", "position_lot"):
+        assert after_failure[table] == before_restore[table]
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+        assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional OR calculation_provisional")) == 0
+        assert c.execute(text("SELECT position_qty FROM pnl_snapshot_daily ORDER BY report_date_local")).scalars().all() == [2, 3, 3, 3]
+        assert c.scalar(text("SELECT remaining_quantity FROM position_lot WHERE status='open'")) == 3
 
 
 @pytest.mark.parametrize("split_case", ["inferred_date"], indirect=True)
@@ -553,3 +591,91 @@ def test_upgrade_preserves_approval_with_uppercase_month_date(database, split_ca
     with database.connect() as c:
         assert str(c.scalar(text("SELECT resolution_report_date_local FROM corporate_action_manual_case"))) == expected
         assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+
+
+@pytest.mark.parametrize("closing_fees", [0, 2])
+@pytest.mark.parametrize("split_case,short", [("long", False), ("short", True)], indirect=["split_case"])
+def test_correction_rewrites_sale_closed_lot_history(database, split_case, short, closing_fees):
+    harness, case, client = split_case
+    closing_side = b'BUY' if short else b'SELL'
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(b'reportDate="20260821" position="3"', b'reportDate="20260822" position="0"').replace(
+        b'costBasisMoney="201"', b'costBasisMoney="0"',
+    ).replace(b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="0"').replace(
+        b'</Trades>', b'<Trade transactionID="CLOSE" ibExecID="CLOSE" conid="900001" symbol="SEED" '
+        b'assetCategory="STK" buySell="' + closing_side + b'" quantity="3" tradePrice="120" currency="USD" '
+        b'reportDate="20260822" dateTime="20260822;120000" ibCommission="' + str(closing_fees).encode() + b'" fxRateToBase="1" /></Trades>',
+    )
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT count(*) FROM position_lot WHERE status='closed'")) == 1
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    before = _state(database)
+    preview = client.post(base + "/preview", json=_RATIO)
+    assert preview.status_code == 200, preview.text
+    assert _state(database) == before
+    applied = client.post(base + "/apply", json={**_RATIO, "preview_token": preview.json()["preview_token"]})
+    assert applied.status_code == 200, applied.text
+    with database.connect() as c:
+        lot = c.execute(text(
+            "SELECT l.open_quantity, l.open_price, l.cost_basis_open, l.realized_pnl_to_date, l.closed_at_utc "
+            "FROM position_lot l JOIN event_trade_fill t ON t.event_trade_fill_id=l.open_event_trade_fill_id "
+            "WHERE t.transaction_id<>'CLOSE'"
+        )).one()
+        assert c.scalar(text("SELECT count(*) FROM position_lot")) == 1
+        assert lot.open_quantity == 3
+        assert lot.open_price == Decimal("66.66666667")
+        assert lot.cost_basis_open == (-199 if short else 201)
+        assert lot.realized_pnl_to_date == (-161 if short else 159) - closing_fees
+        assert lot.closed_at_utc.isoformat() == "2026-08-22T12:00:00+00:00"
+        assert c.scalar(text("SELECT realized_pnl FROM pnl_snapshot_daily ORDER BY report_date_local DESC LIMIT 1")) == lot.realized_pnl_to_date
+
+
+
+@pytest.mark.parametrize("invalidated", [False, True])
+def test_older_period_replay_preserves_later_lot_history(database, split_case, monkeypatch, invalidated):
+    harness, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    with database.connect() as c:
+        original_period = c.scalar(text("SELECT period_key FROM raw_artifact LIMIT 1"))
+    trades = b''.join(
+        f'<Trade transactionID="{identity}" ibExecID="{identity}" conid="900001" symbol="SEED" '
+        f'assetCategory="STK" buySell="{side}" quantity="{quantity}" tradePrice="120" currency="USD" '
+        f'reportDate="{day}" dateTime="{day};120000" ibCommission="0" fxRateToBase="1" />'.encode()
+        for identity, side, quantity, day in (
+            ("EXIT", "SELL", "3", "20260901"), ("NEW", "BUY", "1", "20260902"), ("CLOSE", "SELL", "1", "20260903"),
+        )
+    )
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260903">',
+    ).replace(b'reportDate="20260821" position="3"', b'reportDate="20260903" position="0"').replace(
+        b'costBasisMoney="201"', b'costBasisMoney="0"',
+    ).replace(b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="0"').replace(b'</Trades>', trades + b'</Trades>')
+    if invalidated:
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(b'missing ratio', b'changed, missing ratio')
+    from datetime import datetime, timedelta
+    import app.jobs.ingestion_orchestrator as ingestion_module
+
+    class LaterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=1)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingestion_module, "datetime", LaterClock)
+        assert harness[0].job_execute("ingestion_run").status == "success"
+    before = _state(database)["position_lot"]
+    assert len(before) == (3 if invalidated else 2)
+    assert ingestion_tests._replay(harness, original_period).status == "success"
+    if not invalidated:
+        assert _state(database)["position_lot"] == before
+    else:
+        with database.connect() as c:
+            assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+            assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional")) == 0
+            assert c.scalar(text("SELECT count(*) FROM position_lot")) == 2
+            assert c.scalar(text("SELECT count(*) FROM position_lot WHERE status='open'")) == 0
+            assert c.scalar(text("SELECT sum(realized_pnl_to_date) FROM position_lot")) == 159

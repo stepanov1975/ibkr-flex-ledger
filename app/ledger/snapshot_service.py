@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -512,7 +512,7 @@ class StockLedgerSnapshotService:
             if missing_valuation:
                 missing_solid_valuation_count += 1
 
-            for open_lot in (*fifo_result.open_lots, *fifo_result.split_closed_lots):
+            for open_lot in (*fifo_result.open_lots, *fifo_result.closed_lots):
                 position_lot_requests.append(
                     PositionLotUpsertRequest(
                         position_lot_id=self._build_position_lot_id(
@@ -524,20 +524,20 @@ class StockLedgerSnapshotService:
                         instrument_id=instrument_id,
                         open_event_trade_fill_id=open_lot.open_event_trade_fill_id,
                         opened_at_utc=datetime.fromisoformat(open_lot.opened_at_utc),
-                        closed_at_utc=None if open_lot.closed_report_date_local is None else snapshot_report_date_start_utc(open_lot.closed_report_date_local),
+                        closed_at_utc=(
+                            datetime.fromisoformat(open_lot.closed_at_utc) if open_lot.closed_at_utc is not None
+                            else snapshot_report_date_start_utc(open_lot.closed_report_date_local) if open_lot.closed_report_date_local is not None
+                            else None
+                        ),
                         open_quantity=str(abs(open_lot.open_quantity)),
                         remaining_quantity=str(abs(open_lot.remaining_quantity)),
                         open_price=str(open_lot.open_price),
                         cost_basis_open=str(open_lot.cost_basis_open),
                         realized_pnl_to_date=str(open_lot.realized_pnl_to_date),
-                        status="open" if open_lot.closed_report_date_local is None else "closed",
+                        status="open" if open_lot.remaining_quantity else "closed",
                     )
                 )
 
-        closed_at_utc = max(
-            (trade.trade_timestamp_utc for trade in trade_rows),
-            default=datetime.now(timezone.utc),
-        )
         if instrument_ids is not None:
             selected_instrument_ids = set(instrument_ids)
             position_lot_requests = [
@@ -550,10 +550,11 @@ class StockLedgerSnapshotService:
                 for request in snapshot_requests
                 if request.instrument_id in selected_instrument_ids
             ]
+        position_lot_row_count = 0
         if reconcile_position_lots:
-            self._repository.db_position_lot_reconcile_open(
+            position_lot_row_count = self._repository.db_position_lot_reconcile(
                 account_id=normalized_account_id,
-                closed_at_utc=closed_at_utc,
+                through_report_date_local=normalized_report_date,
                 requests=position_lot_requests,
                 instrument_ids=instrument_ids,
             )
@@ -562,7 +563,7 @@ class StockLedgerSnapshotService:
         return SnapshotBuildResult(
             report_date_local=normalized_report_date,
             snapshot_row_count=len(snapshot_requests),
-            position_lot_row_count=len(position_lot_requests) if reconcile_position_lots else 0,
+            position_lot_row_count=position_lot_row_count,
             missing_solid_valuation_count=missing_solid_valuation_count,
             broker_position_match_count=broker_position_match_count,
             broker_position_mismatch_count=broker_position_mismatch_count,

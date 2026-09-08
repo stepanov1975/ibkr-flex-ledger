@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from typing import ContextManager
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -662,18 +662,17 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("position lot upsert failed") from error
 
-    def db_position_lot_reconcile_open(
+    def db_position_lot_reconcile(
         self,
         account_id: str,
-        closed_at_utc: datetime,
+        through_report_date_local: str,
         requests: list[PositionLotUpsertRequest],
         instrument_ids: tuple[str, ...] | None = None,
-    ) -> None:
-        """Close stale open lots and upsert the recomputed open-lot projection."""
+    ) -> int:
+        """Atomically reconcile the scoped account's complete open and closed lot history."""
 
         normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
-        if closed_at_utc.tzinfo is None or closed_at_utc.utcoffset() is None:
-            raise ValueError("closed_at_utc must be offset-aware")
+        through_date = self._db_ledger_validate_date_text(through_report_date_local, "through_report_date_local")
         if requests is None:
             raise ValueError("requests must not be None")
         normalized_instrument_ids = (
@@ -695,24 +694,35 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             for request in scoped_requests
         ]
 
-        close_statement = (
-            "UPDATE position_lot SET remaining_quantity = 0, status = 'closed', "
-            "closed_at_utc = :closed_at_utc, updated_at_utc = now() "
-            "WHERE account_id = :account_id AND status = 'open'"
+        # The request contains all true opening lots, including fully closed
+        # ones. Remove derived lots whose fills no longer open a FIFO position.
+        remove_statement = (
+            "DELETE FROM position_lot WHERE account_id = :account_id "
+            "AND NOT (position_lot_id = ANY(CAST(:lot_ids AS uuid[]))) "
+            "AND NOT (instrument_id = ANY(CAST(:newer_instrument_ids AS uuid[])))"
         )
-        close_parameters: dict[str, Any] = {
+        remove_parameters: dict[str, Any] = {
             "account_id": normalized_account_id,
-            "closed_at_utc": closed_at_utc,
+            "lot_ids": [row["position_lot_id"] for row in normalized_requests],
         }
         if normalized_instrument_ids is not None:
-            close_statement += " AND instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
-            close_parameters["instrument_ids"] = list(normalized_instrument_ids)
+            remove_statement += " AND instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
+            remove_parameters["instrument_ids"] = list(normalized_instrument_ids)
 
         try:
             with self._connection_scope(write=True) as connection:
+                # Historical replay must not replace a more recent projection.
+                newer_rows = connection.execute(text(
+                    "SELECT instrument_id FROM event_trade_fill WHERE account_id=:account_id AND report_date_local>:through_date "
+                    "UNION SELECT instrument_id FROM event_corp_action WHERE account_id=:account_id AND report_date_local>:through_date "
+                    "UNION SELECT instrument_id FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local>:through_date"
+                ), {"account_id": normalized_account_id, "through_date": through_date}).mappings().all()
+                newer_ids = {str(row["instrument_id"]) for row in newer_rows if row["instrument_id"] is not None}
+                remove_parameters["newer_instrument_ids"] = list(newer_ids)
+                normalized_requests = [row for row in normalized_requests if str(row["instrument_id"]) not in newer_ids]
                 connection.execute(
-                    text(close_statement),
-                    close_parameters,
+                    text(remove_statement),
+                    remove_parameters,
                 )
                 if normalized_requests:
                     connection.execute(
@@ -739,6 +749,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     )
         except SQLAlchemyError as error:
             raise RuntimeError("position lot reconciliation failed") from error
+
+        return len(normalized_requests)
 
     def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
         """UPSERT daily snapshot rows in one batch operation.

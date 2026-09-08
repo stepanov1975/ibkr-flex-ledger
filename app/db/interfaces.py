@@ -1132,14 +1132,14 @@ class LedgerSnapshotRepositoryPort(Protocol):
             RuntimeError: Raised when persistence fails.
         """
 
-    def db_position_lot_reconcile_open(
+    def db_position_lot_reconcile(
         self,
         account_id: str,
-        closed_at_utc: datetime,
+        through_report_date_local: str,
         requests: list[PositionLotUpsertRequest],
         instrument_ids: tuple[str, ...] | None = None,
-    ) -> None:
-        """Replace the account's open-lot projection and close stale rows."""
+    ) -> int:
+        """Replace the scoped account lot projection with its complete FIFO history."""
 
     def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
         """UPSERT daily snapshot rows in one batch operation.
