@@ -386,3 +386,69 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
         pass
     assert context.eval("nodes['pnl-state'].textContent") == ""
     assert context.eval("nodes['total-pnl'].className") == "metric"
+
+
+def test_case_review_shows_guidance_and_preserves_notes_without_false_resolution() -> None:
+    """Run the review UI through cancel, blank, failure, success and history."""
+
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+    script = TestClient(application).get("/ui/operations").text.split("<script>", 1)[1].split("</script>", 1)[0]
+    script = script.rsplit("loadAll();", 1)[0]
+    context = quickjs.Context()
+    context.eval("""
+        function node(){return {children:[],textContent:'',className:'',checked:false,disabled:false,
+          append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
+        const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
+        const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}}};
+        let note=null,promptText='',requests=[],fail=false;
+        const prompt=message=>{promptText=message;return note};
+        const item={case_id:'case-1',symbol:'TEST',action_type:'CASHDIV',status:'open',owner:null,
+          created_at_utc:'2026-08-21T09:00:00Z',report_date_local:'2026-08-21',
+          description:'Broker dividend',review_reason:'Unmatched cash payment',
+          required_check:'Check payment and withholding',requires_manual:true,resolution_note:null};
+    """)
+    context.eval(script)
+    context.eval("""
+        json=async(url,options)=>{
+          if(options){requests.push(JSON.parse(options.body));if(fail)throw new Error('Save failed');
+            item.status=JSON.parse(options.body).status;item.resolution_note=JSON.parse(options.body).resolution_note;
+            return item}
+          return {items:[item]}
+        };
+        loadAll=async()=>loadCases();loadCases();
+    """)
+    while context.execute_pending_job():
+        pass
+    assert "Unmatched cash payment" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
+    assert "Check payment and withholding" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
+    assert "Broker dividend" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
+    context.eval("let button=nodes.cases.children[0].children.at(-1).children[0]")
+    assert context.eval("button.textContent") == "Mark reviewed"
+    for note in (None, "   "):
+        context.eval(f"note={json.dumps(note)};button.onclick()")
+        while context.execute_pending_job():
+            pass
+        assert context.eval("requests.length") == 0
+    assert "Check payment and withholding" in context.eval("promptText")
+    assert "provisional" in context.eval("promptText")
+    context.eval("note='  Checked broker statement  ';fail=true;button.onclick()")
+    while context.execute_pending_job():
+        pass
+    assert context.eval("nodes['case-error'].textContent") == "Save failed"
+    assert context.eval("button.disabled") is False
+    assert context.eval("item.status") == "open"
+    context.eval("fail=false;button.onclick()")
+    while context.execute_pending_job():
+        pass
+    assert context.eval("requests.at(-1).resolution_note") == "Checked broker statement"
+    assert context.eval("requests.at(-1).status") == "resolved"
+    assert context.eval("nodes['case-count'].textContent") == 0
+    assert context.eval("nodes.cases.children.length") == 0
+    context.eval("nodes['show-reviewed'].checked=true;nodes['show-reviewed'].onchange()")
+    while context.execute_pending_job():
+        pass
+    row = context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
+    assert "Reviewed" in row
+    assert "Checked broker statement" in row
+    assert "Provisional" in row

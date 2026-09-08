@@ -520,8 +520,16 @@ Operator endpoints:
 - `GET /corporate-actions/cases` lists cases and accepts a status filter.
 - `PATCH /corporate-actions/cases/{case_id}` records status, owner, and resolution notes.
 
-Resolving a case recomputes provisional state without hiding unrelated instruments or
-reports. The API and persistence workflow are implemented in
+The operations queue shows the broker description, report date, reason for review, and
+required check. **Mark reviewed** saves a note and archives the case; **Show reviewed
+and dismissed cases** exposes its history. The API retains `resolved` as the stored
+status for reviewed cases.
+
+Reviewing or dismissing a case does not correct holdings or P&L amounts. Events that
+still require manual accounting keep affected snapshots provisional, including after
+reprocessing. Independent calculation uncertainty also remains provisional. Supported
+actions continue to run automatically under the existing classification policy.
+The API and persistence workflow are implemented in
 `app/api/routers/corporate_actions.py`, `app/domain/corporate_actions.py`, and
 `app/db/portfolio.py`.
 

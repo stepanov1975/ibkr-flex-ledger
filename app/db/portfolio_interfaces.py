@@ -53,6 +53,9 @@ class CorporateActionManualCaseRecord:
     resolved_at_utc: datetime | None
     created_at_utc: datetime
     updated_at_utc: datetime
+    report_date_local: date
+    description: str | None
+    requires_manual: bool
 
 
 @dataclass(frozen=True)

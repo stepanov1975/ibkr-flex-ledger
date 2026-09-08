@@ -274,7 +274,9 @@ class SQLAlchemyPortfolioService:
             with self._engine.connect() as connection:
                 rows = connection.execute(
                     text(
-                        "SELECT c.*, i.symbol FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
+                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual "
+                        "FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
+                        "JOIN event_corp_action e USING (event_corp_action_id) "
                         "WHERE (CAST(:status AS text) IS NULL OR c.status=:status) "
                         "ORDER BY CASE c.status WHEN 'open' THEN 0 ELSE 1 END, c.created_at_utc desc, c.case_id desc"
                     ),
@@ -315,7 +317,7 @@ class SQLAlchemyPortfolioService:
                 instrument_id = row["instrument_id"]
                 connection.execute(
                     text(
-                        "UPDATE event_corp_action SET provisional=EXISTS (SELECT 1 FROM corporate_action_manual_case c "
+                        "UPDATE event_corp_action SET provisional=requires_manual OR EXISTS (SELECT 1 FROM corporate_action_manual_case c "
                         "WHERE c.event_corp_action_id=event_corp_action.event_corp_action_id AND c.status='open') "
                         "WHERE instrument_id=:instrument_id"
                     ),
@@ -325,13 +327,17 @@ class SQLAlchemyPortfolioService:
                     text(
                         "UPDATE pnl_snapshot_daily SET provisional=calculation_provisional OR EXISTS "
                         "(SELECT 1 FROM corporate_action_manual_case c "
-                        "WHERE c.instrument_id=:instrument_id AND c.status='open') WHERE instrument_id=:instrument_id"
+                        "WHERE c.instrument_id=:instrument_id AND c.status='open') OR EXISTS "
+                        "(SELECT 1 FROM event_corp_action e WHERE e.instrument_id=:instrument_id "
+                        "AND e.requires_manual) WHERE instrument_id=:instrument_id"
                     ),
                     {"instrument_id": instrument_id},
                 )
                 full_row = connection.execute(
                     text(
-                        "SELECT c.*, i.symbol FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
+                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual "
+                        "FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
+                        "JOIN event_corp_action e USING (event_corp_action_id) "
                         "WHERE c.case_id=:case_id"
                     ),
                     {"case_id": case_id},
@@ -1138,6 +1144,7 @@ class SQLAlchemyPortfolioService:
             instrument_id=row["instrument_id"], symbol=row["symbol"], status=row["status"], owner=row["owner"],
             resolution_note=row["resolution_note"], resolved_at_utc=row["resolved_at_utc"],
             created_at_utc=row["created_at_utc"], updated_at_utc=row["updated_at_utc"],
+            report_date_local=row["report_date_local"], description=row["description"], requires_manual=row["requires_manual"],
         )
 
     @staticmethod
