@@ -18,7 +18,7 @@ from app.db import (
     PositionLotUpsertRequest,
 )
 
-from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoTradeFillInput, fifo_compute_instrument
+from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoSplitInput, FifoTradeFillInput, fifo_compute_instrument
 
 
 @dataclass(frozen=True)
@@ -227,16 +227,11 @@ class StockLedgerSnapshotService:
             }
             converted_trades: list[FifoTradeFillInput] = []
             actions = corporate_actions_by_instrument.get(instrument_id, [])
-            adjusted_position = Decimal("0")
-            rounded_position = Decimal("0")
+            splits = tuple(FifoSplitInput(action.report_date_local, Decimal(action.adjustment_factor)) for action in actions)
             fx_sources: set[str] = set()
             missing_fx = False
             for trade in instrument_trades:
                 contract_multiplier = self._trade_contract_multiplier(trade)
-                adjustment_factor = self._trade_adjustment_factor(
-                    trade,
-                    actions,
-                )
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
                     functional_currency=normalized_functional_currency,
@@ -266,19 +261,6 @@ class StockLedgerSnapshotService:
                         commission_fx_rate = resolved_commission_fx_rate
                 quantity = Decimal(trade.quantity)
                 price = Decimal(trade.price) * contract_multiplier * trade_fx_rate
-                if actions:
-                    # Round the running position, not each fill independently:
-                    # three one-share buys in a 1-for-3 split must total one share.
-                    adjusted_position += abs(quantity) * adjustment_factor * (1 if trade.side == "BUY" else -1)
-                    next_position = adjusted_position.quantize(Decimal("0.00000001"))
-                    adjusted_quantity = abs(next_position - rounded_position)
-                    if adjusted_quantity == 0:
-                        raise ValueError("split creates a fill below the supported eight-decimal share precision")
-                    # Preserve each fill's total cost when allocating the rounding
-                    # remainder across its lots.
-                    price = price * abs(quantity) / adjusted_quantity
-                    quantity = adjusted_quantity
-                    rounded_position = next_position
                 converted_trades.append(
                     FifoTradeFillInput(
                         event_trade_fill_id=str(trade.event_trade_fill_id),
@@ -289,6 +271,7 @@ class StockLedgerSnapshotService:
                         price=price,
                         fees=abs(Decimal(trade.fees or "0")) * trade_fx_rate + commission * commission_fx_rate,
                         transaction_id=trade.transaction_id,
+                        report_date_local=trade.report_date_local,
                         withholding_tax=Decimal("0"),
                     )
                 )
@@ -300,6 +283,7 @@ class StockLedgerSnapshotService:
                     functional_currency=normalized_functional_currency,
                     mark_price=Decimal("0"),
                     trades=converted_trades,
+                    splits=splits,
                 )
             )
             fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
@@ -383,6 +367,7 @@ class StockLedgerSnapshotService:
                         functional_currency=normalized_functional_currency,
                         mark_price=mark_price_base,
                         trades=converted_trades,
+                        splits=splits,
                     )
                 )
                 unrealized_pnl = marked_fifo_result.unrealized_pnl

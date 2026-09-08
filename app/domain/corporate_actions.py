@@ -56,9 +56,13 @@ def domain_classify_corporate_action(
 
     if action_type in {"FORWARDSPLIT", "REVERSESPLIT", "STOCKDIV"}:
         factor = _domain_corporate_action_factor(source_payload)
+        if factor is not None and not (
+            Decimal("0") < factor < Decimal("1") if action_type == "REVERSESPLIT" else factor > Decimal("1")
+        ):
+            factor = None
         return CorporateActionClassification(
             action_type=action_type,
-            requires_manual=factor is None or factor <= Decimal("0"),
+            requires_manual=factor is None,
             adjustment_factor=factor,
         )
 

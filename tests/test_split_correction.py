@@ -30,11 +30,11 @@ def split_case(database, request):
         b'conid="900001" symbol="SEED" type="FS" currency="USD" reportDate="20260821" '
         b'description="Broker split with missing ratio" /></CorporateActions>',
     )
-    if getattr(request, "param", None) in {"reverse", "reverse_multiple"}:
+    if getattr(request, "param", None) in {"reverse", "reverse_multiple", "reverse_preclose"}:
         harness[1].payload_bytes = harness[1].payload_bytes.replace(b'type="FS"', b'type="RS"').replace(
             b'buySell="BUY" quantity="2"', b'buySell="BUY" quantity="3"',
         ).replace(b'position="3"', b'position="1"').replace(b'costBasisMoney="201"', b'costBasisMoney="301"')
-    if getattr(request, "param", None) == "reverse_multiple":
+    if getattr(request, "param", None) in {"reverse_multiple", "reverse_preclose"}:
         harness[1].payload_bytes = harness[1].payload_bytes.replace(
             b'buySell="BUY" quantity="3"', b'buySell="BUY" quantity="1"',
         ).replace(
@@ -45,6 +45,18 @@ def split_case(database, request):
             b'<Trade transactionID="BUY3" ibExecID="BUY3" conid="900001" symbol="SEED" '
             b'assetCategory="STK" buySell="BUY" quantity="1" tradePrice="100" currency="USD" '
             b'reportDate="20260820" dateTime="20260820;120200" ibCommission="0" fxRateToBase="1" /></Trades>',
+        )
+    if getattr(request, "param", None) == "reverse_preclose":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(
+            b'quantity="1" tradePrice="100" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120100"',
+            b'quantity="1" tradePrice="300" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120100"',
+        ).replace(
+            b'buySell="BUY" quantity="1" tradePrice="100" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120200"',
+            b'buySell="SELL" quantity="-1" tradePrice="200" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;120200"',
         )
     assert harness[0].job_execute("ingestion_run").status == "success"
     case = SQLAlchemyPortfolioService(database).db_manual_case_list("open")[0]
@@ -285,3 +297,42 @@ def test_inconsistent_source_identity_requires_accounting_support(database, spli
     listed = client.get("/corporate-actions/cases").json()["items"][0]
     assert listed["can_correct_split"] is False
     assert _state(database) == before
+
+
+@pytest.mark.parametrize("split_case", ["reverse_preclose"], indirect=True)
+def test_split_preserves_completed_pre_action_fifo_sale(database, split_case):
+    harness, case, client = split_case
+    ratio = {**_RATIO, "new_shares": "1", "old_shares": "3"}
+    response = client.post(f"/corporate-actions/cases/{case.case_id}/split/preview", json=ratio)
+    assert response.status_code == 200, response.text
+    snapshot = response.json()["snapshots"][0]
+    assert Decimal(snapshot["before"]["realized_pnl"]) == 99
+    assert Decimal(snapshot["after"]["realized_pnl"]) == 99
+    assert Decimal(response.json()["lots_after"][0]["cost_basis_open"]) == 300
+
+
+def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database, split_case, monkeypatch):
+    harness, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(
+        b'</Trades>', b'<Trade transactionID="NEWBUY" ibExecID="NEWBUY" conid="900001" symbol="SEED" '
+        b'assetCategory="STK" buySell="BUY" quantity="1" tradePrice="120" currency="USD" '
+        b'reportDate="20260822" dateTime="20260822;120000" ibCommission="0" fxRateToBase="1" /></Trades>',
+    )
+
+    def fail_snapshot(requests):
+        raise RuntimeError("Failure after canonical trades and current lots are committed")
+
+    monkeypatch.setattr(harness[5], "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
+    assert harness[0].job_execute("ingestion_run").status == "failed"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'")) == 3
+    before = _state(database)
+    for endpoint, body in (("preview", _RATIO), ("apply", {**_RATIO, "preview_token": preview["preview_token"]})):
+        response = client.post(base + "/" + endpoint, json=body)
+        assert response.status_code == 409, response.text
+        assert "newer" in response.text.lower()
+        assert _state(database) == before

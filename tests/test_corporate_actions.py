@@ -54,3 +54,16 @@ def test_explicit_split_description_and_invalid_factors(code, payload, factor):
     result = domain_classify_corporate_action(code, payload)
     assert result.requires_manual is (factor is None)
     assert result.adjustment_factor == (None if factor is None else Decimal(factor))
+
+
+@pytest.mark.parametrize("code,new,old", [("RS", "3", "2"), ("FS", "1", "10"), ("SD", "1", "10"), ("RS", "1", "1"), ("FS", "1", "1")])
+@pytest.mark.parametrize("source", ["description", "ratio", "quantities"])
+def test_split_factor_must_match_action_direction(code, new, old, source):
+    payload = {
+        "description": {"description": f"SPLIT {new} FOR {old} (TEST)"},
+        "ratio": {"ratio": str(Decimal(new) / Decimal(old))},
+        "quantities": {"newQuantity": new, "oldQuantity": old},
+    }[source]
+    result = domain_classify_corporate_action(code, payload)
+    assert result.requires_manual is True
+    assert result.adjustment_factor is None

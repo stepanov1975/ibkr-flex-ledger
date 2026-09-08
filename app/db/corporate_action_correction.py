@@ -63,6 +63,15 @@ class SQLAlchemySplitCorrectionService:
                 before = self._snapshots(connection, params)
                 if not any(snapshot["report_date_local"] >= case["report_date_local"] for snapshot in before):
                     raise SplitCorrectionConflict("No affected snapshots are available. Ingest the broker statement before correcting this case.")
+                newer_activity = connection.scalar(text(
+                    "SELECT EXISTS (SELECT 1 FROM ("
+                    "SELECT report_date_local FROM event_trade_fill WHERE account_id=:account_id AND instrument_id=:instrument_id "
+                    "UNION ALL SELECT report_date_local FROM event_cashflow WHERE account_id=:account_id AND instrument_id=:instrument_id "
+                    "UNION ALL SELECT report_date_local FROM event_corp_action WHERE account_id=:account_id AND instrument_id=:instrument_id"
+                    ") activity WHERE report_date_local>:last_snapshot_date)"
+                ), {**params, "last_snapshot_date": before[-1]["report_date_local"]})
+                if newer_activity:
+                    raise SplitCorrectionConflict("Newer canonical activity has no snapshot. Reprocess the failed ingestion before correcting this case.")
                 lots_before = self._lots(connection, params)
                 connection.execute(text(
                     "UPDATE corporate_action_manual_case SET split_factor=:factor, "
