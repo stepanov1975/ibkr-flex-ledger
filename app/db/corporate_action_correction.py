@@ -72,6 +72,10 @@ class SQLAlchemySplitCorrectionService:
                 ), {**params, "last_snapshot_date": before[-1]["report_date_local"]})
                 if newer_activity:
                     raise SplitCorrectionConflict("Newer canonical activity has no snapshot. Reprocess the failed ingestion before correcting this case.")
+                accounting_inputs = self._accounting_inputs(connection, {
+                    **params, "last_date": before[-1]["report_date_local"], "conid": case["conid"],
+                    "run_ids": [str(snapshot["ingestion_run_id"]) for snapshot in before if snapshot["ingestion_run_id"] is not None],
+                })
                 lots_before = self._lots(connection, params)
                 connection.execute(text(
                     "UPDATE corporate_action_manual_case SET split_factor=:factor, "
@@ -118,7 +122,7 @@ class SQLAlchemySplitCorrectionService:
                 }
                 result = json.loads(json.dumps(result, default=str))
                 fingerprint = hashlib.sha256(json.dumps(
-                    {"result": result, "before": before, "source": case["source_payload"],
+                    {"result": result, "before": before, "accounting_inputs": accounting_inputs, "source": case["source_payload"],
                      "case_updated": case["updated_at_utc"], "note": note.strip()},
                     default=str, sort_keys=True,
                 ).encode()).hexdigest()
@@ -159,3 +163,29 @@ class SQLAlchemySplitCorrectionService:
             "WHERE l.account_id=:account_id AND l.instrument_id=:instrument_id "
             "AND l.status='open' ORDER BY l.opened_at_utc, l.open_event_trade_fill_id"
         ), params).mappings()]
+
+
+    @staticmethod
+    def _accounting_inputs(connection: Connection, params: dict[str, Any]) -> dict[str, Any]:
+        """Bind previews to source inputs, including closed execution identities."""
+        # Keep JSON as database text so numeric inputs never round through floats.
+        inputs: dict[str, Any] = {}
+        for table in ("event_trade_fill", "event_cashflow", "event_corp_action", "event_fx"):
+            manual_data = ", 'manual_case', to_jsonb(c)" if table == "event_corp_action" else ""
+            manual_join = " LEFT JOIN corporate_action_manual_case c USING(event_corp_action_id)" if table == "event_corp_action" else ""
+            instrument_scope = " AND e.instrument_id=:instrument_id" if table != "event_fx" else ""
+            inputs[table] = connection.execute(text(
+                f"SELECT (to_jsonb(e) || jsonb_build_object('source_payload', r.source_payload{manual_data}))::text "
+                f"FROM {table} e JOIN raw_record r ON r.raw_record_id=e.source_raw_record_id{manual_join} "
+                f"WHERE e.account_id=:account_id AND e.report_date_local<=:last_date{instrument_scope} "
+                f"ORDER BY e.{table}_id"
+            ), params).scalars().all()
+        inputs["instrument"] = connection.scalar(text(
+            "SELECT to_jsonb(i)::text FROM instrument i WHERE i.instrument_id=:instrument_id AND i.account_id=:account_id"
+        ), params)
+        inputs["valuations"] = connection.execute(text(
+            "SELECT r.source_payload::text FROM raw_record r WHERE r.account_id=:account_id "
+            "AND r.ingestion_run_id=ANY(CAST(:run_ids AS uuid[])) "
+            "AND r.section_name='OpenPositions' AND r.source_payload->>'conid'=:conid ORDER BY r.raw_record_id"
+        ), params).scalars().all()
+        return inputs

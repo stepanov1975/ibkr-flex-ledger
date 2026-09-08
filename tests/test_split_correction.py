@@ -59,6 +59,14 @@ def split_case(database, request):
             b'buySell="SELL" quantity="-1" tradePrice="200" currency="USD" '
             b'reportDate="20260820" dateTime="20260820;120200"',
         )
+    if getattr(request, "param", None) == "flat":
+        harness[1].payload_bytes = harness[1].payload_bytes.replace(b'position="3"', b'position="0"').replace(
+            b'costBasisMoney="201"', b'costBasisMoney="0"',
+        ).replace(b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="0"').replace(
+            b'</Trades>', b'<Trade transactionID="FLAT" ibExecID="FLAT" conid="900001" symbol="SEED" '
+            b'assetCategory="STK" buySell="SELL" quantity="2" tradePrice="100" currency="USD" '
+            b'reportDate="20260820" dateTime="20260820;130000" ibCommission="0" fxRateToBase="1" /></Trades>',
+        )
     if getattr(request, "param", None) == "short":
         harness[1].payload_bytes = harness[1].payload_bytes.replace(b'buySell="BUY" quantity="2"', b'buySell="SELL" quantity="-2"')
     if getattr(request, "param", None) == "inferred_date":
@@ -679,3 +687,119 @@ def test_older_period_replay_preserves_later_lot_history(database, split_case, m
             assert c.scalar(text("SELECT count(*) FROM position_lot")) == 2
             assert c.scalar(text("SELECT count(*) FROM position_lot WHERE status='open'")) == 0
             assert c.scalar(text("SELECT sum(realized_pnl_to_date) FROM position_lot")) == 159
+
+
+@pytest.mark.parametrize("split_case", ["flat"], indirect=True)
+def test_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(database, split_case, monkeypatch):
+    harness, case, client = split_case
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    trades = b''.join(
+        f'<Trade transactionID="ROUND{side}" ibExecID="ROUND{side}" conid="900001" symbol="SEED" '
+        f'assetCategory="STK" buySell="{side}" quantity="1" tradePrice="100" currency="USD" '
+        f'reportDate="20260821" dateTime="20260821;{time}" ibCommission="0" fxRateToBase="1" />'.encode()
+        for side, time in (("BUY", "120000"), ("SELL", "130000"))
+    )
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(b'</Trades>', trades + b'</Trades>')
+
+    def fail_snapshot(requests):
+        raise RuntimeError("Same-date ingestion failed after canonical and lot writes")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(harness[5], "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
+        assert harness[0].job_execute("ingestion_run").status == "failed"
+    before = _state(database)
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 409
+    assert _state(database) == before
+    fresh = client.post(base + "/preview", json=_RATIO).json()
+    assert fresh["snapshots"] == preview["snapshots"]
+    assert fresh["lots_before"] == preview["lots_before"] == []
+    assert fresh["lots_after"] == preview["lots_after"] == []
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": fresh["preview_token"]}).status_code == 200
+
+
+def test_reassigned_split_rebuilds_both_instruments_when_restored(database, split_case):
+    harness, case, client = split_case
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
+        b'</Trades>', b'<Trade transactionID="OTHERBUY" ibExecID="OTHERBUY" conid="900002" symbol="OTHER" '
+        b'assetCategory="STK" buySell="BUY" quantity="1" tradePrice="50" currency="USD" '
+        b'reportDate="20260820" dateTime="20260820;120000" ibCommission="0" fxRateToBase="1" /></Trades>',
+    ).replace(
+        b'</OpenPositions>', b'<OpenPosition conid="900002" symbol="OTHER" assetCategory="STK" currency="USD" '
+        b'reportDate="20260821" position="1" markPrice="50" costBasisMoney="50" multiplier="1" '
+        b'fxRateToBase="1" fifoPnlUnrealized="0" /></OpenPositions>',
+    )
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 200
+    original_action = b'conid="900001" symbol="SEED" type="FS"'
+    moved_action = b'conid="900002" symbol="OTHER" type="FS"'
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(original_action, moved_action).replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(b'reportDate="20260821" position=', b'reportDate="20260822" position=')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) WHERE i.conid='900002' AND p.report_date_local='2026-08-21'")) is True
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(moved_action, original_action).replace(
+        b'<FlexStatement reportDate="20260822">', b'<FlexStatement reportDate="20260823">',
+    ).replace(b'reportDate="20260822" position=', b'reportDate="20260823" position=')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+        assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional OR calculation_provisional")) == 0
+
+
+@pytest.mark.parametrize("previous_manual_case", [False, True])
+def test_changed_automatic_split_rebuilds_historical_realization(database, previous_manual_case):
+    harness = ingestion_tests._harness(database)
+    automatic = _SEEDED_PAYLOAD.replace(
+        b'reportDate="20260821" dateTime="20260821;120000"', b'reportDate="20260820" dateTime="20260820;120000"',
+    ).replace(b'fifoPnlUnrealized="20"', b'fifoPnlUnrealized="86" costBasisMoney="134" multiplier="1"').replace(
+        b'</Trades>', b'<Trade transactionID="SELL1" ibExecID="SELL1" conid="900001" symbol="SEED" '
+        b'assetCategory="STK" buySell="SELL" quantity="1" tradePrice="120" currency="USD" '
+        b'reportDate="20260821" dateTime="20260821;140000" ibCommission="0" fxRateToBase="1" /></Trades>',
+    ).replace(
+        b'<CorporateActions />', b'<CorporateActions><CorporateAction actionID="AUTO1" transactionID="AUTO1" '
+        b'conid="900001" symbol="SEED" type="FS" currency="USD" reportDate="20260821" '
+        b'description="SPLIT 3 FOR 2 (broker)" /></CorporateActions>',
+    )
+    if previous_manual_case:
+        harness[1].payload_bytes = automatic.replace(b'SPLIT 3 FOR 2 (broker)', b'Missing ratio')
+        assert harness[0].job_execute("ingestion_run").status == "success"
+    harness[1].payload_bytes = automatic
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT count(*) FROM corporate_action_manual_case")) == int(previous_manual_case)
+        assert c.scalar(text("SELECT count(*) FROM corporate_action_manual_case WHERE split_factor IS NOT NULL")) == 0
+        assert c.execute(text("SELECT realized_pnl, provisional FROM pnl_snapshot_daily")).one() == (53, False)
+    harness[1].payload_bytes = automatic.replace(b'SPLIT 3 FOR 2', b'SPLIT 2 FOR 1').replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(b'reportDate="20260821" position="2"', b'reportDate="20260822" position="3"').replace(
+        b'costBasisMoney="134"', b'costBasisMoney="150.75"',
+    ).replace(b'fifoPnlUnrealized="86"', b'fifoPnlUnrealized="179.25"')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.execute(text("SELECT realized_pnl, provisional FROM pnl_snapshot_daily ORDER BY report_date_local")).all() == [(Decimal("69.75"), True), (Decimal("69.75"), False)]
+
+
+@pytest.mark.parametrize("split_case", ["flat"], indirect=True)
+def test_preview_fingerprint_preserves_sub_float_canonical_price_changes(database, split_case):
+    harness, case, client = split_case
+    trades = b''.join(
+        f'<Trade transactionID="EXACT{side}" ibExecID="EXACT{side}" conid="900001" symbol="SEED" '
+        f'assetCategory="STK" buySell="{side}" quantity="1" tradePrice="1000000000000.00000001" currency="USD" '
+        f'reportDate="20260819" dateTime="20260819;{time}" ibCommission="0" fxRateToBase="1" />'.encode()
+        for side, time in (("BUY", "120000"), ("SELL", "130000"))
+    )
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(b'</Trades>', trades + b'</Trades>')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    base = f"/corporate-actions/cases/{case.case_id}/split"
+    preview = client.post(base + "/preview", json=_RATIO).json()
+    # Canonical UPSERT retains the original source link when correcting trades.
+    with database.begin() as c:
+        c.execute(text("UPDATE event_trade_fill SET price=1000000000000.00000002 WHERE transaction_id IN ('EXACTBUY','EXACTSELL')"))
+    before = _state(database)
+    response = client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]})
+    assert response.status_code == 409
+    assert _state(database) == before

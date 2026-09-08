@@ -531,6 +531,8 @@ saves nothing. Apply atomically stores the verified factor and rebuilds affected
 lots and snapshots, including realized P&L after subsequent sales. Earlier snapshots
 retain their amounts while their manual-review flags are refreshed. A failed rebuild
 rolls back the whole correction; ingestion and corrections cannot run concurrently.
+Preview tokens bind exact accounting inputs, including closed execution history,
+so a failed ingestion cannot silently change an accepted preview.
 
 Corrections retain the immutable broker source, approved action date, and security
 identity. Identical replay preserves the factor; changed source data or context invalidates it and returns unresolved accounting to
@@ -542,6 +544,8 @@ eliminated by split rounding retain their realized gains and close on the action
 business date. Fully traded lots retain their execution closing time and corrected
 quantity, basis, and realized P&L including closing fees. Reconciliation removes
 derived lots that no longer represent an opening fill in the corrected FIFO history.
+Revisions to automatic splits also invalidate and rebuild historical calculations.
+Instrument reassignment rebuilds both the previous and current instruments.
 Older-period replay preserves newer lot projections; restoring a saved correction
 rebuilds both affected history and its latest eligible lot projection.
 Migration `20260908_09` backfills approval dates and moves incompatible
