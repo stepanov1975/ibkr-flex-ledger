@@ -880,6 +880,7 @@ def test_partial_tiny_correction_persists_distinct_opening_and_remaining_basis(d
     assert _state(database) == before
     assert len(result["lots_after"]) == 1
     assert Decimal(result["lots_after"][0]["cost_basis_open"]) == 1001
+    assert Decimal(result["lots_after"][0]["open_price"]) == 1001
     assert Decimal(result["lots_after"][0]["unit_basis"]) == 1002
     assert client.post(base + "/apply", json={**ratio, "preview_token": result["preview_token"]}).status_code == 200
     with database.connect() as c:

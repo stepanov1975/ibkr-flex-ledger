@@ -127,6 +127,7 @@ class _OpenFifoLot:
     cost_basis_open: Decimal
     remaining_quantity: Decimal
     unit_basis: Decimal
+    unit_execution_price: Decimal
     realized_pnl_to_date: Decimal
 
 
@@ -253,6 +254,7 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
                     cost_basis_open=unit_basis * signed_open_quantity,
                     remaining_quantity=quantity_to_close,
                     unit_basis=unit_basis,
+                    unit_execution_price=trade.price,
                     realized_pnl_to_date=Decimal("0"),
                 )
             )
@@ -325,15 +327,19 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) 
         else:
             recipient.cost_basis_open += lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1)
             recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
-            recipient.open_price += lot.open_price * lot.remaining_quantity / recipient.remaining_quantity
+            execution_value = lot.unit_execution_price * lot.remaining_quantity
+            recipient.open_price += execution_value / recipient.open_quantity
+            recipient.unit_execution_price += execution_value / recipient.remaining_quantity
     open_lots[:] = [lot for lot, quantity in survivors]
     for lot, remaining_quantity in survivors:
         # Use the allocated quantity to retain this lot's unconsumed cost and
         # fees. Completed closes and their realized P&L are never restated.
         lot_factor = remaining_quantity / lot.remaining_quantity
+        opening_execution_value = lot.open_price * lot.open_quantity
         lot.unit_basis = lot.unit_basis * lot.remaining_quantity / remaining_quantity
-        lot.open_price /= lot_factor
+        lot.unit_execution_price /= lot_factor
         lot.open_quantity = (lot.open_quantity * lot_factor).quantize(precision)
+        lot.open_price = opening_execution_value / lot.open_quantity
         lot.remaining_quantity = remaining_quantity
     return closed_lots
 

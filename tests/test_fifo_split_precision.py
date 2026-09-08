@@ -106,6 +106,7 @@ def test_tiny_transfer_preserves_partial_survivor_opening_and_remaining_basis(si
     splits = (FifoSplitInput(date(2026, 8, 21), Decimal("0.1")), FifoSplitInput(date(2026, 8, 22), Decimal("0.5")))
     result = fifo_compute_instrument(_request(trades, splits))
     assert result.open_lots[0].cost_basis_open == opening_basis
+    assert result.open_lots[0].open_price * abs(result.open_lots[0].open_quantity) == 1001
     assert result.open_lots[0].cost_basis_remaining == remaining_basis
     assert result.closed_lots[0].cost_basis_remaining == 0
     assert abs(result.position_quantity) == Decimal("0.25")
@@ -119,3 +120,22 @@ def test_tiny_transfer_preserves_partial_survivor_opening_and_remaining_basis(si
     assert all(lot.cost_basis_remaining == 0 for lot in closed.closed_lots)
     proceeds = Decimal("500") if side == "BUY" else Decimal("-500")
     assert closed.realized_pnl == before.realized_pnl + proceeds - remaining_basis - fees * 2
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_previously_merged_lot_transfers_only_remaining_execution_value(side):
+    closing_side = "SELL" if side == "BUY" else "BUY"
+    trades = [replace(trade, fees=Decimal("0")) for trade in (
+        _trade(0, "10", "100", side),
+        _trade(1, "5", "100", closing_side),
+        _trade(2, "0.00000001", "100000000", side),
+        _trade(3, "0.49999999", "2000", closing_side, report_day=21, execution_day=21),
+        _trade(4, "10", "100", side, report_day=21, execution_day=21),
+    )]
+    splits = (FifoSplitInput(date(2026, 8, 21), Decimal("0.1")), FifoSplitInput(date(2026, 8, 22), Decimal("0.1")))
+    result = fifo_compute_instrument(_request(trades, splits))
+    survivor = result.open_lots[0]
+    assert abs(survivor.open_quantity) == 1
+    assert survivor.open_price == Decimal("1000.00001002")
+    assert abs(survivor.cost_basis_open) == survivor.open_price
+    assert abs(survivor.cost_basis_remaining) == survivor.open_price
