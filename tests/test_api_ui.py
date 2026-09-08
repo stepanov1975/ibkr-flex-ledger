@@ -401,7 +401,7 @@ def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
         const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
         const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}},
-          NumberFormat:function(){return {format:value=>String(value)}}};
+          NumberFormat:function(locale,options){return {format:value=>Number(value).toFixed(options.maximumFractionDigits).replace(/0+$/, '').replace(/[.]$/, '')}}};
         let requests=[],fail=false;
         const items=[
           {case_id:'case-1',symbol:'TEST',action_type:'FORWARDSPLIT',status:'open',owner:null,
@@ -416,8 +416,8 @@ def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
         const preview={preview_token:'token',factor:'1.5',snapshots:[{report_date_local:'2026-08-21',currency:'USD',
           before:{position_qty:'2',cost_basis:'201',realized_pnl:'0',unrealized_pnl:'19',total_pnl:'19',provisional:true},
           after:{position_qty:'3',cost_basis:'201',realized_pnl:'0',unrealized_pnl:'129',total_pnl:'129',provisional:false}}],
-          lots_before:[{remaining_quantity:'2',open_price:'100.5',cost_basis_open:'201'}],
-          lots_after:[{remaining_quantity:'3',open_price:'67',cost_basis_open:'201'}]};
+          lots_before:[{remaining_quantity:'2',open_price:'100',unit_basis:'100.5',cost_basis_open:'201'}],
+          lots_after:[{remaining_quantity:'3',open_price:'66.66666667',unit_basis:'67',cost_basis_open:'201'}]};
         json=async(url,options)=>{
           if(!options)return {items};
           requests.push({url,body:JSON.parse(options.body)});if(fail)throw new Error('Preview is stale');
@@ -439,6 +439,13 @@ def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
     assert context.eval("requests.at(-1).url") == "/corporate-actions/cases/case-1/split/preview"
     assert context.eval("nodes['apply-split'].disabled") is False
     assert "129" in context.eval("nodes['split-snapshots'].children.map(r=>r.children.map(c=>c.textContent).join(' ')).join(' ')")
+    assert context.eval("nodes['split-lots'].children[0].children[3].textContent") == "100.5"
+    assert context.eval("nodes['split-lots'].children[1].children[3].textContent") == "67"
+    context.eval("nodes['split-snapshots'].replaceChildren();preview.snapshots[0].after.position_qty='0.00000001';renderSplitPreview(preview)")
+    assert context.eval("nodes['split-snapshots'].children[1].children[2].textContent") == "0.00000001"
+    for quantity, expected in (("1E-8", "0.00000001"), ("1234567890123456.00000001", "1234567890123456.00000001"), ("2.50000000", "2.5"), ("-1E-8", "-0.00000001")):
+        context.eval("nodes['split-snapshots'].replaceChildren();preview.snapshots[0].after.position_qty=" + json.dumps(quantity) + ";renderSplitPreview(preview)")
+        assert context.eval("nodes['split-snapshots'].children[1].children[2].textContent") == expected
     context.eval("nodes['new-shares'].value='4';nodes['new-shares'].oninput()")
     assert context.eval("nodes['apply-split'].disabled") is True
     context.eval("nodes['apply-split'].onclick()")

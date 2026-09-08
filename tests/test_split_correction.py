@@ -94,6 +94,8 @@ def test_preview_rolls_back_apply_rebuilds_and_replay_preserves_correction(datab
     assert result["snapshots"][0]["after"]["provisional"] is False
     assert Decimal(result["lots_before"][0]["remaining_quantity"]) == 2
     assert Decimal(result["lots_after"][0]["remaining_quantity"]) == 3
+    assert Decimal(result["lots_before"][0]["unit_basis"]) == Decimal("100.5")
+    assert Decimal(result["lots_after"][0]["unit_basis"]) == 67
     applied = client.post(base + "/apply", json={**_RATIO, "preview_token": result["preview_token"]})
     assert applied.status_code == 200, applied.text
     state = _state(database)
@@ -117,6 +119,13 @@ def test_preview_rolls_back_apply_rebuilds_and_replay_preserves_correction(datab
         assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is True
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "open"
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is True
+
+    # Reverting to the corrected source reactivates its factor and evidence.
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(b'updated, missing ratio', b'missing ratio').replace(b'<CorporateActions>', b'\n<CorporateActions>')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+        assert c.scalar(text("SELECT resolution_note FROM corporate_action_manual_case")) == _RATIO["note"]
 
 
 @pytest.mark.parametrize("body", [

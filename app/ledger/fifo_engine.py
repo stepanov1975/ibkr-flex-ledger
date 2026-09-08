@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -144,15 +145,19 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         raise ValueError("request.functional_currency must not be blank")
     if request.splits and any(trade.report_date_local is None for trade in request.trades):
         raise ValueError("split accounting requires a broker report date for each trade")
-    splits = sorted(request.splits, key=lambda split: split.report_date_local)
-    for split in splits:
+    for split in request.splits:
         if not split.adjustment_factor.is_finite() or split.adjustment_factor <= 0:
             raise ValueError("corporate-action adjustment_factor must be positive and finite")
+    factors_by_date: dict[date, Decimal] = {}
+    for split in sorted(request.splits, key=lambda split: (split.report_date_local, split.adjustment_factor)):
+        factors_by_date[split.report_date_local] = factors_by_date.get(split.report_date_local, Decimal("1")) * split.adjustment_factor
+    splits = [FifoSplitInput(day, factor) for day, factor in factors_by_date.items()]
+    split_dates = list(factors_by_date)
 
     sorted_trades = sorted(
         request.trades,
         key=lambda trade: (
-            (trade.report_date_local or date.min) if splits else date.min,
+            bisect_right(split_dates, trade.report_date_local or date.min),
             _fifo_parse_timestamp_utc(trade.trade_timestamp_utc),
             (
                 Decimal(trade.transaction_id)
@@ -280,15 +285,33 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
 
 def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> None:
     """Allocate share rounding across surviving FIFO lots, preserving their basis."""
+    if not open_lots:
+        return
     adjusted_quantity = Decimal("0")
     rounded_quantity = Decimal("0")
     precision = Decimal("0.00000001")
+    allocations = []
     for lot in open_lots:
         adjusted_quantity += lot.remaining_quantity * factor
         next_quantity = adjusted_quantity.quantize(precision)
         remaining_quantity = next_quantity - rounded_quantity
-        if remaining_quantity <= 0:
-            raise ValueError("split creates a lot below the supported eight-decimal share precision")
+        allocations.append((lot, remaining_quantity))
+        rounded_quantity = next_quantity
+    survivors = [(lot, quantity) for lot, quantity in allocations if quantity > 0]
+    if not survivors:
+        raise ValueError("split creates a position below the supported eight-decimal share precision")
+    # A zero-share allocation must not discard its cost. Carry it into the
+    # next surviving FIFO lot, or the last survivor for trailing fractions.
+    recipient = survivors[-1][0]
+    for lot, quantity in reversed(allocations):
+        if quantity > 0:
+            recipient = lot
+        else:
+            recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
+            recipient.open_price += lot.open_price * lot.remaining_quantity / recipient.remaining_quantity
+            recipient.realized_pnl_to_date += lot.realized_pnl_to_date
+    open_lots[:] = [lot for lot, quantity in survivors]
+    for lot, remaining_quantity in survivors:
         # Use the allocated quantity to retain this lot's unconsumed cost and
         # fees. Completed closes and their realized P&L are never restated.
         lot_factor = remaining_quantity / lot.remaining_quantity
@@ -297,7 +320,6 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], factor: Decimal) -> Non
         lot.open_quantity = (lot.open_quantity * lot_factor).quantize(precision)
         lot.remaining_quantity = remaining_quantity
         lot.cost_basis_open = lot.unit_basis * lot.open_quantity * (1 if lot.direction == "long" else -1)
-        rounded_quantity = next_quantity
 
 
 def _fifo_parse_timestamp_utc(timestamp_value: str) -> datetime:

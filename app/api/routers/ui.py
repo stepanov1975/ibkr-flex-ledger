@@ -155,10 +155,16 @@ let splitCase=null,splitPreview=null,splitDraft=null,splitVersion=0,splitBusy=fa
 function invalidateSplit(){splitVersion++;splitPreview=null;splitDraft=null;el('apply-split').disabled=true;el('split-summary').textContent='';el('split-snapshots').replaceChildren();el('split-lots').replaceChildren()}
 function openSplit(item){if(splitBusy)return;splitCase=item;invalidateSplit();el('case-error').textContent='';el('split-editor').hidden=false;el('split-title').textContent='Correct '+item.symbol+' split ratio';el('split-description').textContent=(item.description||'')+' · Effective report date: '+formatDate(item.report_date_local);for(const id of ['new-shares','old-shares','split-note'])el(id).value=''}
 function cancelSplit(){if(splitBusy)return;splitCase=null;invalidateSplit();el('split-editor').hidden=true}
+function formatSplitPosition(value){
+const raw=esc(value),match=/^(-?)([0-9]+)(?:[.]([0-9]*))?(?:e([+-]?[0-9]+))?$/i.exec(raw);if(!match)return raw;
+const digits=match[2]+(match[3]||''),point=match[2].length+Number(match[4]||0);
+const fixed=point<=0?'0.'+'0'.repeat(-point)+digits:point>=digits.length?digits.padEnd(point,'0'):digits.slice(0,point)+'.'+digits.slice(point);
+const [whole,fractional='']=fixed.split('.'),fraction=fractional.replace(/0+$/,'');return match[1]+whole+(fraction?'.'+fraction:'');
+}
 function renderSplitPreview(result){
 el('split-summary').textContent='Preview only — no changes saved. Ratio: '+result.factor+'. '+result.snapshots.length+' snapshot(s). Apply only after checking these changes against the broker statement.';
-for(const item of result.snapshots){for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');cell(tr,formatDate(item.report_date_local));cell(tr,side==='before'?'Before':'After');cell(tr,formatPosition(values.position_qty));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional?'Provisional':'Final');el('split-snapshots').append(tr)}}
-for(const side of ['before','after']){result['lots_'+side].forEach((lot,index)=>{const tr=document.createElement('tr');[side==='before'?'Before':'After',index+1,lot.remaining_quantity,lot.open_price,lot.cost_basis_open].forEach(v=>cell(tr,v));el('split-lots').append(tr)})}}
+for(const item of result.snapshots){for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');cell(tr,formatDate(item.report_date_local));cell(tr,side==='before'?'Before':'After');cell(tr,formatSplitPosition(values.position_qty));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional?'Provisional':'Final');el('split-snapshots').append(tr)}}
+for(const side of ['before','after']){result['lots_'+side].forEach((lot,index)=>{const tr=document.createElement('tr');[side==='before'?'Before':'After',index+1,formatSplitPosition(lot.remaining_quantity),lot.unit_basis,lot.cost_basis_open].forEach(v=>cell(tr,v));el('split-lots').append(tr)})}}
 async function requestSplit(apply){
 if(!splitCase||splitBusy||(apply&&!splitPreview))return;
 el('case-error').textContent='';if(!apply)invalidateSplit();

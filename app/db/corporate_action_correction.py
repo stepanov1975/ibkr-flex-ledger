@@ -152,7 +152,9 @@ class SQLAlchemySplitCorrectionService:
     @staticmethod
     def _lots(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(text(
-            "SELECT open_event_trade_fill_id, remaining_quantity, open_price, cost_basis_open "
-            "FROM position_lot WHERE account_id=:account_id AND instrument_id=:instrument_id "
-            "AND status='open' ORDER BY opened_at_utc, open_event_trade_fill_id"
+            "SELECT l.open_event_trade_fill_id, l.remaining_quantity, l.open_price, l.cost_basis_open, "
+            "l.cost_basis_open / (l.open_quantity * CASE WHEN t.side='SELL' THEN -1 ELSE 1 END) AS unit_basis "
+            "FROM position_lot l JOIN event_trade_fill t ON t.event_trade_fill_id=l.open_event_trade_fill_id "
+            "WHERE l.account_id=:account_id AND l.instrument_id=:instrument_id "
+            "AND l.status='open' ORDER BY l.opened_at_utc, l.open_event_trade_fill_id"
         ), params).mappings()]

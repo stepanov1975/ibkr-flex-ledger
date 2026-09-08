@@ -637,7 +637,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     ), correction_scope)
                     connection.execute(text(
                         "UPDATE corporate_action_manual_case c SET status='resolved', resolved_at_utc=now(), "
-                        "updated_at_utc=now(), resolution_note='Automatically handled from explicit broker data.', "
+                        "updated_at_utc=now(), resolution_note=CASE WHEN c.split_factor IS NULL "
+                        "THEN 'Automatically handled from explicit broker data.' ELSE c.resolution_note END, "
                         "resolution_source_raw_record_id=CASE WHEN c.split_factor IS NULL THEN e.source_raw_record_id "
                         "ELSE c.resolution_source_raw_record_id END "
                         "FROM event_corp_action e WHERE c.event_corp_action_id=e.event_corp_action_id "
