@@ -599,6 +599,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:report_date_local AS date), :description, :requires_manual, :provisional, "
                             "CAST(:manual_case_id AS uuid)"
                             ") ON CONFLICT ON CONSTRAINT uq_event_corp_action_account_action DO UPDATE SET "
+                            "source_raw_record_id = EXCLUDED.source_raw_record_id, "
+                            "ingestion_run_id = EXCLUDED.ingestion_run_id, "
                             "instrument_id = COALESCE(EXCLUDED.instrument_id, event_corp_action.instrument_id), "
                             "transaction_id = COALESCE(EXCLUDED.transaction_id, event_corp_action.transaction_id), "
                             "reorg_code = EXCLUDED.reorg_code, "
@@ -612,6 +614,36 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     )
 
                 if normalized_corp_action_requests:
+                    correction_scope = {"source_ids": [row["source_raw_record_id"] for row in normalized_corp_action_requests]}
+                    # A manual correction remains valid only for the broker payload
+                    # that was previewed. Replaying identical raw data retains it.
+                    connection.execute(text(
+                        "UPDATE event_corp_action e SET requires_manual=false, provisional=false "
+                        "FROM corporate_action_manual_case c, raw_record original, raw_record current "
+                        "WHERE c.event_corp_action_id=e.event_corp_action_id AND c.split_factor IS NOT NULL "
+                        "AND original.raw_record_id=c.resolution_source_raw_record_id "
+                        "AND current.raw_record_id=e.source_raw_record_id "
+                        "AND original.source_payload=current.source_payload "
+                        "AND e.action_id IS NOT NULL AND e.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
+                    connection.execute(text(
+                        "UPDATE corporate_action_manual_case c SET status='open', resolved_at_utc=NULL, updated_at_utc=now() "
+                        "FROM event_corp_action e, raw_record original, raw_record current "
+                        "WHERE c.event_corp_action_id=e.event_corp_action_id AND e.requires_manual "
+                        "AND c.status<>'open' AND original.raw_record_id=c.resolution_source_raw_record_id "
+                        "AND current.raw_record_id=e.source_raw_record_id AND original.source_payload<>current.source_payload "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
+                    connection.execute(text(
+                        "UPDATE corporate_action_manual_case c SET status='resolved', resolved_at_utc=now(), "
+                        "updated_at_utc=now(), resolution_note='Automatically handled from explicit broker data.', "
+                        "resolution_source_raw_record_id=CASE WHEN c.split_factor IS NULL THEN e.source_raw_record_id "
+                        "ELSE c.resolution_source_raw_record_id END "
+                        "FROM event_corp_action e WHERE c.event_corp_action_id=e.event_corp_action_id "
+                        "AND NOT e.requires_manual AND c.status='open' "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
                     connection.execute(
                         text(
                             "INSERT INTO corporate_action_manual_case ("

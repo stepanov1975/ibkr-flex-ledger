@@ -100,3 +100,23 @@ def test_supported_split_is_processed_without_review(database):
     assert SQLAlchemyPortfolioService(database).db_manual_case_list("open") == []
     with database.connect() as connection:
         assert connection.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
+
+
+def test_corrected_broker_split_uses_current_source_and_closes_obsolete_case(database):
+    """An explicit correction must reach the ledger, rather than the old raw row."""
+    harness = _harness(database)
+    payload = _SEEDED_PAYLOAD.replace(
+        b"<CorporateActions />",
+        b'<CorporateActions><CorporateAction actionID="CORRECT1" transactionID="CORRECT2" '
+        b'conid="900001" symbol="SEED" type="FS" currency="USD" reportDate="20260821" '
+        b'description="Broker split" /></CorporateActions>',
+    )
+    harness[1].payload_bytes = payload
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    assert len(SQLAlchemyPortfolioService(database).db_manual_case_list("open")) == 1
+    harness[1].payload_bytes = payload.replace(b'Broker split', b'SEED(US1) SPLIT 3 FOR 2 (SEED, TEST, US1)')
+    assert harness[0].job_execute("ingestion_run").status == "success"
+    factors = harness[5].db_ledger_corporate_action_list_for_account("INTEGRITY", "2026-08-21")
+    assert len(factors) == 1
+    assert factors[0].adjustment_factor == "1.5"
+    assert SQLAlchemyPortfolioService(database).db_manual_case_list("open") == []

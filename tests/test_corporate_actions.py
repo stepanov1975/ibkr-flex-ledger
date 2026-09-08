@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from app.domain import domain_classify_corporate_action
 
 
@@ -35,3 +37,20 @@ def test_cash_dividend_requires_review_until_cashflows_can_be_matched() -> None:
 
     assert complete.requires_manual is True
     assert incomplete.requires_manual is True
+
+
+
+@pytest.mark.parametrize("code,payload,factor", [
+    ("FS", {"description": "SNEX(US8618961085) SPLIT 3 FOR 2 (SNEX, STONEX GROUP INC, US8618961085)"}, "1.5"),
+    ("RS", {"description": "TEST(US1) SPLIT 1 FOR 10 (TEST, TEST INC, US1)"}, "0.1"),
+    ("FS", {"description": "SPLIT 3 FOR 0 (TEST)"}, None),
+    ("FS", {"description": "SPLIT 3 FOR 2 (TEST) SPLIT 4 FOR 1 (TEST)"}, None),
+    ("SO", {"description": "SPINOFF 1 FOR 60 (TEST)"}, None),
+    ("FS", {"ratio": "NaN"}, None),
+    ("FS", {"ratio": "Infinity"}, None),
+    ("FS", {"ratio": "-Infinity"}, None),
+])
+def test_explicit_split_description_and_invalid_factors(code, payload, factor):
+    result = domain_classify_corporate_action(code, payload)
+    assert result.requires_manual is (factor is None)
+    assert result.adjustment_factor == (None if factor is None else Decimal(factor))

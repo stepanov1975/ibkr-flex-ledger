@@ -226,13 +226,16 @@ class StockLedgerSnapshotService:
                 "FX",
             }
             converted_trades: list[FifoTradeFillInput] = []
+            actions = corporate_actions_by_instrument.get(instrument_id, [])
+            adjusted_position = Decimal("0")
+            rounded_position = Decimal("0")
             fx_sources: set[str] = set()
             missing_fx = False
             for trade in instrument_trades:
                 contract_multiplier = self._trade_contract_multiplier(trade)
                 adjustment_factor = self._trade_adjustment_factor(
                     trade,
-                    corporate_actions_by_instrument.get(instrument_id, []),
+                    actions,
                 )
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
@@ -261,19 +264,29 @@ class StockLedgerSnapshotService:
                         commission_fx_rate = Decimal("0")
                     else:
                         commission_fx_rate = resolved_commission_fx_rate
+                quantity = Decimal(trade.quantity)
+                price = Decimal(trade.price) * contract_multiplier * trade_fx_rate
+                if actions:
+                    # Round the running position, not each fill independently:
+                    # three one-share buys in a 1-for-3 split must total one share.
+                    adjusted_position += abs(quantity) * adjustment_factor * (1 if trade.side == "BUY" else -1)
+                    next_position = adjusted_position.quantize(Decimal("0.00000001"))
+                    adjusted_quantity = abs(next_position - rounded_position)
+                    if adjusted_quantity == 0:
+                        raise ValueError("split creates a fill below the supported eight-decimal share precision")
+                    # Preserve each fill's total cost when allocating the rounding
+                    # remainder across its lots.
+                    price = price * abs(quantity) / adjusted_quantity
+                    quantity = adjusted_quantity
+                    rounded_position = next_position
                 converted_trades.append(
                     FifoTradeFillInput(
                         event_trade_fill_id=str(trade.event_trade_fill_id),
                         source_raw_record_id=str(trade.source_raw_record_id),
                         trade_timestamp_utc=trade.trade_timestamp_utc.isoformat(),
                         side=trade.side,
-                        quantity=Decimal(trade.quantity) * adjustment_factor,
-                        price=(
-                            Decimal(trade.price)
-                            * contract_multiplier
-                            * trade_fx_rate
-                            / adjustment_factor
-                        ),
+                        quantity=quantity,
+                        price=price,
                         fees=abs(Decimal(trade.fees or "0")) * trade_fx_rate + commission * commission_fx_rate,
                         transaction_id=trade.transaction_id,
                         withholding_tax=Decimal("0"),

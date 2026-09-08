@@ -388,67 +388,80 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
     assert context.eval("nodes['total-pnl'].className") == "metric"
 
 
-def test_case_review_shows_guidance_and_preserves_notes_without_false_resolution() -> None:
-    """Run the review UI through cancel, blank, failure, success and history."""
 
+def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
+    """Execute correction controls; unsupported cases never offer completion."""
     application = FastAPI()
     application.include_router(api_create_ui_router())
     script = TestClient(application).get("/ui/operations").text.split("<script>", 1)[1].split("</script>", 1)[0]
     script = script.rsplit("loadAll();", 1)[0]
     context = quickjs.Context()
     context.eval("""
-        function node(){return {children:[],textContent:'',className:'',checked:false,disabled:false,
+        function node(){return {children:[],textContent:'',value:'',className:'',checked:false,disabled:false,hidden:false,
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
         const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
-        const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}}};
-        let note=null,promptText='',requests=[],fail=false;
-        const prompt=message=>{promptText=message;return note};
-        const item={case_id:'case-1',symbol:'TEST',action_type:'CASHDIV',status:'open',owner:null,
-          created_at_utc:'2026-08-21T09:00:00Z',report_date_local:'2026-08-21',
-          description:'Broker dividend',review_reason:'Unmatched cash payment',
-          required_check:'Check payment and withholding',requires_manual:true,resolution_note:null};
+        const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}},
+          NumberFormat:function(){return {format:value=>String(value)}}};
+        let requests=[],fail=false;
+        const items=[
+          {case_id:'case-1',symbol:'TEST',action_type:'FORWARDSPLIT',status:'open',owner:null,
+           created_at_utc:'2026-08-21T09:00:00Z',report_date_local:'2026-08-21',description:'Broker split',
+           review_reason:'Missing ratio',required_check:'Check the broker ratio',requires_manual:true,can_correct_split:true},
+          {case_id:'case-2',symbol:'OTHER',action_type:'SPINOFF',status:'resolved',owner:null,
+           review_reason:'Unsupported spinoff',required_check:'Accounting support required',
+           requires_manual:true,can_correct_split:false,resolution_note:'Previously reviewed'}];
     """)
     context.eval(script)
     context.eval("""
+        const preview={preview_token:'token',factor:'1.5',snapshots:[{report_date_local:'2026-08-21',currency:'USD',
+          before:{position_qty:'2',cost_basis:'201',realized_pnl:'0',unrealized_pnl:'19',total_pnl:'19',provisional:true},
+          after:{position_qty:'3',cost_basis:'201',realized_pnl:'0',unrealized_pnl:'129',total_pnl:'129',provisional:false}}],
+          lots_before:[{remaining_quantity:'2',open_price:'100.5',cost_basis_open:'201'}],
+          lots_after:[{remaining_quantity:'3',open_price:'67',cost_basis_open:'201'}]};
         json=async(url,options)=>{
-          if(options){requests.push(JSON.parse(options.body));if(fail)throw new Error('Save failed');
-            item.status=JSON.parse(options.body).status;item.resolution_note=JSON.parse(options.body).resolution_note;
-            return item}
-          return {items:[item]}
-        };
+          if(!options)return {items};
+          requests.push({url,body:JSON.parse(options.body)});if(fail)throw new Error('Preview is stale');
+          if(url.endsWith('/apply')){items[0].requires_manual=false;items[0].can_correct_split=false;items[0].status='resolved'}
+          return preview};
         loadAll=async()=>loadCases();loadCases();
     """)
     while context.execute_pending_job():
         pass
-    assert "Unmatched cash payment" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
-    assert "Check payment and withholding" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
-    assert "Broker dividend" in context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
-    context.eval("let button=nodes.cases.children[0].children.at(-1).children[0]")
-    assert context.eval("button.textContent") == "Mark reviewed"
-    for note in (None, "   "):
-        context.eval(f"note={json.dumps(note)};button.onclick()")
-        while context.execute_pending_job():
-            pass
-        assert context.eval("requests.length") == 0
-    assert "Check payment and withholding" in context.eval("promptText")
-    assert "provisional" in context.eval("promptText")
-    context.eval("note='  Checked broker statement  ';fail=true;button.onclick()")
+    assert context.eval("nodes['case-count'].textContent") == 2
+    assert context.eval("nodes.cases.children[1].children.at(-1).children.length") == 0
+    assert "Accounting support required" in context.eval("nodes.cases.children[1].children.map(x=>x.textContent).join(' ')")
+    context.eval("nodes.cases.children[0].children.at(-1).children[0].onclick()")
+    assert context.eval("nodes['split-editor'].hidden") is False
+    assert context.eval("nodes['apply-split'].disabled") is True
+    context.eval("nodes['new-shares'].value='3';nodes['old-shares'].value='2';nodes['split-note'].value='Broker notice';nodes['preview-split'].onclick()")
     while context.execute_pending_job():
         pass
-    assert context.eval("nodes['case-error'].textContent") == "Save failed"
-    assert context.eval("button.disabled") is False
-    assert context.eval("item.status") == "open"
-    context.eval("fail=false;button.onclick()")
+    assert context.eval("requests.at(-1).url") == "/corporate-actions/cases/case-1/split/preview"
+    assert context.eval("nodes['apply-split'].disabled") is False
+    assert "129" in context.eval("nodes['split-snapshots'].children.map(r=>r.children.map(c=>c.textContent).join(' ')).join(' ')")
+    context.eval("nodes['new-shares'].value='4';nodes['new-shares'].oninput()")
+    assert context.eval("nodes['apply-split'].disabled") is True
+    context.eval("nodes['apply-split'].onclick()")
     while context.execute_pending_job():
         pass
-    assert context.eval("requests.at(-1).resolution_note") == "Checked broker statement"
-    assert context.eval("requests.at(-1).status") == "resolved"
-    assert context.eval("nodes['case-count'].textContent") == 0
-    assert context.eval("nodes.cases.children.length") == 0
-    context.eval("nodes['show-reviewed'].checked=true;nodes['show-reviewed'].onchange()")
+    assert context.eval("requests.length") == 1
+    context.eval("nodes['cancel-split'].onclick()")
+    assert context.eval("nodes['split-editor'].hidden") is True
+    context.eval("nodes.cases.children[0].children.at(-1).children[0].onclick();nodes['new-shares'].value='3';nodes['old-shares'].value='2';nodes['split-note'].value='Broker notice';nodes['preview-split'].onclick()")
     while context.execute_pending_job():
         pass
-    row = context.eval("nodes.cases.children[0].children.map(x=>x.textContent).join(' ')")
-    assert "Reviewed" in row
-    assert "Checked broker statement" in row
-    assert "Provisional" in row
+    context.eval("fail=true;nodes['apply-split'].onclick()")
+    while context.execute_pending_job():
+        pass
+    assert context.eval("nodes['case-error'].textContent") == "Preview is stale"
+    assert context.eval("nodes['apply-split'].disabled") is True
+    context.eval("fail=false;nodes['preview-split'].onclick()")
+    while context.execute_pending_job():
+        pass
+    context.eval("nodes['apply-split'].onclick()")
+    while context.execute_pending_job():
+        pass
+    assert context.eval("requests.at(-1).body.preview_token") == "token"
+    assert context.eval("requests.at(-1).body.new_shares") == "3"
+    assert context.eval("nodes['case-count'].textContent") == 1
+    assert context.eval("nodes['split-editor'].hidden") is True

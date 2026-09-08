@@ -105,16 +105,28 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 </style></head><body><header><div><h1>IBKR Flex Ledger</h1><div class="muted">Auditable portfolio accounting</div></div><div><a href="/ui">Portfolio</a> · <a href="/docs">API docs</a> · <button onclick="loadAll()">Refresh</button></div></header>
 <main><div class="grid">
 <section class="card"><h2>Scheduled ingestion success</h2><div id="success" class="metric">—</div><div id="slo-note" class="muted">Loading SLO…</div></section>
-<section class="card"><h2>Open manual cases</h2><div id="case-count" class="metric">—</div><div class="muted">Affected instruments are provisional</div></section>
+<section class="card"><h2>Actions needing attention</h2><div id="case-count" class="metric">—</div><div class="muted">Affected instruments are provisional</div></section>
 <section class="card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div class="muted">Functional currency snapshots</div></section>
 <section class="card wide"><h2>Daily P&amp;L by instrument</h2><div class="scroll"><table><thead><tr><th>Date</th><th>Symbol</th><th>Position</th><th>Realized</th><th>Unrealized</th><th>Total</th><th>State</th></tr></thead><tbody id="pnl"></tbody></table></div></section>
 <section class="card"><h2>Labels</h2><form id="label-form"><input id="label-name" required placeholder="New label"><input id="label-color" placeholder="#68d5b4"><button>Add</button></form><div id="labels"></div></section>
 <section class="card full"><h2>Corporate-action review queue</h2>
-<p class="muted">Supported actions with an explicit adjustment ratio are processed automatically. These cases need a source-data check or accounting support.</p>
-<p class="muted">Mark reviewed saves your findings and archives the case. It does not correct holdings or P&amp;L; unsupported actions remain provisional.</p>
-<label><input id="show-reviewed" type="checkbox"> Show reviewed and dismissed cases</label>
+<p class="muted">Supported actions with an explicit broker split ratio are processed automatically during ingestion. Missing ratios can be corrected below.</p>
+<p class="muted">Preview recalculates the affected snapshots and FIFO lots without saving. Apply correction saves the verified ratio and recalculated accounting together. Unsupported actions remain provisional until accounting support is added.</p>
+<label><input id="show-reviewed" type="checkbox"> Show handled actions</label>
 <p id="case-error" class="bad" role="alert"></p>
-<div class="scroll"><table><thead><tr><th>Created</th><th>Symbol</th><th>Action / report date</th><th>Reason and required check</th><th>Review / accounting</th><th>Owner / review note</th><th></th></tr></thead><tbody id="cases"></tbody></table></div></section>
+<div class="scroll"><table><thead><tr><th>Created</th><th>Symbol</th><th>Action / report date</th><th>Reason and required check</th><th>Accounting status</th><th>Owner / review note</th><th></th></tr></thead><tbody id="cases"></tbody></table></div></section>
+<section class="card full" id="split-editor" hidden><h2 id="split-title">Correct split ratio</h2>
+<p id="split-description" class="muted"></p>
+<p>Enter the share exchange from the broker notice: for a 3-for-2 split, enter 3 new shares and 2 old shares.</p>
+<div><label>New shares <input id="new-shares" type="number" min="0" step="any"></label>
+<label>Old shares <input id="old-shares" type="number" min="0" step="any"></label>
+<label>Broker evidence / note <input id="split-note" maxlength="2000"></label></div>
+<p><button id="preview-split">Preview changes</button> <button id="apply-split" disabled>Apply correction</button> <button id="cancel-split">Cancel</button></p>
+<p id="split-summary" aria-live="polite"></p>
+<div class="scroll"><table><thead><tr><th>Date</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="split-snapshots"></tbody></table></div>
+<h3>Open FIFO lots</h3><p class="muted">Lot quantities and unit costs can change even when broker-reported positions stay the same.</p>
+<div class="scroll"><table><thead><tr><th>Comparison</th><th>Lot</th><th>Remaining units</th><th>Unit cost</th><th>Lot cost basis</th></tr></thead><tbody id="split-lots"></tbody></table></div>
+</section>
 <section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div></section>
 </div></main><script>
 const el=id=>document.getElementById(id); const esc=value=>String(value??'');
@@ -129,20 +141,35 @@ async function loadSlo(){const x=await json('/operations/slo');el('success').tex
 async function loadPnl(){const x=await json('/reports/pnl/by-instrument');el('pnl').replaceChildren();let latest=null,total=0;for(const item of x.items){if(latest===null||item.report_date_local>latest){latest=item.report_date_local;total=0}if(item.report_date_local===latest)total+=Number(item.total_pnl);const tr=document.createElement('tr');[formatDate(item.report_date_local),item.symbol].forEach(v=>cell(tr,v));cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));cell(tr,item.provisional?'Provisional':'Final',item.provisional?'bad':'');el('pnl').append(tr)}el('total-pnl').textContent=latest===null?'No snapshots':total.toFixed(2)}
 async function loadLabels(){const x=await json('/labels');el('labels').replaceChildren();for(const item of x.items){const p=document.createElement('p');p.className='pill';p.textContent=item.name;el('labels').append(p)}}
 async function loadCases(){
-const x=await json('/corporate-actions/cases');el('case-count').textContent=x.items.filter(item=>item.status==='open').length;el('cases').replaceChildren();
+const x=await json('/corporate-actions/cases');el('case-count').textContent=x.items.filter(item=>item.requires_manual).length;el('cases').replaceChildren();
 for(const item of x.items){
-if(item.status!=='open'&&!el('show-reviewed').checked)continue;
+if(!item.requires_manual&&!el('show-reviewed').checked)continue;
 const tr=document.createElement('tr');cell(tr,formatDateTime(item.created_at_utc));cell(tr,item.symbol);
 cell(tr,item.action_type+' · '+formatDate(item.report_date_local)+' · '+(item.description||'No broker description'));
 cell(tr,item.review_reason+' '+item.required_check);
-cell(tr,(item.status==='resolved'?'Reviewed':item.status==='open'?'Needs review':'Dismissed')+(item.requires_manual?' · Provisional':''));
+cell(tr,item.requires_manual?(item.can_correct_split?'Split correction available · Provisional':'Accounting support required · Provisional'):'Handled');
 cell(tr,(item.owner||'Unassigned')+(item.resolution_note?' · '+item.resolution_note:''));
-const td=document.createElement('td');if(item.status==='open'){const button=document.createElement('button');button.textContent='Mark reviewed';button.onclick=()=>reviewCase(item,button);td.append(button)}tr.append(td);el('cases').append(tr)
+const td=document.createElement('td');if(item.can_correct_split){const button=document.createElement('button');button.textContent='Enter split ratio';button.onclick=()=>openSplit(item);td.append(button)}tr.append(td);el('cases').append(tr)
 }}
-async function reviewCase(item,button){
-el('case-error').textContent='';const note=prompt(item.symbol+' · '+item.action_type+'\\n'+item.required_check+'\\n\\nThis saves a review note only. It does not correct holdings or P&L. Actions requiring manual handling remain provisional.\\n\\nReview findings:');if(!note||!note.trim())return;
-button.disabled=true;try{await json('/corporate-actions/cases/'+item.case_id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'resolved',owner:item.owner||'app owner',resolution_note:note.trim()})});await loadAll()}catch(error){el('case-error').textContent=error.message}finally{button.disabled=false}
+let splitCase=null,splitPreview=null,splitDraft=null,splitVersion=0,splitBusy=false;
+function invalidateSplit(){splitVersion++;splitPreview=null;splitDraft=null;el('apply-split').disabled=true;el('split-summary').textContent='';el('split-snapshots').replaceChildren();el('split-lots').replaceChildren()}
+function openSplit(item){if(splitBusy)return;splitCase=item;invalidateSplit();el('case-error').textContent='';el('split-editor').hidden=false;el('split-title').textContent='Correct '+item.symbol+' split ratio';el('split-description').textContent=(item.description||'')+' · Effective report date: '+formatDate(item.report_date_local);for(const id of ['new-shares','old-shares','split-note'])el(id).value=''}
+function cancelSplit(){if(splitBusy)return;splitCase=null;invalidateSplit();el('split-editor').hidden=true}
+function renderSplitPreview(result){
+el('split-summary').textContent='Preview only — no changes saved. Ratio: '+result.factor+'. '+result.snapshots.length+' snapshot(s). Apply only after checking these changes against the broker statement.';
+for(const item of result.snapshots){for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');cell(tr,formatDate(item.report_date_local));cell(tr,side==='before'?'Before':'After');cell(tr,formatPosition(values.position_qty));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional?'Provisional':'Final');el('split-snapshots').append(tr)}}
+for(const side of ['before','after']){result['lots_'+side].forEach((lot,index)=>{const tr=document.createElement('tr');[side==='before'?'Before':'After',index+1,lot.remaining_quantity,lot.open_price,lot.cost_basis_open].forEach(v=>cell(tr,v));el('split-lots').append(tr)})}}
+async function requestSplit(apply){
+if(!splitCase||splitBusy||(apply&&!splitPreview))return;
+el('case-error').textContent='';if(!apply)invalidateSplit();
+const draft=apply?splitDraft:{new_shares:el('new-shares').value,old_shares:el('old-shares').value,note:el('split-note').value.trim()};
+if(!draft.note||![draft.new_shares,draft.old_shares].every(v=>Number.isFinite(Number(v))&&Number(v)>0)){el('case-error').textContent='Enter positive new and old share quantities and the broker evidence.';return}
+const version=splitVersion,body=apply?{...draft,preview_token:splitPreview.preview_token}:draft;
+splitBusy=true;for(const id of ['new-shares','old-shares','split-note','preview-split','apply-split','cancel-split'])el(id).disabled=true;
+try{const result=await json('/corporate-actions/cases/'+splitCase.case_id+'/split/'+(apply?'apply':'preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(version!==splitVersion)return;if(apply){splitCase=null;invalidateSplit();el('split-editor').hidden=true;await loadAll()}else{splitDraft=draft;splitPreview=result;renderSplitPreview(result)}}catch(error){invalidateSplit();el('case-error').textContent=error.message}finally{splitBusy=false;for(const id of ['new-shares','old-shares','split-note','preview-split','cancel-split'])el(id).disabled=false;el('apply-split').disabled=!splitPreview}
 }
+for(const id of ['new-shares','old-shares','split-note'])el(id).oninput=invalidateSplit;
+el('preview-split').onclick=()=>requestSplit(false);el('apply-split').onclick=()=>requestSplit(true);el('cancel-split').onclick=cancelSplit;
 el('show-reviewed').onchange=()=>loadCases().catch(error=>{el('case-error').textContent=error.message});
 async function loadRuns(){const x=await json('/ingestion/runs?limit=20');el('runs').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDateTime(item.started_at_utc),item.run_type,item.status,item.duration_ms??'—',item.error_message??''].forEach(v=>cell(tr,v,item.status==='failed'?'bad':''));el('runs').append(tr)}}
 el('label-form').onsubmit=async event=>{event.preventDefault();await json('/labels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:el('label-name').value,color:el('label-color').value||null})});event.target.reset();await loadLabels()};
