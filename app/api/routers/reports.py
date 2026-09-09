@@ -10,6 +10,7 @@ from io import StringIO
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 
 from app.analytics import ReconciliationDiff, analytics_build_reconciliation_diffs
@@ -36,6 +37,15 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
     """Create stable JSON and CSV report endpoints."""
 
     router = APIRouter(prefix="/reports", tags=["reports"])
+
+    @router.get("/stock-history/{instrument_id}")
+    def stock_history(instrument_id: UUID) -> JSONResponse:
+        report = repository.db_report_stock_history(settings.account_id, instrument_id)
+        if report is None:
+            return JSONResponse(status_code=404, content={"code": "NOT_FOUND", "message": "Instrument not found"})
+        return JSONResponse(content=jsonable_encoder(
+            {"schema_version": "v1", **report}, custom_encoder={Decimal: str},
+        ))
 
     @router.get("/pnl/by-instrument")
     def pnl_by_instrument(

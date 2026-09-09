@@ -166,6 +166,16 @@ reported calendar date. The portfolio table hides zero-position instruments by
 default; its toggle can reveal them, and unavailable display values use `N/A`.
 API payloads and persisted timestamps remain ISO/UTC.
 
+Each portfolio symbol links to `/ui/stocks/{instrument_id}`. This page shows the
+stock and its related options, total realized and unrealized P&L, open and closed
+FIFO lots (including partial closes), and all imported trades, cashflows, and
+corporate actions. The backing report is `GET /reports/stock-history/{instrument_id}`.
+Totals use the latest cumulative snapshot per instrument and include cashflows;
+lot P&L includes trading costs. Amounts are grouped by snapshot currency, while
+activity prices and cash amounts retain their transaction currency. Missing or
+unreconciled lot valuations display `N/A`. Option grouping uses IBKR underlying
+identifiers where available, with standard option-symbol matching as a fallback.
+
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
 SLO visibility. Backup, retention, and restore procedures are documented in

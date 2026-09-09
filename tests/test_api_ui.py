@@ -293,7 +293,9 @@ def test_main_page_toggle_executes_zero_position_filter_without_changing_totals(
     context = quickjs.Context()
     context.eval(
         """
-        function makeNode(){return {children:[],textContent:'',className:'',checked:true,
+        function makeNode(){return {children:[],_text:'',className:'',checked:true,
+          get textContent(){return this._text+this.children.map(child=>child.textContent).join('')},
+          set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
         const nodes={'pnl':makeNode(),'hide-zero-positions':makeNode(),'total-pnl':makeNode()};
         const document={getElementById:id=>nodes[id],createElement:()=>makeNode()};
@@ -365,7 +367,9 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
     script = script.rsplit("loadAll();", 1)[0]
     context = quickjs.Context()
     context.eval("""
-        function node(){return {children:[],textContent:'',className:'',checked:true,
+        function node(){return {children:[],_text:'',className:'',checked:true,
+          get textContent(){return this._text+this.children.map(child=>child.textContent).join('')},
+          set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
         const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
         const Intl={NumberFormat:function(){return {format:value=>String(value)}}};
