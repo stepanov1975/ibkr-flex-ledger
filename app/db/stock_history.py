@@ -17,15 +17,22 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     try:
         with engine.connect() as connection:
             instruments = [dict(row) for row in connection.execute(text(
-                "WITH metadata AS (SELECT DISTINCT ON (r.source_payload->>'conid') "
-                "r.source_payload->>'conid' AS conid, r.source_payload->>'underlyingConid' AS underlying_conid, "
-                "r.source_payload->>'underlyingSymbol' AS underlying_symbol FROM raw_record r "
-                "JOIN ingestion_run run USING (ingestion_run_id) WHERE r.account_id=:account_id "
-                "AND run.status='success' AND r.section_name IN ('Trades', 'SecuritiesInfo', 'OpenPositions') "
-                "AND (NULLIF(BTRIM(r.source_payload->>'underlyingConid'), '') IS NOT NULL "
-                "OR NULLIF(BTRIM(r.source_payload->>'underlyingSymbol'), '') IS NOT NULL) "
-                "ORDER BY r.source_payload->>'conid', r.report_date_local DESC NULLS LAST, "
-                "r.created_at_utc DESC, r.raw_record_id DESC) "
+                "WITH metadata_rows AS (SELECT r.source_payload->>'conid' AS conid, "
+                "NULLIF(BTRIM(r.source_payload->>'underlyingConid'), '') AS underlying_conid, "
+                "NULLIF(BTRIM(r.source_payload->>'underlyingSymbol'), '') AS underlying_symbol, "
+                "r.report_date_local, r.created_at_utc, r.raw_record_id FROM raw_record r "
+                "JOIN ingestion_run run ON run.ingestion_run_id=r.ingestion_run_id "
+                "LEFT JOIN raw_artifact artifact ON artifact.raw_artifact_id=r.raw_artifact_id "
+                "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+                "WHERE r.account_id=:account_id AND (completion.status='success' "
+                "OR (artifact.completed_ingestion_run_id IS NULL AND run.status='success')) "
+                "AND r.section_name IN ('Trades', 'SecuritiesInfo', 'OpenPositions', 'CashTransactions', 'CorporateActions') "
+                "), metadata AS (SELECT conid, "
+                "(array_agg(underlying_conid ORDER BY report_date_local DESC NULLS LAST, created_at_utc DESC, "
+                "raw_record_id DESC) FILTER (WHERE underlying_conid IS NOT NULL))[1] AS underlying_conid, "
+                "(array_agg(underlying_symbol ORDER BY report_date_local DESC NULLS LAST, created_at_utc DESC, "
+                "raw_record_id DESC) FILTER (WHERE underlying_symbol IS NOT NULL))[1] AS underlying_symbol "
+                "FROM metadata_rows GROUP BY conid) "
                 "SELECT i.instrument_id, i.conid, i.symbol, i.asset_category, i.description, "
                 "m.underlying_conid, m.underlying_symbol FROM instrument i LEFT JOIN metadata m USING (conid) "
                 "WHERE i.account_id=:account_id AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH', 'FX') "
@@ -37,10 +44,16 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             root, family = _stock_family(selected, instruments)
             params = {"account_id": account_id, "instrument_ids": [row['instrument_id'] for row in family]}
             snapshots = {row['instrument_id']: dict(row) for row in connection.execute(text(
-                "SELECT DISTINCT ON (instrument_id) instrument_id, report_date_local, currency, position_qty, "
-                "cost_basis, realized_pnl, unrealized_pnl, total_pnl, provisional FROM pnl_snapshot_daily "
-                "WHERE account_id=:account_id AND instrument_id=ANY(:instrument_ids) "
-                "ORDER BY instrument_id, report_date_local DESC"
+                "SELECT DISTINCT ON (s.instrument_id) s.instrument_id, s.report_date_local, s.currency, s.position_qty, "
+                "s.cost_basis, s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
+                "GREATEST(s.created_at_utc, run.ended_at_utc, (SELECT max(completion.ended_at_utc) "
+                "FROM raw_artifact artifact JOIN ingestion_run completion "
+                "ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+                "WHERE artifact.account_id=s.account_id AND artifact.ingestion_run_id=s.ingestion_run_id "
+                "AND completion.status='success')) AS calculated_at_utc "
+                "FROM pnl_snapshot_daily s LEFT JOIN ingestion_run run ON run.ingestion_run_id=s.ingestion_run_id "
+                "WHERE s.account_id=:account_id AND s.instrument_id=ANY(:instrument_ids) "
+                "ORDER BY s.instrument_id, s.report_date_local DESC"
             ), params).mappings()}
             lots = [dict(row) for row in connection.execute(text(
                 "SELECT l.instrument_id, l.open_event_trade_fill_id, l.opened_at_utc, l.closed_at_utc, "
@@ -64,6 +77,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             ):
                 activity.extend(dict(row) for row in connection.execute(text(
                     f"SELECT event.{identifier} AS event_id, '{kind}' AS event_type, i.instrument_id, i.symbol, "
+                    "GREATEST(event.created_at_utc, raw.created_at_utc) AS recorded_at_utc, "
                     f"event.report_date_local, event.source_raw_record_id, {columns} FROM {table} event "
                     "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
                     "JOIN instrument i ON i.account_id=event.account_id AND "
@@ -73,6 +87,16 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 ), params).mappings())
     except SQLAlchemyError as error:
         raise RuntimeError("stock history report failed") from error
+
+    # Business dates catch later activity; recording times also catch same-day arrivals after a snapshot.
+    stale_instruments = set()
+    for event in activity:
+        recorded_at = event.pop('recorded_at_utc')
+        snapshot = snapshots.get(event['instrument_id'], {})
+        if snapshot and (event['report_date_local'] > snapshot['report_date_local']
+                         or recorded_at > snapshot['calculated_at_utc']):
+            stale_instruments.add(event['instrument_id'])
+            snapshot['provisional'] = True
 
     positions = []
     for member in family:
@@ -135,6 +159,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     return {
         'instrument_id': root['instrument_id'], 'symbol': root['symbol'], 'description': root['description'],
         'report_date_local': max(dates) if dates else None,
+        'stale': bool(stale_instruments),
         'provisional': missing_snapshot or any(row['provisional'] for row in positions) or len(dates) > 1,
         'totals': totals, 'positions': positions, 'lots': lots, 'activity': activity,
     }

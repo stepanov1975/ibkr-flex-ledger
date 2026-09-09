@@ -27,6 +27,7 @@ from app.db.stock_history import _stock_family
 from test_end_to_end_seeded import (
     _SeededAdapter, _create_database, _database_url, _drop_database, _reachable_database_url,
 )
+from test_ingestion_integrity_regressions import _harness
 
 
 _PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">
@@ -231,3 +232,89 @@ def test_option_only_family_combines_underlying_id_and_symbol_fallback(selected_
     ]
     _, family = _stock_family(instruments[selected_index], instruments)
     assert {row['conid'] for row in family} == {'102', '103'}
+
+
+@pytest.mark.parametrize('history_database', [
+    _PAYLOAD.replace(b'underlyingConid="101" underlyingSymbol="TEST"', b''),
+], indirect=True, ids=['new-metadata'])
+def test_option_metadata_survives_successful_retry_of_failed_artifact(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(b'TEST  260918P00100000', b'ADJUSTED OPTION')
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after canonical commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert '102' in {row['conid'] for row in report['positions']}
+    option_report = client.get(f"/reports/stock-history/{ids['102']}").json()
+    assert option_report['instrument_id'] == str(ids['101'])
+
+
+def test_newer_symbol_only_metadata_preserves_older_underlying_id(history_database):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'<SecuritiesInfo />',
+        b'<SecuritiesInfo><SecurityInfo conid="102" underlyingSymbol="OLD_TEST" /></SecuritiesInfo>',
+    )
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert '102' in {row['conid'] for row in report['positions']}
+    option_report = client.get(f"/reports/stock-history/{ids['102']}").json()
+    assert option_report['instrument_id'] == str(ids['101'])
+
+
+@pytest.mark.parametrize('section,record,event_type', [
+    ('CashTransactions', '<CashTransaction transactionID="20" conid="106" symbol="ADJUSTED OPTION" '
+     'assetCategory="OPT" currency="USD" type="Dividends" amount="2" reportDate="20260821" '
+     'underlyingConid="101" underlyingSymbol="TEST" />', 'cashflow'),
+    ('CorporateActions', '<CorporateAction actionID="20" transactionID="20" conid="106" '
+     'symbol="ADJUSTED OPTION" assetCategory="OPT" currency="USD" type="SPINOFF" reportDate="20260821" '
+     'underlyingConid="101" underlyingSymbol="TEST" />', 'corporate_action'),
+], ids=['cashflow-option', 'corporate-action-option'])
+def test_option_metadata_from_all_instrument_activity(history_database, section, record, event_type):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    payload = _PAYLOAD.replace(b'<CorporateActions />', b'<CorporateActions></CorporateActions>')
+    adapter.payload_bytes = payload.replace(f'</{section}>'.encode(), (record+f'</{section}>').encode())
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert '106' in {row['conid'] for row in report['positions']}
+    assert any(row['symbol'] == 'ADJUSTED OPTION' and row['event_type'] == event_type for row in report['activity'])
+
+
+@pytest.mark.parametrize('activity_date', ['20260821', '20260822'], ids=['same-day', 'next-day'])
+def test_activity_after_failed_snapshot_marks_pnl_stale_until_retry(history_database, monkeypatch, activity_date):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    new_cashflow = (f'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
+                    f'type="Dividends" amount="7" currency="USD" reportDate="{activity_date}" />').encode()
+    adapter.payload_bytes = _PAYLOAD.replace(b'</CashTransactions>', new_cashflow+b'</CashTransactions>').replace(
+        b'<FlexStatement reportDate="20260821">', f'<FlexStatement reportDate="{activity_date}">'.encode(),
+    )
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after canonical commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['provisional'] is True
+    assert report['stale'] is True
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
+    stock_lot = next(row for row in report['lots'] if row['conid'] == '101')
+    assert stock_lot['provisional'] is True
+    assert stock_lot['unrealized_pnl'] is None
+    assert any(row['event_type'] == 'cashflow' and Decimal(row['amount']) == 7 for row in report['activity'])
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is False
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('488.2')

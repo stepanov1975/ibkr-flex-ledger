@@ -85,3 +85,14 @@ def test_history_renders_pnl_closed_and_open_operations_and_errors():
     assert context.eval("nodes['history-error'].textContent") == 'Instrument not found'
     assert context.eval("nodes['realized-pnl'].textContent") == 'N/A'
     assert context.eval('nodes.lots.children.length') == 0
+
+
+def test_history_explains_when_pnl_snapshots_lag_behind_activity():
+    response = _page(f'/ui/stocks/{uuid4()}')
+    script = response.text.split('<script>')[1].split('</script>')[0].rsplit('loadHistory();', 1)[0]
+    context = _context(script)
+    context.eval('''renderHistory({symbol:'TEST',report_date_local:'2026-08-21',provisional:true,stale:true,
+      totals:[],positions:[],lots:[],activity:[]})''')
+    message = context.eval("nodes['history-state'].textContent").lower()
+    assert 'snapshot' in message
+    assert 'activity' in message
