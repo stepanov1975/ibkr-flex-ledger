@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -36,4 +36,9 @@ def snapshot_resolve_report_date_local(timestamp_utc: str) -> str:
     return parsed_timestamp.astimezone(_TASK7_LOCAL_REPORT_TZ).date().isoformat()
 
 
-__all__ = ["snapshot_resolve_report_date_local"]
+def snapshot_report_date_start_utc(report_date_local: date) -> datetime:
+    """Represent an action known only by business date at that day's start."""
+    return datetime.combine(report_date_local, time.min, tzinfo=_TASK7_LOCAL_REPORT_TZ).astimezone(timezone.utc)
+
+
+__all__ = ["snapshot_resolve_report_date_local", "snapshot_report_date_start_utc"]

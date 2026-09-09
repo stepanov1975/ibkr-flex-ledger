@@ -21,6 +21,7 @@ from app.db.interfaces import (
     RawRecordForCanonicalMapping,
     RawRecordReadRepositoryPort,
 )
+from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
 class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, RawRecordReadRepositoryPort):
@@ -464,6 +465,9 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             self._db_canonical_validate_corp_action_request(request) for request in corp_action_requests
         ]
 
+        affected_instrument_ids = {
+            row["instrument_id"] for row in normalized_corp_action_requests if row["instrument_id"] is not None
+        }
         corp_action_requests_with_action_id = [
             request for request in normalized_corp_action_requests if request["action_id"] is not None
         ]
@@ -588,6 +592,25 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     )
 
                 if corp_action_requests_with_action_id:
+                    # Capture both sides before replacing provenance, including
+                    # automatic actions with no manual case or saved factor.
+                    for request in corp_action_requests_with_action_id:
+                        invalidated = connection.execute(text(
+                            "UPDATE pnl_snapshot_daily p SET calculation_provisional=true, provisional=true "
+                            "FROM event_corp_action e, raw_record previous, raw_record incoming "
+                            "WHERE e.account_id=:account_id AND e.action_id=:action_id "
+                            "AND previous.raw_record_id=e.source_raw_record_id "
+                            "AND incoming.raw_record_id=CAST(:source_raw_record_id AS uuid) "
+                            "AND (previous.source_payload<>incoming.source_payload "
+                            "OR (e.requires_manual AND NOT :requires_manual) "
+                            "OR e.report_date_local<>CAST(:report_date_local AS date) "
+                            "OR e.instrument_id IS DISTINCT FROM COALESCE(CAST(:instrument_id AS uuid), e.instrument_id)) "
+                            "AND p.account_id=e.account_id "
+                            "AND (p.instrument_id=e.instrument_id OR p.instrument_id=CAST(:instrument_id AS uuid)) "
+                            "AND p.report_date_local>=LEAST(e.report_date_local, CAST(:report_date_local AS date)) "
+                            "RETURNING p.instrument_id"
+                        ), request).mappings().all()
+                        affected_instrument_ids.update(str(row["instrument_id"]) for row in invalidated)
                     connection.execute(
                         text(
                             "INSERT INTO event_corp_action ("
@@ -599,6 +622,9 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:report_date_local AS date), :description, :requires_manual, :provisional, "
                             "CAST(:manual_case_id AS uuid)"
                             ") ON CONFLICT ON CONSTRAINT uq_event_corp_action_account_action DO UPDATE SET "
+                            "source_raw_record_id = EXCLUDED.source_raw_record_id, "
+                            "ingestion_run_id = EXCLUDED.ingestion_run_id, "
+                            "conid = EXCLUDED.conid, "
                             "instrument_id = COALESCE(EXCLUDED.instrument_id, event_corp_action.instrument_id), "
                             "transaction_id = COALESCE(EXCLUDED.transaction_id, event_corp_action.transaction_id), "
                             "reorg_code = EXCLUDED.reorg_code, "
@@ -612,6 +638,42 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     )
 
                 if normalized_corp_action_requests:
+                    correction_scope = {"source_ids": [row["source_raw_record_id"] for row in normalized_corp_action_requests]}
+                    # A manual correction remains valid only for the broker payload
+                    # that was previewed. Replaying identical raw data retains it.
+                    connection.execute(text(
+                        "UPDATE event_corp_action e SET requires_manual=false, provisional=false "
+                        "FROM corporate_action_manual_case c, raw_record original, raw_record current "
+                        "WHERE c.event_corp_action_id=e.event_corp_action_id AND c.split_factor IS NOT NULL "
+                        "AND original.raw_record_id=c.resolution_source_raw_record_id "
+                        "AND current.raw_record_id=e.source_raw_record_id "
+                        "AND original.source_payload=current.source_payload "
+                        "AND c.resolution_report_date_local=e.report_date_local AND c.instrument_id=e.instrument_id "
+                        "AND c.action_type=e.reorg_code AND original.source_payload->>'conid'=e.conid "
+                        "AND e.action_id IS NOT NULL AND e.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
+                    connection.execute(text(
+                        "UPDATE corporate_action_manual_case c SET status='open', resolved_at_utc=NULL, updated_at_utc=now() "
+                        "FROM event_corp_action e, raw_record original, raw_record current "
+                        "WHERE c.event_corp_action_id=e.event_corp_action_id AND e.requires_manual "
+                        "AND c.status<>'open' AND original.raw_record_id=c.resolution_source_raw_record_id "
+                        "AND current.raw_record_id=e.source_raw_record_id AND (original.source_payload<>current.source_payload "
+                        "OR c.resolution_report_date_local IS DISTINCT FROM e.report_date_local "
+                        "OR c.instrument_id IS DISTINCT FROM e.instrument_id OR c.action_type<>e.reorg_code "
+                        "OR original.source_payload->>'conid' IS DISTINCT FROM e.conid) "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
+                    connection.execute(text(
+                        "UPDATE corporate_action_manual_case c SET status='resolved', resolved_at_utc=now(), "
+                        "updated_at_utc=now(), resolution_note=CASE WHEN c.split_factor IS NULL "
+                        "THEN 'Automatically handled from explicit broker data.' ELSE c.resolution_note END, "
+                        "resolution_source_raw_record_id=CASE WHEN c.split_factor IS NULL THEN e.source_raw_record_id "
+                        "ELSE c.resolution_source_raw_record_id END "
+                        "FROM event_corp_action e WHERE c.event_corp_action_id=e.event_corp_action_id "
+                        "AND NOT e.requires_manual AND c.status='open' "
+                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
+                    ), correction_scope)
                     connection.execute(
                         text(
                             "INSERT INTO corporate_action_manual_case ("
@@ -630,6 +692,37 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "AND event.manual_case_id IS DISTINCT FROM manual_case.case_id"
                         )
                     )
+                    # Rebuild dirty history for both previous and current
+                    # instruments once their actions are computable. The horizon
+                    # guard permits only the latest eligible lot projection.
+                    history_scope = {"instrument_ids": sorted(affected_instrument_ids)}
+                    snapshots = connection.execute(text(
+                        "SELECT p.account_id, p.report_date_local, p.ingestion_run_id, p.currency, i.conid "
+                        "FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) "
+                        "WHERE p.instrument_id=ANY(CAST(:instrument_ids AS uuid[])) AND p.calculation_provisional "
+                        "AND NOT EXISTS (SELECT 1 FROM event_corp_action pending "
+                        "WHERE pending.instrument_id=p.instrument_id AND pending.requires_manual "
+                        "AND pending.report_date_local<=p.report_date_local) "
+                        "ORDER BY p.report_date_local, p.instrument_id"
+                    ), history_scope).mappings().all()
+                    from app.ledger.snapshot_service import StockLedgerSnapshotService
+
+                    ledger = StockLedgerSnapshotService(SQLAlchemyLedgerSnapshotService(self._engine, connection=connection))
+                    for snapshot in snapshots:
+                        ledger.ledger_snapshot_build_and_persist(
+                            account_id=snapshot["account_id"],
+                            ingestion_run_id=None if snapshot["ingestion_run_id"] is None else str(snapshot["ingestion_run_id"]),
+                            report_date_local=str(snapshot["report_date_local"]),
+                            functional_currency=snapshot["currency"],
+                            affected_conids=frozenset({snapshot["conid"]}),
+                            affected_currencies=frozenset(),
+                        )
+                    connection.execute(text(
+                        "UPDATE pnl_snapshot_daily p SET provisional=p.calculation_provisional OR EXISTS "
+                        "(SELECT 1 FROM corporate_action_manual_case pending WHERE pending.instrument_id=p.instrument_id AND pending.status='open') "
+                        "OR EXISTS (SELECT 1 FROM event_corp_action pending WHERE pending.instrument_id=p.instrument_id AND pending.requires_manual) "
+                        "WHERE p.instrument_id=ANY(CAST(:instrument_ids AS uuid[]))"
+                    ), history_scope)
         except SQLAlchemyError as error:
             raise RuntimeError("canonical bulk upsert failed") from error
 

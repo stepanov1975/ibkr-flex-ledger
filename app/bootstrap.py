@@ -24,6 +24,7 @@ from app.jobs import (
     IngestionOrchestratorConfig,
 )
 from app.ledger import StockLedgerSnapshotService
+from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
 from app.ledger import snapshot_resolve_report_date_local
 from app.operations import (
     AlertEvaluationResult,
@@ -100,6 +101,7 @@ def bootstrap_create_application() -> FastAPI:
         reprocess_orchestrator=reprocess_orchestrator,
         snapshot_repository=snapshot_repository,
         portfolio_repository=portfolio_repository,
+        split_correction_service=SQLAlchemySplitCorrectionService(engine, settings.account_id),
     )
 
 

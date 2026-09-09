@@ -405,8 +405,11 @@ def test_manual_case_update_preserves_calculation_provisional() -> None:
         "case_id": case_id,
         "event_corp_action_id": uuid4(),
         "action_type": "MERGER",
+        "current_action_type": "MERGER",
+        "correction_identity_valid": True,
         "report_date_local": date(2026, 8, 21),
         "description": "Broker merger",
+        "action_id": "MERGER1",
         "requires_manual": True,
         "instrument_id": uuid4(),
         "symbol": "TEST",
@@ -422,7 +425,7 @@ def test_manual_case_update_preserves_calculation_provisional() -> None:
 
     service.db_manual_case_update(case_id, "resolved", "owner", "resolved")
 
-    snapshot_update_query = connection.executed_queries[2]
+    snapshot_update_query = connection.executed_queries[3]
     assert "calculation_provisional OR EXISTS" in snapshot_update_query
 
 

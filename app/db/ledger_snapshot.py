@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from contextlib import nullcontext
+from typing import ContextManager
+from datetime import date
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
+
+from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.interfaces import (
@@ -103,7 +107,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         "AND NOT (snapshot.report_date_local = ANY(CAST(:supported_report_dates AS date[])))"
     )
 
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, connection: Connection | None = None):
         """Initialize ledger/snapshot database service.
 
         Args:
@@ -119,6 +123,13 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if engine is None:
             raise ValueError("engine must not be None")
         self._engine = engine
+        self._transaction_connection = connection
+
+    def _connection_scope(self, write: bool = False) -> ContextManager[Connection]:
+        """Join an outer correction transaction when supplied."""
+        if self._transaction_connection is not None:
+            return nullcontext(self._transaction_connection)
+        return self._engine.begin() if write else self._engine.connect()
 
     def db_ledger_instrument_ids_for_scope(
         self,
@@ -130,7 +141,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
 
         normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(
                         "SELECT instrument_id FROM instrument "
@@ -165,7 +176,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             for instrument_id in instrument_ids
         )
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(
                         "SELECT DISTINCT currency FROM instrument "
@@ -193,7 +204,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if not normalized_instrument_ids:
             return {}
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(
                         "SELECT instrument_id, asset_category FROM instrument "
@@ -276,7 +287,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         )
 
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(statement),
                     parameters,
@@ -359,7 +370,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement += "ORDER BY report_date_local asc, event_cashflow_id asc"
 
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(statement),
                     parameters,
@@ -460,7 +471,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         )
 
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(statement),
                     parameters,
@@ -522,7 +533,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         statement += "ORDER BY report_date_local asc, ingestion_run_id asc, source_raw_record_id asc"
 
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(statement),
                     parameters,
@@ -559,10 +570,14 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             raise ValueError("through_report_date_local must not be blank")
         statement = (
             "SELECT event.instrument_id, event.report_date_local, event.reorg_code AS action_type, "
-            "COALESCE(NULLIF(raw.source_payload->>'ratio','')::numeric, "
-            "NULLIF(raw.source_payload->>'newQuantity','')::numeric / "
-            "NULLIF(NULLIF(raw.source_payload->>'oldQuantity','')::numeric, 0)) AS adjustment_factor "
+            "raw.source_payload, CASE WHEN raw.source_payload = correction_raw.source_payload "
+            "AND manual_case.resolution_report_date_local=event.report_date_local "
+            "AND manual_case.instrument_id=event.instrument_id AND manual_case.action_type=event.reorg_code "
+            "AND correction_raw.source_payload->>'conid'=event.conid AND event.action_id IS NOT NULL "
+            "THEN manual_case.split_factor END AS manual_factor "
             "FROM event_corp_action event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "LEFT JOIN corporate_action_manual_case manual_case USING (event_corp_action_id) "
+            "LEFT JOIN raw_record correction_raw ON correction_raw.raw_record_id=manual_case.resolution_source_raw_record_id "
             "WHERE event.account_id=:account_id AND event.report_date_local<=CAST(:through_date AS date) "
             "AND event.requires_manual=false AND event.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
             "AND event.instrument_id IS NOT NULL "
@@ -579,23 +594,27 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             statement += "AND event.instrument_id = ANY(CAST(:instrument_ids AS uuid[])) "
         statement += "ORDER BY event.report_date_local asc, event.event_corp_action_id asc"
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(statement),
                     parameters,
                 ).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("ledger corporate-action read failed") from error
-        return [
-            LedgerCorporateActionRecord(
+        actions = []
+        for row in rows:
+            factor = row["manual_factor"]
+            if factor is None:
+                factor = domain_classify_corporate_action(row["action_type"], row["source_payload"]).adjustment_factor
+            if factor is None or not factor.is_finite() or factor <= 0:
+                raise ValueError("automatic corporate action has no valid split factor")
+            actions.append(LedgerCorporateActionRecord(
                 instrument_id=row["instrument_id"],
                 report_date_local=row["report_date_local"],
                 action_type=row["action_type"],
-                adjustment_factor=str(row["adjustment_factor"]),
-            )
-            for row in rows
-            if row["adjustment_factor"] is not None
-        ]
+                adjustment_factor=str(factor),
+            ))
+        return actions
 
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
@@ -619,20 +638,21 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_requests = [self._db_ledger_validate_position_lot_upsert_request(request) for request in requests]
 
         try:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
                 connection.execute(
                     text(
                         "INSERT INTO position_lot ("
                         "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, closed_at_utc, "
-                        "open_quantity, remaining_quantity, open_price, cost_basis_open, realized_pnl_to_date, status"
+                        "open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, realized_pnl_to_date, status"
                         ") VALUES ("
                         "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
                         "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                         "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
-                        "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), CAST(:cost_basis_open AS numeric), "
+                        "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), "
                         "CAST(:realized_pnl_to_date AS numeric), :status"
                         ") ON CONFLICT (position_lot_id) DO UPDATE SET "
                         "remaining_quantity = EXCLUDED.remaining_quantity, "
+                        "cost_basis_remaining = EXCLUDED.cost_basis_remaining, "
                         "closed_at_utc = EXCLUDED.closed_at_utc, "
                         "realized_pnl_to_date = EXCLUDED.realized_pnl_to_date, "
                         "status = EXCLUDED.status, "
@@ -643,18 +663,17 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("position lot upsert failed") from error
 
-    def db_position_lot_reconcile_open(
+    def db_position_lot_reconcile(
         self,
         account_id: str,
-        closed_at_utc: datetime,
+        through_report_date_local: str,
         requests: list[PositionLotUpsertRequest],
         instrument_ids: tuple[str, ...] | None = None,
-    ) -> None:
-        """Close stale open lots and upsert the recomputed open-lot projection."""
+    ) -> int:
+        """Atomically reconcile the scoped account's complete open and closed lot history."""
 
         normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
-        if closed_at_utc.tzinfo is None or closed_at_utc.utcoffset() is None:
-            raise ValueError("closed_at_utc must be offset-aware")
+        through_date = self._db_ledger_validate_date_text(through_report_date_local, "through_report_date_local")
         if requests is None:
             raise ValueError("requests must not be None")
         normalized_instrument_ids = (
@@ -676,40 +695,53 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             for request in scoped_requests
         ]
 
-        close_statement = (
-            "UPDATE position_lot SET remaining_quantity = 0, status = 'closed', "
-            "closed_at_utc = :closed_at_utc, updated_at_utc = now() "
-            "WHERE account_id = :account_id AND status = 'open'"
+        # The request contains all true opening lots, including fully closed
+        # ones. Remove derived lots whose fills no longer open a FIFO position.
+        remove_statement = (
+            "DELETE FROM position_lot WHERE account_id = :account_id "
+            "AND NOT (position_lot_id = ANY(CAST(:lot_ids AS uuid[]))) "
+            "AND NOT (instrument_id = ANY(CAST(:newer_instrument_ids AS uuid[])))"
         )
-        close_parameters: dict[str, Any] = {
+        remove_parameters: dict[str, Any] = {
             "account_id": normalized_account_id,
-            "closed_at_utc": closed_at_utc,
+            "lot_ids": [row["position_lot_id"] for row in normalized_requests],
         }
         if normalized_instrument_ids is not None:
-            close_statement += " AND instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
-            close_parameters["instrument_ids"] = list(normalized_instrument_ids)
+            remove_statement += " AND instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
+            remove_parameters["instrument_ids"] = list(normalized_instrument_ids)
 
         try:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
+                # Historical replay must not replace a more recent projection.
+                newer_rows = connection.execute(text(
+                    "SELECT instrument_id FROM event_trade_fill WHERE account_id=:account_id AND report_date_local>:through_date "
+                    "UNION SELECT instrument_id FROM event_corp_action WHERE account_id=:account_id AND report_date_local>:through_date "
+                    "AND NOT requires_manual AND reorg_code IN ('FORWARDSPLIT', 'REVERSESPLIT', 'STOCKDIV') "
+                    "UNION SELECT instrument_id FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local>:through_date"
+                ), {"account_id": normalized_account_id, "through_date": through_date}).mappings().all()
+                newer_ids = {str(row["instrument_id"]) for row in newer_rows if row["instrument_id"] is not None}
+                remove_parameters["newer_instrument_ids"] = list(newer_ids)
+                normalized_requests = [row for row in normalized_requests if str(row["instrument_id"]) not in newer_ids]
                 connection.execute(
-                    text(close_statement),
-                    close_parameters,
+                    text(remove_statement),
+                    remove_parameters,
                 )
                 if normalized_requests:
                     connection.execute(
                         text(
                             "INSERT INTO position_lot ("
                             "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, "
-                            "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, "
+                            "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, "
                             "realized_pnl_to_date, status) VALUES ("
                             "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
                             "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                             "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
                             "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), "
-                            "CAST(:cost_basis_open AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
+                            "CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
                             "ON CONFLICT (position_lot_id) DO UPDATE SET "
                             "open_quantity = EXCLUDED.open_quantity, "
                             "remaining_quantity = EXCLUDED.remaining_quantity, "
+                            "cost_basis_remaining = EXCLUDED.cost_basis_remaining, "
                             "open_price = EXCLUDED.open_price, "
                             "cost_basis_open = EXCLUDED.cost_basis_open, "
                             "closed_at_utc = EXCLUDED.closed_at_utc, "
@@ -720,6 +752,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     )
         except SQLAlchemyError as error:
             raise RuntimeError("position lot reconciliation failed") from error
+
+        return len(normalized_requests)
 
     def db_pnl_snapshot_daily_upsert_many(self, requests: list[PnlSnapshotDailyUpsertRequest]) -> None:
         """UPSERT daily snapshot rows in one batch operation.
@@ -743,7 +777,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_requests = [self._db_ledger_validate_snapshot_upsert_request(request) for request in requests]
 
         try:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
                 connection.execute(
                     text(
                         "INSERT INTO pnl_snapshot_daily ("
@@ -797,7 +831,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             supported_report_dates,
         )
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(self._SNAPSHOT_UNSUPPORTED_LIST_QUERY),
                     parameters,
@@ -829,7 +863,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             supported_report_dates,
         )
         try:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
                 result = connection.execute(text(self._SNAPSHOT_UNSUPPORTED_DELETE_QUERY), parameters)
         except SQLAlchemyError as error:
             raise RuntimeError("unsupported daily snapshot delete failed") from error
@@ -883,7 +917,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         query_template = self._SNAPSHOT_LIST_QUERY_BY_SORT[(normalized_sort_by, normalized_sort_dir)]
 
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 rows = connection.execute(
                     text(query_template),
                     {
@@ -911,7 +945,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_from = self._db_ledger_validate_optional_date_text(report_date_from, "report_date_from")
         normalized_to = self._db_ledger_validate_optional_date_text(report_date_to, "report_date_to")
         try:
-            with self._engine.connect() as connection:
+            with self._connection_scope() as connection:
                 value = connection.execute(
                     text(
                         "SELECT count(*) FROM pnl_snapshot_daily WHERE account_id=:account_id "
@@ -985,6 +1019,10 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "cost_basis_open": self._db_ledger_validate_non_empty_text(
                 request.cost_basis_open,
                 "request.cost_basis_open",
+            ),
+            "cost_basis_remaining": self._db_ledger_validate_non_empty_text(
+                request.cost_basis_remaining,
+                "request.cost_basis_remaining",
             ),
             "realized_pnl_to_date": self._db_ledger_validate_non_empty_text(
                 request.realized_pnl_to_date,

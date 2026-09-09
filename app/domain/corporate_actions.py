@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import re
 
 
 @dataclass(frozen=True)
@@ -55,9 +56,13 @@ def domain_classify_corporate_action(
 
     if action_type in {"FORWARDSPLIT", "REVERSESPLIT", "STOCKDIV"}:
         factor = _domain_corporate_action_factor(source_payload)
+        if factor is not None and not (
+            Decimal("0") < factor < Decimal("1") if action_type == "REVERSESPLIT" else factor > Decimal("1")
+        ):
+            factor = None
         return CorporateActionClassification(
             action_type=action_type,
-            requires_manual=factor is None or factor <= Decimal("0"),
+            requires_manual=factor is None,
             adjustment_factor=factor,
         )
 
@@ -79,9 +84,22 @@ def _domain_corporate_action_factor(source_payload: dict[str, object]) -> Decima
 
     new_quantity = _domain_payload_decimal(source_payload, "newQuantity")
     old_quantity = _domain_payload_decimal(source_payload, "oldQuantity")
-    if new_quantity is None or old_quantity is None or old_quantity == Decimal("0"):
+    if new_quantity is not None and old_quantity is not None and old_quantity > 0:
+        return new_quantity / old_quantity
+
+    # Only accept the explicit broker split clause, never a spinoff ratio or
+    # an inference from the quantity credited to the account.
+    if any(str(source_payload.get(key) or "").strip() for key in ("ratio", "newQuantity", "oldQuantity")):
         return None
-    return new_quantity / old_quantity
+    matches = re.findall(
+        r"\bSPLIT\s+([0-9]+(?:\.[0-9]+)?)\s+FOR\s+([0-9]+(?:\.[0-9]+)?)\s*\(",
+        str(source_payload.get("description") or "").upper(),
+    )
+    if len(matches) == 1:
+        new, old = map(Decimal, matches[0])
+        if new > 0 and old > 0:
+            return new / old
+    return None
 
 
 def _domain_payload_decimal(source_payload: dict[str, object], field_name: str) -> Decimal | None:
@@ -92,6 +110,7 @@ def _domain_payload_decimal(source_payload: dict[str, object], field_name: str) 
     if not normalized:
         return None
     try:
-        return Decimal(normalized)
+        number = Decimal(normalized)
+        return number if number.is_finite() else None
     except InvalidOperation:
         return None

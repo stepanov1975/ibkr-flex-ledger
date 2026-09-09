@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 
@@ -32,6 +33,15 @@ class FifoTradeFillInput:
     withholding_tax: Decimal | None
     event_trade_fill_id: str | None = None
     transaction_id: str | None = None
+    report_date_local: date | None = None
+
+
+@dataclass(frozen=True)
+class FifoSplitInput:
+    """Quantity adjustment effective before trades on its broker report date."""
+
+    report_date_local: date
+    adjustment_factor: Decimal
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,7 @@ class FifoLedgerComputationRequest:
     functional_currency: str
     mark_price: Decimal
     trades: list[FifoTradeFillInput]
+    splits: tuple[FifoSplitInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,17 +73,19 @@ class FifoLedgerComputationResult:
         realized_pnl: Realized PnL including trade fee/withholding impacts.
         unrealized_pnl: Unrealized PnL on open lots at mark price.
         open_lots: Open-lot details for persistence.
+        closed_lots: Lots fully closed by trades or split rounding, with their closing times.
     """
 
     position_quantity: Decimal
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     open_lots: tuple["FifoOpenLotResult", ...]
+    closed_lots: tuple["FifoOpenLotResult", ...] = ()
 
 
 @dataclass(frozen=True)
 class FifoOpenLotResult:
-    """Open-lot details produced by FIFO computation for persistence layers.
+    """Lot details produced by FIFO computation for persistence layers.
 
     Attributes:
         open_event_trade_fill_id: Opening trade-fill identifier.
@@ -82,7 +95,10 @@ class FifoOpenLotResult:
         remaining_quantity: Remaining lot quantity.
         open_price: Opening trade price.
         cost_basis_open: Opening lot cost basis.
+        cost_basis_remaining: Signed cost basis of the unconsumed shares.
         realized_pnl_to_date: Realized PnL posted to this lot.
+        closed_report_date_local: Action date if split rounding eliminated the remainder.
+        closed_at_utc: Execution timestamp if a trade closed the remainder.
     """
 
     open_event_trade_fill_id: str
@@ -92,7 +108,10 @@ class FifoOpenLotResult:
     remaining_quantity: Decimal
     open_price: Decimal
     cost_basis_open: Decimal
+    cost_basis_remaining: Decimal
     realized_pnl_to_date: Decimal
+    closed_report_date_local: date | None = None
+    closed_at_utc: str | None = None
 
 
 @dataclass
@@ -108,6 +127,7 @@ class _OpenFifoLot:
     cost_basis_open: Decimal
     remaining_quantity: Decimal
     unit_basis: Decimal
+    unit_execution_price: Decimal
     realized_pnl_to_date: Decimal
 
 
@@ -132,10 +152,21 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         raise ValueError("request.instrument_id must not be blank")
     if not request.functional_currency.strip():
         raise ValueError("request.functional_currency must not be blank")
+    if request.splits and any(trade.report_date_local is None for trade in request.trades):
+        raise ValueError("split accounting requires a broker report date for each trade")
+    for split in request.splits:
+        if not split.adjustment_factor.is_finite() or split.adjustment_factor <= 0:
+            raise ValueError("corporate-action adjustment_factor must be positive and finite")
+    factors_by_date: dict[date, Decimal] = {}
+    for split in sorted(request.splits, key=lambda split: (split.report_date_local, split.adjustment_factor)):
+        factors_by_date[split.report_date_local] = factors_by_date.get(split.report_date_local, Decimal("1")) * split.adjustment_factor
+    splits = [FifoSplitInput(day, factor) for day, factor in factors_by_date.items()]
+    split_dates = list(factors_by_date)
 
     sorted_trades = sorted(
         request.trades,
         key=lambda trade: (
+            bisect_right(split_dates, trade.report_date_local or date.min),
             _fifo_parse_timestamp_utc(trade.trade_timestamp_utc),
             (
                 Decimal(trade.transaction_id)
@@ -150,8 +181,13 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
 
     open_lots: list[_OpenFifoLot] = []
     realized_pnl = Decimal("0")
+    split_index = 0
+    closed_lots: list[FifoOpenLotResult] = []
 
     for trade in sorted_trades:
+        while split_index < len(splits) and splits[split_index].report_date_local <= (trade.report_date_local or date.min):
+            closed_lots.extend(_fifo_split_open_lots(open_lots, splits[split_index]))
+            split_index += 1
         side = trade.side.strip().upper()
         quantity = abs(trade.quantity)
         if quantity == Decimal("0"):
@@ -179,12 +215,13 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
                 lot_realized = (current_lot.unit_basis - trade.price) * close_quantity
 
             current_lot.remaining_quantity -= close_quantity
-            current_lot.realized_pnl_to_date += lot_realized
+            current_lot.realized_pnl_to_date += lot_realized - (trade_fees + trade_withholding) * close_quantity / quantity
             matched_realized += lot_realized
             quantity_to_close -= close_quantity
             matched_quantity += close_quantity
 
             if current_lot.remaining_quantity == Decimal("0"):
+                closed_lots.append(_fifo_lot_result(current_lot, closed_at=trade.trade_timestamp_utc))
                 open_lots.pop(0)
 
         if matched_quantity > Decimal("0"):
@@ -217,9 +254,13 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
                     cost_basis_open=unit_basis * signed_open_quantity,
                     remaining_quantity=quantity_to_close,
                     unit_basis=unit_basis,
+                    unit_execution_price=trade.price,
                     realized_pnl_to_date=Decimal("0"),
                 )
             )
+
+    for split in splits[split_index:]:
+        closed_lots.extend(_fifo_split_open_lots(open_lots, split))
 
     open_quantity = sum(
         ((lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity) for lot in open_lots),
@@ -238,20 +279,69 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         position_quantity=open_quantity,
         realized_pnl=realized_pnl,
         unrealized_pnl=unrealized_pnl,
-        open_lots=tuple(
-            FifoOpenLotResult(
-                open_event_trade_fill_id=lot.open_event_trade_fill_id,
-                source_raw_record_id=lot.source_raw_record_id,
-                opened_at_utc=lot.opened_at_utc,
-                open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
-                remaining_quantity=lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity,
-                open_price=lot.open_price,
-                cost_basis_open=lot.cost_basis_open,
-                realized_pnl_to_date=lot.realized_pnl_to_date,
-            )
-            for lot in open_lots
-        ),
+        open_lots=tuple(_fifo_lot_result(lot) for lot in open_lots),
+        closed_lots=tuple(closed_lots),
     )
+
+
+def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None, closed_at: str | None = None) -> FifoOpenLotResult:
+    return FifoOpenLotResult(
+        open_event_trade_fill_id=lot.open_event_trade_fill_id,
+        source_raw_record_id=lot.source_raw_record_id,
+        opened_at_utc=lot.opened_at_utc,
+        open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
+        remaining_quantity=Decimal("0") if closed_date else (lot.remaining_quantity if lot.direction == "long" else -lot.remaining_quantity),
+        open_price=lot.open_price,
+        cost_basis_open=lot.cost_basis_open,
+        cost_basis_remaining=Decimal("0") if closed_date else lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1),
+        realized_pnl_to_date=lot.realized_pnl_to_date,
+        closed_report_date_local=closed_date,
+        closed_at_utc=closed_at,
+    )
+
+
+def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) -> list[FifoOpenLotResult]:
+    """Allocate share rounding across surviving FIFO lots, preserving their basis."""
+    if not open_lots:
+        return []
+    adjusted_quantity = Decimal("0")
+    rounded_quantity = Decimal("0")
+    precision = Decimal("0.00000001")
+    allocations = []
+    for lot in open_lots:
+        adjusted_quantity += lot.remaining_quantity * split.adjustment_factor
+        next_quantity = adjusted_quantity.quantize(precision)
+        remaining_quantity = next_quantity - rounded_quantity
+        allocations.append((lot, remaining_quantity))
+        rounded_quantity = next_quantity
+    survivors = [(lot, quantity) for lot, quantity in allocations if quantity > 0]
+    if not survivors:
+        raise ValueError("split creates a position below the supported eight-decimal share precision")
+    closed_lots = [_fifo_lot_result(lot, split.report_date_local) for lot, quantity in allocations if quantity == 0]
+    # A zero-share allocation must not discard its cost. Carry it into the
+    # next surviving FIFO lot, or the last survivor for trailing fractions.
+    recipient = survivors[-1][0]
+    for lot, quantity in reversed(allocations):
+        if quantity > 0:
+            recipient = lot
+        else:
+            recipient.cost_basis_open += lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1)
+            recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
+            execution_value = lot.unit_execution_price * lot.remaining_quantity
+            recipient.open_price += execution_value / recipient.open_quantity
+            recipient.unit_execution_price += execution_value / recipient.remaining_quantity
+    open_lots[:] = [lot for lot, quantity in survivors]
+    for lot, remaining_quantity in survivors:
+        # Use the allocated quantity to retain this lot's unconsumed cost and
+        # fees. Completed closes and their realized P&L are never restated.
+        lot_factor = remaining_quantity / lot.remaining_quantity
+        opening_execution_value = lot.open_price * lot.open_quantity
+        lot.unit_basis = lot.unit_basis * lot.remaining_quantity / remaining_quantity
+        lot.unit_execution_price /= lot_factor
+        lot.open_quantity = (lot.open_quantity * lot_factor).quantize(precision)
+        lot.open_price = opening_execution_value / lot.open_quantity
+        lot.remaining_quantity = remaining_quantity
+    return closed_lots
 
 
 def _fifo_parse_timestamp_utc(timestamp_value: str) -> datetime:

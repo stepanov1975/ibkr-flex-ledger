@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -18,7 +18,8 @@ from app.db import (
     PositionLotUpsertRequest,
 )
 
-from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoTradeFillInput, fifo_compute_instrument
+from .snapshot_dates import snapshot_report_date_start_utc
+from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoSplitInput, FifoTradeFillInput, fifo_compute_instrument
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class StockLedgerSnapshotService:
         functional_currency: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
+        reconcile_position_lots: bool = True,
     ) -> SnapshotBuildResult:
         """Build and persist day-level snapshots for one account context.
 
@@ -84,6 +86,8 @@ class StockLedgerSnapshotService:
             ingestion_run_id: Optional ingestion run identifier.
             report_date_local: Flex statement business date in YYYY-MM-DD format.
             functional_currency: Explicit functional/base currency code.
+            reconcile_position_lots: Update the current lot projection; defer until
+                the final date when replaying historical snapshots in one transaction.
 
         Returns:
             SnapshotBuildResult: Persistence summary for this snapshot build run.
@@ -226,14 +230,12 @@ class StockLedgerSnapshotService:
                 "FX",
             }
             converted_trades: list[FifoTradeFillInput] = []
+            actions = corporate_actions_by_instrument.get(instrument_id, [])
+            splits = tuple(FifoSplitInput(action.report_date_local, Decimal(action.adjustment_factor)) for action in actions)
             fx_sources: set[str] = set()
             missing_fx = False
             for trade in instrument_trades:
                 contract_multiplier = self._trade_contract_multiplier(trade)
-                adjustment_factor = self._trade_adjustment_factor(
-                    trade,
-                    corporate_actions_by_instrument.get(instrument_id, []),
-                )
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
                     functional_currency=normalized_functional_currency,
@@ -261,21 +263,19 @@ class StockLedgerSnapshotService:
                         commission_fx_rate = Decimal("0")
                     else:
                         commission_fx_rate = resolved_commission_fx_rate
+                quantity = Decimal(trade.quantity)
+                price = Decimal(trade.price) * contract_multiplier * trade_fx_rate
                 converted_trades.append(
                     FifoTradeFillInput(
                         event_trade_fill_id=str(trade.event_trade_fill_id),
                         source_raw_record_id=str(trade.source_raw_record_id),
                         trade_timestamp_utc=trade.trade_timestamp_utc.isoformat(),
                         side=trade.side,
-                        quantity=Decimal(trade.quantity) * adjustment_factor,
-                        price=(
-                            Decimal(trade.price)
-                            * contract_multiplier
-                            * trade_fx_rate
-                            / adjustment_factor
-                        ),
+                        quantity=quantity,
+                        price=price,
                         fees=abs(Decimal(trade.fees or "0")) * trade_fx_rate + commission * commission_fx_rate,
                         transaction_id=trade.transaction_id,
+                        report_date_local=trade.report_date_local,
                         withholding_tax=Decimal("0"),
                     )
                 )
@@ -287,6 +287,7 @@ class StockLedgerSnapshotService:
                     functional_currency=normalized_functional_currency,
                     mark_price=Decimal("0"),
                     trades=converted_trades,
+                    splits=splits,
                 )
             )
             fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
@@ -370,6 +371,7 @@ class StockLedgerSnapshotService:
                         functional_currency=normalized_functional_currency,
                         mark_price=mark_price_base,
                         trades=converted_trades,
+                        splits=splits,
                     )
                 )
                 unrealized_pnl = marked_fifo_result.unrealized_pnl
@@ -510,7 +512,7 @@ class StockLedgerSnapshotService:
             if missing_valuation:
                 missing_solid_valuation_count += 1
 
-            for open_lot in fifo_result.open_lots:
+            for open_lot in (*fifo_result.open_lots, *fifo_result.closed_lots):
                 position_lot_requests.append(
                     PositionLotUpsertRequest(
                         position_lot_id=self._build_position_lot_id(
@@ -522,20 +524,21 @@ class StockLedgerSnapshotService:
                         instrument_id=instrument_id,
                         open_event_trade_fill_id=open_lot.open_event_trade_fill_id,
                         opened_at_utc=datetime.fromisoformat(open_lot.opened_at_utc),
-                        closed_at_utc=None,
+                        closed_at_utc=(
+                            datetime.fromisoformat(open_lot.closed_at_utc) if open_lot.closed_at_utc is not None
+                            else snapshot_report_date_start_utc(open_lot.closed_report_date_local) if open_lot.closed_report_date_local is not None
+                            else None
+                        ),
                         open_quantity=str(abs(open_lot.open_quantity)),
                         remaining_quantity=str(abs(open_lot.remaining_quantity)),
                         open_price=str(open_lot.open_price),
                         cost_basis_open=str(open_lot.cost_basis_open),
+                        cost_basis_remaining=str(open_lot.cost_basis_remaining),
                         realized_pnl_to_date=str(open_lot.realized_pnl_to_date),
-                        status="open",
+                        status="open" if open_lot.remaining_quantity else "closed",
                     )
                 )
 
-        closed_at_utc = max(
-            (trade.trade_timestamp_utc for trade in trade_rows),
-            default=datetime.now(timezone.utc),
-        )
         if instrument_ids is not None:
             selected_instrument_ids = set(instrument_ids)
             position_lot_requests = [
@@ -548,18 +551,20 @@ class StockLedgerSnapshotService:
                 for request in snapshot_requests
                 if request.instrument_id in selected_instrument_ids
             ]
-        self._repository.db_position_lot_reconcile_open(
-            account_id=normalized_account_id,
-            closed_at_utc=closed_at_utc,
-            requests=position_lot_requests,
-            instrument_ids=instrument_ids,
-        )
+        position_lot_row_count = 0
+        if reconcile_position_lots:
+            position_lot_row_count = self._repository.db_position_lot_reconcile(
+                account_id=normalized_account_id,
+                through_report_date_local=normalized_report_date,
+                requests=position_lot_requests,
+                instrument_ids=instrument_ids,
+            )
         self._repository.db_pnl_snapshot_daily_upsert_many(snapshot_requests)
 
         return SnapshotBuildResult(
             report_date_local=normalized_report_date,
             snapshot_row_count=len(snapshot_requests),
-            position_lot_row_count=len(position_lot_requests),
+            position_lot_row_count=position_lot_row_count,
             missing_solid_valuation_count=missing_solid_valuation_count,
             broker_position_match_count=broker_position_match_count,
             broker_position_mismatch_count=broker_position_mismatch_count,
@@ -781,9 +786,7 @@ class StockLedgerSnapshotService:
 
         open_cost_basis = sum(
             (
-                (lot.cost_basis_open / lot.open_quantity) * lot.remaining_quantity
-                for lot in open_lots
-                if lot.open_quantity != Decimal("0")
+                lot.cost_basis_remaining for lot in open_lots
             ),
             Decimal("0"),
         )

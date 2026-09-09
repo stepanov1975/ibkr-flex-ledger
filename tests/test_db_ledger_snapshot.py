@@ -379,7 +379,7 @@ def test_open_position_query_normalizes_flex_numeric_text() -> None:
         assert f"REPLACE(BTRIM(rr.source_payload->>'{field}'), ',', '')::numeric" in query
 
 
-def test_scoped_lot_reconciliation_closes_and_replaces_only_selected_instruments() -> None:
+def test_scoped_lot_reconciliation_removes_and_replaces_only_selected_instruments() -> None:
     """Prevent an unrelated lot request from entering scoped persistence."""
 
     selected_id = str(uuid4())
@@ -391,15 +391,15 @@ def test_scoped_lot_reconciliation_closes_and_replaces_only_selected_instruments
         _position_lot_request(unrelated_id),
     ]
 
-    repository.db_position_lot_reconcile_open(
+    repository.db_position_lot_reconcile(
         account_id="U1",
-        closed_at_utc=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        through_report_date_local="2026-08-21",
         requests=requests,
         instrument_ids=(selected_id,),
     )
 
-    assert "instrument_id = ANY(CAST(:instrument_ids AS uuid[]))" in connection.executed_queries[0]
-    replacement_parameters = connection.executed_parameters[1]
+    assert "instrument_id = ANY(CAST(:instrument_ids AS uuid[]))" in connection.executed_queries[1]
+    replacement_parameters = connection.executed_parameters[2]
     assert isinstance(replacement_parameters, list)
     assert [parameters["instrument_id"] for parameters in replacement_parameters] == [selected_id]
 
@@ -416,6 +416,7 @@ def _position_lot_request(instrument_id: str) -> PositionLotUpsertRequest:
         remaining_quantity="1",
         open_price="100",
         cost_basis_open="100",
+        cost_basis_remaining="100",
         realized_pnl_to_date="0",
         status="open",
     )

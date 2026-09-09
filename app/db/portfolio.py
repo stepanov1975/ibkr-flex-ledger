@@ -274,7 +274,9 @@ class SQLAlchemyPortfolioService:
             with self._engine.connect() as connection:
                 rows = connection.execute(
                     text(
-                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual "
+                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual, e.action_id, "
+                        "e.reorg_code AS current_action_type, "
+                        "(c.instrument_id=e.instrument_id AND i.conid=e.conid) AS correction_identity_valid "
                         "FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
                         "JOIN event_corp_action e USING (event_corp_action_id) "
                         "WHERE (CAST(:status AS text) IS NULL OR c.status=:status) "
@@ -299,6 +301,15 @@ class SQLAlchemyPortfolioService:
             raise ValueError("resolution_note is required when closing a case")
         try:
             with self._engine.begin() as connection:
+                existing = connection.execute(text(
+                    "SELECT c.status, e.requires_manual FROM corporate_action_manual_case c "
+                    "JOIN event_corp_action e USING(event_corp_action_id) "
+                    "WHERE c.case_id=:case_id FOR UPDATE OF c, e"
+                ), {"case_id": case_id}).mappings().one_or_none()
+                if existing is None:
+                    return None
+                if not existing["requires_manual"] and status != existing["status"]:
+                    raise ValueError("Handled actions cannot change review status. Changed broker data reopens actions that need review.")
                 row = connection.execute(
                     text(
                         "UPDATE corporate_action_manual_case SET status=:status, owner=:owner, "
@@ -335,7 +346,9 @@ class SQLAlchemyPortfolioService:
                 )
                 full_row = connection.execute(
                     text(
-                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual "
+                        "SELECT c.*, i.symbol, e.report_date_local, e.description, e.requires_manual, e.action_id, "
+                        "e.reorg_code AS current_action_type, "
+                        "(c.instrument_id=e.instrument_id AND i.conid=e.conid) AS correction_identity_valid "
                         "FROM corporate_action_manual_case c JOIN instrument i USING (instrument_id) "
                         "JOIN event_corp_action e USING (event_corp_action_id) "
                         "WHERE c.case_id=:case_id"
@@ -1140,11 +1153,13 @@ class SQLAlchemyPortfolioService:
     @staticmethod
     def _manual_case(row: Any) -> CorporateActionManualCaseRecord:
         return CorporateActionManualCaseRecord(
-            case_id=row["case_id"], event_corp_action_id=row["event_corp_action_id"], action_type=row["action_type"],
+            case_id=row["case_id"], event_corp_action_id=row["event_corp_action_id"], action_type=row["current_action_type"],
             instrument_id=row["instrument_id"], symbol=row["symbol"], status=row["status"], owner=row["owner"],
             resolution_note=row["resolution_note"], resolved_at_utc=row["resolved_at_utc"],
             created_at_utc=row["created_at_utc"], updated_at_utc=row["updated_at_utc"],
             report_date_local=row["report_date_local"], description=row["description"], requires_manual=row["requires_manual"],
+            action_id=row["action_id"],
+            correction_identity_valid=bool(row["correction_identity_valid"]),
         )
 
     @staticmethod

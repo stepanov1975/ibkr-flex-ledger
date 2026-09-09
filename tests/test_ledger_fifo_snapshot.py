@@ -303,3 +303,72 @@ def test_snapshot_report_date_rejects_non_utc_timestamp_inputs() -> None:
         return
 
     raise AssertionError("Expected ValueError for naive timestamp input")
+
+
+def test_splits_preserve_partial_close_basis_for_long_and_short_lots():
+    from datetime import date
+    from app.ledger.fifo_engine import FifoSplitInput
+
+    for opening_side, closing_side, expected_realized in (("BUY", "SELL", "99"), ("SELL", "BUY", "-101")):
+        trades = [
+            FifoTradeFillInput(
+                source_raw_record_id=str(index), trade_timestamp_utc=f"2026-08-{day:02d}T12:00:00+00:00",
+                report_date_local=date(2026, 8, day), side=side, quantity=Decimal(quantity),
+                price=Decimal(price), fees=Decimal(fee), withholding_tax=None,
+            )
+            for index, (day, side, quantity, price, fee) in enumerate([
+                (20, opening_side, "3", "100", "3"),
+                (21, closing_side, "1", "200", "0"),
+            ])
+        ]
+        result = fifo_compute_instrument(FifoLedgerComputationRequest(
+            account_id="TEST", instrument_id="TEST", functional_currency="USD", mark_price=Decimal("600"),
+            trades=trades, splits=(FifoSplitInput(date(2026, 8, 22), Decimal(1) / 3),),
+        ))
+        lot = result.open_lots[0]
+        assert result.realized_pnl == Decimal(expected_realized)
+        assert abs(result.position_quantity) == Decimal("0.66666667")
+        basis = lot.cost_basis_remaining
+        expected_basis = Decimal("202" if opening_side == "BUY" else "-198")
+        assert basis.quantize(Decimal("0.00000001")) == expected_basis
+        # Closing the surviving split-adjusted lot realizes all remaining basis.
+        trades.append(FifoTradeFillInput(
+            source_raw_record_id="close", trade_timestamp_utc="2026-08-22T12:00:00+00:00",
+            report_date_local=date(2026, 8, 22), side=closing_side, quantity=abs(result.position_quantity),
+            price=Decimal("600"), fees=Decimal("0"), withholding_tax=None,
+        ))
+        closed = fifo_compute_instrument(FifoLedgerComputationRequest(
+            account_id="TEST", instrument_id="TEST", functional_currency="USD", mark_price=Decimal("600"),
+            trades=trades, splits=(FifoSplitInput(date(2026, 8, 22), Decimal(1) / 3),),
+        ))
+        assert closed.open_lots == ()
+        proceeds = abs(result.position_quantity) * 600
+        expected_total = Decimal(expected_realized) + (proceeds - expected_basis if opening_side == "BUY" else -expected_basis - proceeds)
+        assert closed.realized_pnl.quantize(Decimal("0.00000001")) == expected_total
+
+
+def test_multiple_splits_only_adjust_lots_open_at_each_action_date():
+    from datetime import date
+    from app.ledger.fifo_engine import FifoSplitInput
+
+    trades = [
+        FifoTradeFillInput(
+            source_raw_record_id=str(index), trade_timestamp_utc=f"2026-08-{day:02d}T12:00:00+00:00",
+            report_date_local=date(2026, 8, day), side=side, quantity=Decimal(quantity),
+            price=Decimal(price), fees=None, withholding_tax=None,
+        )
+        for index, (day, side, quantity, price) in enumerate([
+            (20, "BUY", "3", "100"),
+            (21, "SELL", "2", "60"),
+            (22, "SELL", "2", "120"),
+        ])
+    ]
+    result = fifo_compute_instrument(FifoLedgerComputationRequest(
+        account_id="TEST", instrument_id="TEST", functional_currency="USD", mark_price=Decimal("120"),
+        trades=list(reversed(trades)), splits=(
+            FifoSplitInput(date(2026, 8, 22), Decimal("0.5")),
+            FifoSplitInput(date(2026, 8, 21), Decimal("2")),
+        ),
+    ))
+    assert result.open_lots == ()
+    assert result.realized_pnl == 60

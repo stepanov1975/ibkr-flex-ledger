@@ -56,6 +56,8 @@ class CorporateActionManualCaseRecord:
     report_date_local: date
     description: str | None
     requires_manual: bool
+    action_id: str | None
+    correction_identity_valid: bool
 
 
 @dataclass(frozen=True)

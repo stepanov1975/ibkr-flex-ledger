@@ -519,19 +519,50 @@ Operator endpoints:
 
 - `GET /corporate-actions/cases` lists cases and accepts a status filter.
 - `PATCH /corporate-actions/cases/{case_id}` records status, owner, and resolution notes.
+- `POST /corporate-actions/cases/{case_id}/split/preview` accepts `new_shares`, `old_shares`,
+  and a broker-evidence `note`. It returns before/after snapshots, open FIFO lots, and a preview token.
+- `POST /corporate-actions/cases/{case_id}/split/apply` accepts the same fields plus
+  `preview_token`. It recalculates and commits only if the preview still matches.
 
 The operations queue shows the broker description, report date, reason for review, and
-required check. **Mark reviewed** saves a note and archives the case; **Show reviewed
-and dismissed cases** exposes its history. The API retains `resolved` as the stored
-status for reviewed cases.
+required check. **Enter split ratio** opens **Preview changes**, **Apply correction**,
+and **Cancel** controls for uniquely identified splits and stock dividends. Preview
+saves nothing. Apply atomically stores the verified factor and rebuilds affected FIFO
+lots and snapshots, including realized P&L after subsequent sales. Earlier snapshots
+retain their amounts while their manual-review flags are refreshed. A failed rebuild
+rolls back the whole correction; ingestion and corrections cannot run concurrently.
+Preview tokens bind exact accounting inputs, including closed execution history,
+so a failed ingestion cannot silently change an accepted preview.
 
-Reviewing or dismissing a case does not correct holdings or P&L amounts. Events that
-still require manual accounting keep affected snapshots provisional, including after
-reprocessing. Independent calculation uncertainty also remains provisional. Supported
-actions continue to run automatically under the existing classification policy.
+Corrections retain the immutable broker source, approved action date, and security
+identity. Identical replay preserves the factor; changed source data or context invalidates it and returns unresolved accounting to
+the queue. Restoring the approved source rebuilds invalidated historical snapshots
+before reactivating the correction. Explicit broker descriptions such as `SPLIT 3 FOR 2 (...)` are handled
+automatically during ingestion, along with supported structured ratios. Fractional
+adjusted share quantities use the database's eight-decimal share precision. Lots
+eliminated by split rounding retain their realized gains and close on the action's
+business date. Fully traded lots retain their execution closing time and corrected
+quantity, basis, and realized P&L including closing fees. Opening and remaining
+basis are stored separately so tiny-lot transfers into partially sold lots do not
+inflate historical basis; migration `20260908_10` backfills existing remaining basis. Reconciliation removes
+derived lots that no longer represent an opening fill in the corrected FIFO history.
+Revisions to automatic splits also invalidate and rebuild historical calculations.
+Instrument reassignment rebuilds both the previous and current instruments.
+Older-period replay preserves newer lot projections; restoring a saved correction
+rebuilds both affected history and its latest eligible lot projection. Future
+manual actions do not block earlier snapshot or lot rebuilds. The legacy status
+endpoint rejects status changes on handled actions while allowing metadata edits.
+Migration `20260908_09` backfills approval dates and moves incompatible
+legacy automatic splits into manual review.
+
+Spinoffs, identifier changes, cash matching and other unsupported treatments display
+**Accounting support required**, with no completion button. The queue includes these
+even if they were previously marked reviewed or dismissed. **Show handled actions**
+exposes resolved history. The legacy PATCH endpoint only records acknowledgement;
+it cannot correct accounting or clear independent calculation uncertainty.
 The API and persistence workflow are implemented in
 `app/api/routers/corporate_actions.py`, `app/domain/corporate_actions.py`, and
-`app/db/portfolio.py`.
+`app/db/corporate_action_correction.py`.
 
 ## Labels and notes (Task 9)
 
