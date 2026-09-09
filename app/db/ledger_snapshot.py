@@ -796,6 +796,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         ":valuation_source, :fx_source, "
                         "CAST(:ingestion_run_id AS uuid)"
                         ") ON CONFLICT ON CONSTRAINT uq_pnl_snapshot_daily_account_date_instrument DO UPDATE SET "
+                        "calculated_at_utc = clock_timestamp(), "
                         "position_qty = EXCLUDED.position_qty, "
                         "cost_basis = EXCLUDED.cost_basis, "
                         "realized_pnl = EXCLUDED.realized_pnl, "

@@ -46,12 +46,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             snapshots = {row['instrument_id']: dict(row) for row in connection.execute(text(
                 "SELECT DISTINCT ON (s.instrument_id) s.instrument_id, s.report_date_local, s.currency, s.position_qty, "
                 "s.cost_basis, s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
-                "GREATEST(s.created_at_utc, run.ended_at_utc, (SELECT max(completion.ended_at_utc) "
-                "FROM raw_artifact artifact JOIN ingestion_run completion "
-                "ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
-                "WHERE artifact.account_id=s.account_id AND artifact.ingestion_run_id=s.ingestion_run_id "
-                "AND completion.status='success')) AS calculated_at_utc "
-                "FROM pnl_snapshot_daily s LEFT JOIN ingestion_run run ON run.ingestion_run_id=s.ingestion_run_id "
+                "s.calculated_at_utc FROM pnl_snapshot_daily s "
                 "WHERE s.account_id=:account_id AND s.instrument_id=ANY(:instrument_ids) "
                 "ORDER BY s.instrument_id, s.report_date_local DESC"
             ), params).mappings()}
@@ -77,7 +72,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             ):
                 activity.extend(dict(row) for row in connection.execute(text(
                     f"SELECT event.{identifier} AS event_id, '{kind}' AS event_type, i.instrument_id, i.symbol, "
-                    "GREATEST(event.created_at_utc, raw.created_at_utc) AS recorded_at_utc, "
+                    "event.updated_at_utc AS recorded_at_utc, "
                     f"event.report_date_local, event.source_raw_record_id, {columns} FROM {table} event "
                     "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
                     "JOIN instrument i ON i.account_id=event.account_id AND "
@@ -88,15 +83,17 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     except SQLAlchemyError as error:
         raise RuntimeError("stock history report failed") from error
 
-    # Business dates catch later activity; recording times also catch same-day arrivals after a snapshot.
-    stale_instruments = set()
+    # Unknown legacy calculation times require a rebuild before freshness can be established.
+    stale_instruments = {identifier for identifier, row in snapshots.items() if row['calculated_at_utc'] is None}
     for event in activity:
         recorded_at = event.pop('recorded_at_utc')
         snapshot = snapshots.get(event['instrument_id'], {})
-        if snapshot and (event['report_date_local'] > snapshot['report_date_local']
+        if snapshot and (snapshot['calculated_at_utc'] is None
+                         or event['report_date_local'] > snapshot['report_date_local']
                          or recorded_at > snapshot['calculated_at_utc']):
             stale_instruments.add(event['instrument_id'])
-            snapshot['provisional'] = True
+    for identifier in stale_instruments:
+        snapshots[identifier]['provisional'] = True
 
     positions = []
     for member in family:

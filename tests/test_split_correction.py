@@ -591,7 +591,7 @@ def test_upgrade_preserves_unchanged_acknowledged_manual_case(database, split_ca
     SQLAlchemyPortfolioService(database).db_manual_case_update(case.case_id, "resolved", None, "Investigating")
     command.downgrade(Config("alembic.ini"), "20260908_08")
     before = _state(database)
-    command.upgrade(Config("alembic.ini"), "head")
+    command.upgrade(Config("alembic.ini"), "20260908_09")
     with database.connect() as c:
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "resolved"
         assert c.scalar(text("SELECT resolution_note FROM corporate_action_manual_case")) == "Investigating"

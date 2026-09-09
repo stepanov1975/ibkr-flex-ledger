@@ -21,7 +21,10 @@ from app.db import (
     SQLAlchemyRawPersistenceService,
     db_create_engine,
 )
-from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
+from app.jobs import (
+    CanonicalReprocessOrchestrator, CanonicalReprocessOrchestratorConfig,
+    IngestionJobOrchestrator, IngestionOrchestratorConfig,
+)
 from app.ledger import StockLedgerSnapshotService
 from app.db.stock_history import _stock_family
 from test_end_to_end_seeded import (
@@ -318,3 +321,109 @@ def test_activity_after_failed_snapshot_marks_pnl_stale_until_retry(history_data
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert report['stale'] is False
     assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('488.2')
+
+
+def _history_replay(engine, harness):
+    _, _, _, canonical, service, snapshots, runs = harness
+    with engine.connect() as connection:
+        period = connection.scalar(text("SELECT period_key FROM raw_artifact WHERE account_id='HISTORY' LIMIT 1"))
+    return CanonicalReprocessOrchestrator(
+        raw_read_repository=canonical,
+        canonical_persistence_repository=canonical,
+        snapshot_service=service,
+        snapshot_repository=snapshots,
+        ingestion_repository=runs,
+        config=CanonicalReprocessOrchestratorConfig(
+            account_id='HISTORY', period_key=period, flex_query_id='seeded-query',
+        ),
+    ).job_execute('reprocess_run')
+
+
+def test_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="200"')
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after corrected trade commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 200
+               for row in report['activity'])
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
+    assert report['stale'] is True
+    assert report['provisional'] is True
+    stock_lot = next(row for row in report['lots'] if row['conid'] == '101')
+    assert stock_lot['unrealized_pnl'] is None
+
+
+def test_failed_older_artifact_replay_marks_latest_snapshot_stale(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    harness = _harness(engine, account='HISTORY')
+    orchestrator, adapter, _, _, service, _, _ = harness
+    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="200"').replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    )
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
+    assert before['provisional'] is False
+    assert Decimal(before['totals'][0]['realized_pnl']) == Decimal('81.2')
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('replay failure after restoring older canonical trade')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert _history_replay(engine, harness).status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 100
+               for row in report['activity'])
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('81.2')
+    assert report['stale'] is True
+    assert report['provisional'] is True
+
+
+def test_successful_replay_clears_stale_after_new_activity(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    harness = _harness(engine, account='HISTORY')
+    orchestrator, adapter, _, _, service, _, _ = harness
+    new_cashflow = (b'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
+                    b'type="Dividends" amount="7" currency="USD" reportDate="20260821" />')
+    adapter.payload_bytes = _PAYLOAD.replace(b'</CashTransactions>', new_cashflow+b'</CashTransactions>')
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after new dividend commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is True
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert _history_replay(engine, harness).status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('488.2')
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    stock_lot = next(row for row in report['lots'] if row['conid'] == '101')
+    assert Decimal(stock_lot['unrealized_pnl']) == Decimal('178.8')
+
+
+def test_existing_snapshots_require_rebuild_after_freshness_migration(history_database):
+    client, _, ids, engine = history_database
+    command.downgrade(Config('alembic.ini'), '20260908_10')
+    command.upgrade(Config('alembic.ini'), 'head')
+    # Clearing a review flag does not establish when the P&L was calculated.
+    with engine.begin() as connection:
+        connection.execute(text('UPDATE pnl_snapshot_daily SET provisional=false'))
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is True
+    assert report['provisional'] is True
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
+    assert all(row['provisional'] for row in report['lots'])
+    assert _history_replay(engine, _harness(engine, account='HISTORY')).status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')

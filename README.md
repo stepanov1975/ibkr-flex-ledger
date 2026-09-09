@@ -177,6 +177,9 @@ unreconciled lot valuations display `N/A`. Option grouping uses IBKR underlying
 identifiers where available, with standard option-symbol matching as a fallback.
 If imported activity is newer than its P&L snapshot, the page labels the report
 provisional and warns that the displayed P&L does not yet include all activity.
+Migration `20260909_11` records canonical mutation and P&L calculation times so
+corrections and replays also invalidate outdated values. Existing snapshots have
+unknown freshness and remain provisional on this page until rebuilt by reprocessing.
 
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
