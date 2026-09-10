@@ -90,6 +90,31 @@ _COMMISSION_FX_PAYLOAD = _NO_CASH_PAYLOAD.replace(b'ibCommission="-2"', b'ibComm
     b'reportDate="20260820" rate="1.5" /></ConversionRates>',
 )
 
+_SUPERSEDED_FX_PAYLOAD = _COMMISSION_FX_PAYLOAD.replace(
+    b'</ConversionRates>', b'<ConversionRate fromCurrency="GBP" toCurrency="USD" '
+    b'reportDate="20260819" rate="1.2" /></ConversionRates>',
+)
+_PREVIOUS_FX_PAYLOAD = _COMMISSION_FX_PAYLOAD.replace(
+    b'reportDate="20260820" rate="1.5"', b'reportDate="20260819" rate="1.5"',
+)
+_DIRECT_BROKER_FX_PAYLOAD = _ROUNDING_PAYLOAD.replace(
+    b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" '
+    b'reportDate="20260821" rate="1.2" /></ConversionRates>',
+)
+_DIRECT_TRADE_FX_PAYLOAD = _DIRECT_BROKER_FX_PAYLOAD.replace(
+    _DIRECT_BROKER_FX_PAYLOAD.split(b'<OpenPositions>')[1].split(b'</OpenPositions>')[0], b'',
+).replace(
+    b'</Trades>', b'<Trade ibExecID="FX-CLOSE" transactionID="4" conid="101" symbol="ROUND" assetCategory="STK" '
+    b'currency="EUR" buySell="SELL" quantity="3" tradePrice="11" fxRateToBase="1.123456789" '
+    b'reportDate="20260821" dateTime="20260821;110000" /></Trades>',
+)
+_BASE_CASHFLOW_FX_PAYLOAD = _PAYLOAD.replace(
+    b'amount="5" currency="USD"', b'amount="5" amountInBase="5.5" currency="EUR"',
+).replace(
+    b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" '
+    b'reportDate="20260821" rate="1.2" /></ConversionRates>',
+)
+
 
 @pytest.fixture
 def history_database(request):
@@ -618,3 +643,115 @@ def test_valuation_freshness_without_statement_date_uses_processing_time(history
     report = client.get(f"/reports/stock-history/{ids['101']}")
     assert report.status_code == 200
     assert report.json()['stale'] is True
+
+
+def test_successful_import_rebuilds_removed_broker_position(history_database):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    stock_position = (b'<OpenPosition conid="101" symbol="TEST" assetCategory="STK" currency="USD"\n'
+                      b'  position="6" markPrice="130" multiplier="1" reportDate="20260821" />')
+    adapter.payload_bytes = _PAYLOAD.replace(stock_position, b'')
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    stock = next(row for row in report['positions'] if row['conid'] == '101')
+    assert Decimal(stock['position_qty']) == 0
+    assert Decimal(stock['unrealized_pnl']) == 0
+    assert report['stale'] is False
+
+
+def test_cashflow_description_change_does_not_mark_pnl_stale(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    adapter.payload_bytes = _PAYLOAD.replace(b'amount="5"', b'amount="5" description="Corrected description"')
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after non-accounting cashflow update')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert any(row['description'] == 'Corrected description' for row in report['activity'])
+    assert report['totals'] == before['totals']
+    assert report['stale'] is False
+    assert report['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database', [
+    _NO_CASH_PAYLOAD.replace(_NO_CASH_PAYLOAD.split(b'<Trades>')[1].split(b'</Trades>')[0], b''),
+], indirect=True, ids=['broker-only'])
+def test_successful_import_clears_omitted_holding_without_canonical_activity(history_database):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    payload = _NO_CASH_PAYLOAD.replace(_NO_CASH_PAYLOAD.split(b'<Trades>')[1].split(b'</Trades>')[0], b'')
+    adapter.payload_bytes = payload.replace(payload.split(b'<OpenPositions>')[1].split(b'</OpenPositions>')[0], b'')
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert all(Decimal(row['position_qty']) == 0 for row in report['positions'])
+    assert report['stale'] is False
+    assert report['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+    pytest.param(
+        _SUPERSEDED_FX_PAYLOAD, _SUPERSEDED_FX_PAYLOAD.replace(b'rate="1.2"', b'rate="1.3"'), False,
+        id='superseded-rate',
+    ),
+    pytest.param(
+        _DIRECT_TRADE_FX_PAYLOAD, _DIRECT_TRADE_FX_PAYLOAD.replace(b'rate="1.2"', b'rate="1.3"'), False,
+        id='closed-direct-trade-fx',
+    ),
+    pytest.param(
+        _DIRECT_BROKER_FX_PAYLOAD, _DIRECT_BROKER_FX_PAYLOAD.replace(b'rate="1.2"', b'rate="1.3"'), False,
+        id='open-direct-broker-fx',
+    ),
+    pytest.param(
+        _BASE_CASHFLOW_FX_PAYLOAD, _BASE_CASHFLOW_FX_PAYLOAD.replace(b'rate="1.2"', b'rate="1.3"'), False,
+        id='cashflow-amount-in-base',
+    ),
+    pytest.param(
+        _SUPERSEDED_FX_PAYLOAD, _SUPERSEDED_FX_PAYLOAD.replace(b'rate="1.5"', b'rate="0"'), True,
+        id='selected-rate-becomes-invalid',
+    ),
+    pytest.param(
+        _PREVIOUS_FX_PAYLOAD, _PREVIOUS_FX_PAYLOAD.replace(
+            b'</ConversionRates>', b'<ConversionRate fromCurrency="GBP" toCurrency="USD" '
+            b'reportDate="20260820" rate="1.6" /></ConversionRates>',
+        ), True, id='newly-eligible-rate',
+    ),
+    pytest.param(
+        _COMMISSION_FX_PAYLOAD.replace(b'rate="1.5"', b''), _COMMISSION_FX_PAYLOAD, True,
+        id='missing-rate-becomes-available',
+    ),
+    pytest.param(
+        _PREVIOUS_FX_PAYLOAD, _PREVIOUS_FX_PAYLOAD.replace(
+            b'</ConversionRates>', b'<ConversionRate fromCurrency="GBP" toCurrency="USD" '
+            b'reportDate="20260820" rate="1.5" /></ConversionRates>',
+        ), False, id='new-selection-same-effective-rate',
+    ),
+], indirect=['history_database'])
+def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypatch, changed_payload, expected_stale):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
+    adapter.payload_bytes = changed_payload
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('snapshot failure after FX-only canonical change')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    pending = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert pending['totals'] == before['totals']
+    assert pending['stale'] is expected_stale
+    if not expected_stale:
+        assert pending['provisional'] is False
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['stale'] is False
+    assert rebuilt['provisional'] is False
+    assert (rebuilt['totals'] != before['totals']) is expected_stale

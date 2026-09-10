@@ -184,6 +184,11 @@ corrections and replays also invalidate outdated values. Existing snapshots have
 unknown freshness and remain provisional on this page until rebuilt by reprocessing.
 Migration `20260910_12` extends freshness checks to FX rates and broker valuations,
 including removed positions and repeated valuation attempts after a failed import.
+Successful imports also rebuild positions omitted from the broker statement.
+Migration `20260910_13` records the fallback FX conversions each snapshot actually
+consumed and ignores provenance-only cashflow updates. Existing snapshots need
+reprocessing to establish their FX dependencies; direct overrides and superseded
+rates do not cause stale warnings.
 
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational

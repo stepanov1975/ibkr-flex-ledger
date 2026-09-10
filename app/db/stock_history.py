@@ -12,6 +12,9 @@ from uuid import UUID
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.fx_rates import select_conversion_rate
+from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
+
 
 def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> dict[str, Any] | None:
     """Return all imported family activity with the latest cumulative P&L (never summed across dates)."""
@@ -56,7 +59,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             snapshots = {row['instrument_id']: dict(row) for row in connection.execute(text(
                 "SELECT DISTINCT ON (s.instrument_id) s.instrument_id, s.report_date_local, s.currency, s.position_qty, "
                 "s.cost_basis, s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
-                "s.calculated_at_utc, s.ingestion_run_id FROM pnl_snapshot_daily s "
+                "s.calculated_at_utc, s.ingestion_run_id, s.fx_dependencies FROM pnl_snapshot_daily s "
                 "WHERE s.account_id=:account_id AND s.instrument_id=ANY(:instrument_ids) "
                 "ORDER BY s.instrument_id, s.report_date_local DESC"
             ), params).mappings()}
@@ -80,10 +83,9 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "GROUP BY r.ingestion_run_id,r.raw_artifact_id,a.report_date_local,r.report_date_local, "
                 "a.valuation_pending_at_utc,a.created_at_utc"
             ), valuation_params).mappings()]
-            fx_rates = [dict(row) for row in connection.execute(text(
-                "SELECT report_date_local,currency,functional_currency,updated_at_utc FROM event_fx "
-                "WHERE account_id=:account_id"
-            ), params).mappings()]
+            fx_rates = SQLAlchemyLedgerSnapshotService(engine, connection=connection).db_ledger_fx_rate_list_for_account(
+                account_id, max(row['report_date_local'] for row in snapshots.values()).isoformat(),
+            ) if snapshots else []
             lots = [dict(row) for row in connection.execute(text(
                 "SELECT l.instrument_id, l.open_event_trade_fill_id, l.opened_at_utc, l.closed_at_utc, "
                 "l.open_quantity, l.remaining_quantity, l.cost_basis_remaining, l.realized_pnl_to_date, "
@@ -96,15 +98,12 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             for table, identifier, kind, columns in (
                 ('event_trade_fill', 'event_trade_fill_id', 'trade',
                  "event.trade_timestamp_utc AS timestamp_utc, event.side AS action, event.quantity, event.price, "
-                 "CASE WHEN COALESCE(event.commission,0)<>0 THEN raw.source_payload->>'ibCommissionCurrency' END AS commission_currency, "
                  "event.net_cash AS amount, event.currency, raw.source_payload->>'description' AS description"),
                 ('event_cashflow', 'event_cashflow_id', 'cashflow',
                  "event.effective_at_utc AS timestamp_utc, event.cash_action AS action, NULL AS quantity, "
-                 "NULL AS commission_currency, "
                  "NULL AS price, event.amount, event.currency, raw.source_payload->>'description' AS description"),
                 ('event_corp_action', 'event_corp_action_id', 'corporate_action',
                  "NULL AS timestamp_utc, event.reorg_code AS action, NULL AS quantity, NULL AS price, "
-                 "NULL AS commission_currency, "
                  "NULL AS amount, NULL AS currency, event.description"),
             ):
                 activity.extend(dict(row) for row in connection.execute(text(
@@ -121,13 +120,10 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         raise RuntimeError("stock history report failed") from error
 
     # Unknown legacy calculation times require a rebuild before freshness can be established.
-    stale_instruments = {identifier for identifier, row in snapshots.items() if row['calculated_at_utc'] is None}
-    currency_dates: dict[UUID, set[tuple[str, date]]] = defaultdict(set)
+    stale_instruments = {identifier for identifier, row in snapshots.items()
+                         if row['calculated_at_utc'] is None or row['fx_dependencies'] is None}
     for event in activity:
         recorded_at = event.pop('recorded_at_utc')
-        for currency in (event['currency'], event.pop('commission_currency')):
-            if currency:
-                currency_dates[event['instrument_id']].add((currency.strip().upper(), event['report_date_local']))
         snapshot = snapshots.get(event['instrument_id'], {})
         if snapshot and (snapshot['calculated_at_utc'] is None
                          or event['report_date_local'] > snapshot['report_date_local']
@@ -145,8 +141,6 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         if not snapshot or snapshot['calculated_at_utc'] is None:
             continue
         origin = origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload')
-        if origin and origin.get('currency'):
-            currency_dates[identifier].add((origin['currency'].strip().upper(), snapshot['report_date_local']))
         for valuation in valuations:
             valuation_date = valuation['report_date_local'] or snapshot['report_date_local']
             if valuation_date < snapshot['report_date_local']:
@@ -156,12 +150,14 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                     and (valuation_date > snapshot['report_date_local']
                          or valuation['recorded_at_utc'] > snapshot['calculated_at_utc'])):
                 stale_instruments.add(identifier)
-        if any(rate['updated_at_utc'] > snapshot['calculated_at_utc']
-               and rate['functional_currency'] == snapshot['currency']
-               and rate['currency'] != snapshot['currency']
-               and any(currency == rate['currency'] and rate['report_date_local'] <= day
-                       for currency, day in currency_dates[identifier]) for rate in fx_rates):
-            stale_instruments.add(identifier)
+        for dependency in snapshot['fx_dependencies'] or []:
+            selected_rate = select_conversion_rate(
+                dependency['currency'], dependency['functional_currency'], date.fromisoformat(dependency['date']), fx_rates,
+            )
+            current_rate = Decimal(selected_rate.fx_rate) if selected_rate and selected_rate.fx_rate is not None else None
+            previous_rate = Decimal(dependency['rate']) if dependency['rate'] is not None else None
+            if current_rate != previous_rate:
+                stale_instruments.add(identifier)
     for identifier in stale_instruments:
         snapshots[identifier]['provisional'] = True
 

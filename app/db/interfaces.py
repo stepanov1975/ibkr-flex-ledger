@@ -663,6 +663,9 @@ class CanonicalPersistenceRepositoryPort(Protocol):
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         """Record an attempt to project the semantic run's broker valuations."""
 
+    def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
+        """Check for prior nonzero positions omitted by the current broker statement."""
+
     def db_canonical_instrument_upsert_many(
         self,
         requests: list[CanonicalInstrumentUpsertRequest],
@@ -953,6 +956,7 @@ class PnlSnapshotDailyUpsertRequest:
         valuation_source: Optional valuation source label.
         fx_source: Optional FX source label.
         ingestion_run_id: Optional ingestion run identifier.
+        fx_dependencies: Consumed fallback lookups; None means legacy/unknown, [] means none were needed.
     """
 
     account_id: str
@@ -970,6 +974,7 @@ class PnlSnapshotDailyUpsertRequest:
     valuation_source: str | None
     fx_source: str | None
     ingestion_run_id: str | None
+    fx_dependencies: list[dict[str, str | None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1030,9 @@ class SnapshotCleanupCandidate:
 
 class LedgerSnapshotRepositoryPort(Protocol):
     """Port definition for Task 7 ledger inputs and snapshot persistence."""
+
+    def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
+        """List prior nonzero broker holdings, including those without canonical activity."""
 
     def db_ledger_instrument_ids_for_scope(
         self,

@@ -7,6 +7,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
+from app.domain.fx_rates import select_conversion_rate
+
 from app.db import (
     LedgerCashflowRecord,
     LedgerCorporateActionRecord,
@@ -207,6 +209,8 @@ class StockLedgerSnapshotService:
         broker_absent_nonzero_fifo_count = 0
 
         instrument_keys = set(trades_by_instrument) | set(cashflows_by_instrument) | set(open_position_valuation_map)
+        if ingestion_run_id is not None:
+            instrument_keys.update(self._repository.db_ledger_prior_holding_ids(normalized_account_id, normalized_report_date))
         if instrument_ids is not None:
             instrument_keys.intersection_update(instrument_ids)
         instrument_asset_categories = self._repository.db_ledger_instrument_asset_category_map(
@@ -233,6 +237,7 @@ class StockLedgerSnapshotService:
             actions = corporate_actions_by_instrument.get(instrument_id, [])
             splits = tuple(FifoSplitInput(action.report_date_local, Decimal(action.adjustment_factor)) for action in actions)
             fx_sources: set[str] = set()
+            fx_dependencies: dict[tuple[str, str, date], str | None] = {}
             missing_fx = False
             for trade in instrument_trades:
                 contract_multiplier = self._trade_contract_multiplier(trade)
@@ -242,6 +247,7 @@ class StockLedgerSnapshotService:
                     report_date_local=trade.report_date_local,
                     fx_rate_rows=fx_rate_rows,
                     trade=trade,
+                    fx_dependencies=fx_dependencies,
                 )
                 fx_sources.add(trade_fx_source)
                 if trade_fx_rate is None:
@@ -256,6 +262,7 @@ class StockLedgerSnapshotService:
                         functional_currency=normalized_functional_currency,
                         report_date_local=trade.report_date_local,
                         fx_rate_rows=fx_rate_rows,
+                        fx_dependencies=fx_dependencies,
                     )
                     fx_sources.add(commission_fx_source)
                     if resolved_commission_fx_rate is None:
@@ -297,16 +304,19 @@ class StockLedgerSnapshotService:
             withholding_tax_total = Decimal("0")
             cashflow_deductions_total = Decimal("0")
             for cashflow in instrument_cashflows:
+                cashflow_amount_in_base = self._decimal_or_none(cashflow.amount_in_base)
+                amount_in_functional_currency = (
+                    cashflow_amount_in_base is not None
+                    and cashflow.functional_currency.strip().upper() == normalized_functional_currency
+                )
+                uses_conversion = (not amount_in_functional_currency or Decimal(cashflow.fees or '0') != 0
+                                   or Decimal(cashflow.withholding_tax or '0') != 0)
                 cashflow_fx_rate, cashflow_fx_source = self._resolve_fx_rate(
                     currency=cashflow.currency,
                     functional_currency=normalized_functional_currency,
                     report_date_local=cashflow.report_date_local,
                     fx_rate_rows=fx_rate_rows,
-                )
-                cashflow_amount_in_base = self._decimal_or_none(cashflow.amount_in_base)
-                amount_in_functional_currency = (
-                    cashflow_amount_in_base is not None
-                    and cashflow.functional_currency.strip().upper() == normalized_functional_currency
+                    fx_dependencies=fx_dependencies if uses_conversion else None,
                 )
                 if cashflow_fx_rate is None:
                     if not amount_in_functional_currency or Decimal(cashflow.fees or "0") != Decimal("0") or Decimal(
@@ -358,6 +368,7 @@ class StockLedgerSnapshotService:
                         functional_currency=normalized_functional_currency,
                         report_date_local=parsed_report_date,
                         fx_rate_rows=fx_rate_rows,
+                        fx_dependencies=fx_dependencies,
                     )
                     fx_sources.add(mark_fx_source)
                     if mark_fx_rate is None:
@@ -412,6 +423,10 @@ class StockLedgerSnapshotService:
                                 functional_currency=normalized_functional_currency,
                                 report_date_local=parsed_report_date,
                                 fx_rate_rows=fx_rate_rows,
+                                fx_dependencies=fx_dependencies if any(value is not None for value in (
+                                    valuation_record.cost_basis_money, valuation_record.broker_unrealized_pnl,
+                                    valuation_record.mark_price,
+                                )) else None,
                             )
                     fx_sources.add(valuation_fx_source)
 
@@ -506,6 +521,9 @@ class StockLedgerSnapshotService:
                     valuation_source=valuation_source,
                     fx_source=fx_source,
                     ingestion_run_id=ingestion_run_id,
+                    fx_dependencies=[{'currency': pair[0], 'functional_currency': pair[1],
+                                      'date': pair[2].isoformat(), 'rate': rate}
+                                     for pair, rate in sorted(fx_dependencies.items())],
                 )
             )
 
@@ -634,6 +652,7 @@ class StockLedgerSnapshotService:
         report_date_local: date,
         fx_rate_rows: list[LedgerFxRateRecord],
         trade: LedgerTradeFillRecord | None = None,
+        fx_dependencies: dict[tuple[str, str, date], str | None] | None = None,
     ) -> tuple[Decimal | None, str]:
         """Resolve the frozen execution/conversion FX fallback hierarchy."""
 
@@ -653,20 +672,15 @@ class StockLedgerSnapshotService:
                 if derived_rate > Decimal("0"):
                     return derived_rate, "trade_net_cash_ratio"
 
-        candidates = [
-            row
-            for row in fx_rate_rows
-            if row.currency.strip().upper() == normalized_currency
-            and row.functional_currency.strip().upper() == normalized_functional_currency
-            and row.report_date_local <= report_date_local
-            and self._positive_decimal_or_none(row.fx_rate) is not None
-        ]
-        if candidates:
-            selected = candidates[-1]
-            selected_rate = self._positive_decimal_or_none(selected.fx_rate)
-            if selected_rate is not None:
-                date_label = "exact" if selected.report_date_local == report_date_local else "previous"
-                return selected_rate, f"conversion_rates_{date_label}"
+        selected = select_conversion_rate(normalized_currency, normalized_functional_currency, report_date_local, fx_rate_rows)
+        selected_rate = self._positive_decimal_or_none(selected.fx_rate) if selected else None
+        if fx_dependencies is not None:
+            fx_dependencies[normalized_currency, normalized_functional_currency, report_date_local] = (
+                str(selected_rate) if selected_rate is not None else None
+            )
+        if selected is not None and selected_rate is not None:
+            date_label = "exact" if selected.report_date_local == report_date_local else "previous"
+            return selected_rate, f"conversion_rates_{date_label}"
         return None, "FX_RATE_MISSING_ALL_SOURCES"
 
     def _positive_decimal_or_none(self, value: str | None) -> Decimal | None:
