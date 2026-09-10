@@ -5,7 +5,7 @@ All SQL and ORM access must remain in the db package and its submodules.
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import Any, ContextManager, Protocol
 from uuid import UUID
 
 from app.domain import HealthStatus
@@ -1030,6 +1030,9 @@ class SnapshotCleanupCandidate:
 
 class LedgerSnapshotRepositoryPort(Protocol):
     """Port definition for Task 7 ledger inputs and snapshot persistence."""
+
+    def db_ledger_projection_transaction(self) -> ContextManager['LedgerSnapshotRepositoryPort']:
+        """Commit lot and snapshot projections together, joining an existing transaction."""
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
         """List prior nonzero broker holdings, including those without canonical activity."""

@@ -9,7 +9,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from app.api.routers.reports import api_create_reports_router
 from app.config import AppSettings
@@ -126,6 +126,25 @@ _BASE_CASHFLOW_FX_PAYLOAD = _PAYLOAD.replace(
 _BASE_NET_CASH_PAYLOAD = _NO_CASH_PAYLOAD.replace(
     b'tradePrice="100"', b'tradePrice="100" netCash="-1002"',
 )
+_CASHFLOW_MOVE_PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">
+<Trades>
+ <Trade ibExecID="A1" transactionID="1" conid="201" symbol="FIRST" assetCategory="STK"
+  currency="USD" buySell="BUY" quantity="1" tradePrice="10"
+  reportDate="20260821" dateTime="20260821;100000" />
+ <Trade ibExecID="B1" transactionID="2" conid="202" symbol="SECOND" assetCategory="STK"
+  currency="USD" buySell="BUY" quantity="1" tradePrice="20"
+  reportDate="20260821" dateTime="20260821;110000" />
+</Trades>
+<OpenPositions>
+ <OpenPosition conid="201" symbol="FIRST" assetCategory="STK" currency="USD"
+  position="1" markPrice="11" multiplier="1" reportDate="20260821" />
+ <OpenPosition conid="202" symbol="SECOND" assetCategory="STK" currency="USD"
+  position="1" markPrice="22" multiplier="1" reportDate="20260821" />
+</OpenPositions>
+<CashTransactions><CashTransaction transactionID="9" conid="201" symbol="FIRST" assetCategory="STK"
+ type="Dividends" amount="5" currency="USD" reportDate="20260821" /></CashTransactions>
+<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+</FlexStatement></FlexStatements></FlexQueryResponse>'''
 _DIRECT_NET_CASH_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
     b'tradePrice="10.01"', b'tradePrice="10.01" netCash="-10.01" netCashInBase="-11.25"', 1,
 )
@@ -278,6 +297,34 @@ def test_option_link_resolves_to_the_same_stock_family(history_database):
     report = response.json()
     assert report['instrument_id'] == str(ids['101'])
     assert {row['conid'] for row in report['positions']} == {'101', '102', '103'}
+
+
+def test_failed_snapshot_write_rolls_back_lot_projection(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    with engine.connect() as connection:
+        old_lots = connection.execute(text('SELECT * FROM position_lot ORDER BY position_lot_id')).all()
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="101"')
+
+    def fail_snapshot(self, requests):
+        raise RuntimeError('snapshot write fails after lot reconciliation')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SQLAlchemyLedgerSnapshotService, 'db_pnl_snapshot_daily_upsert_many', fail_snapshot)
+        assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT * FROM position_lot ORDER BY position_lot_id')).all() == old_lots
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is True
+    assert {row['conid']: row['realized_pnl'] for row in report['lots']} == {
+        row['conid']: row['realized_pnl'] for row in before['lots']
+    }
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] != before['totals']
+    assert rebuilt['stale'] is False
 
 
 def test_missing_snapshot_does_not_fabricate_zero_pnl(history_database):
@@ -841,6 +888,38 @@ def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypa
     assert (rebuilt['totals'] != before['totals']) is expected_stale
 
 
+@pytest.mark.parametrize('history_database', [_BASE_CASHFLOW_FX_PAYLOAD], indirect=True, ids=['base-amount'])
+@pytest.mark.parametrize('attribute,expected_stale', [('amount', False), ('amountInBase', True)])
+def test_cashflow_amount_override_only_invalidates_consumed_amount(
+    history_database, monkeypatch, attribute, expected_stale,
+):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
+    adapter.payload_bytes = _BASE_CASHFLOW_FX_PAYLOAD.replace(
+        b'amount="5"' if attribute == 'amount' else b'amountInBase="5.5"',
+        b'amount="7"' if attribute == 'amount' else b'amountInBase="7.5"',
+    )
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after cashflow amount correction')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is expected_stale
+    assert report['provisional'] is expected_stale
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['stale'] is False
+    assert rebuilt['provisional'] is False
+    assert (rebuilt['totals'] != before['totals']) is expected_stale
+
+
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
 @pytest.mark.parametrize('position_attributes', [
     pytest.param(b'position="6" markPrice="130" multiplier="1" description="Updated security description"', id='metadata'),
@@ -1117,3 +1196,144 @@ def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
     assert rebuilt['stale'] is False
     assert rebuilt['provisional'] is False
     assert (rebuilt['totals'] != before['totals']) is expected_stale
+
+
+@pytest.mark.parametrize('history_database', [_CASHFLOW_MOVE_PAYLOAD], indirect=True, ids=['two-stocks'])
+@pytest.mark.parametrize('fail_before_snapshot', [False, True], ids=['successful-move', 'failed-move'])
+def test_cashflow_instrument_correction_rebuilds_both_stock_histories(
+    history_database, monkeypatch, fail_before_snapshot,
+):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = {
+        conid: client.get(f'/reports/stock-history/{ids[conid]}').json()
+        for conid in ('201', '202')
+    }
+    assert Decimal(before['201']['totals'][0]['realized_pnl']) == 5
+    assert Decimal(before['202']['totals'][0]['realized_pnl']) == 0
+    assert all(report['stale'] is False for report in before.values())
+    adapter.payload_bytes = _CASHFLOW_MOVE_PAYLOAD.replace(
+        b'<CashTransaction transactionID="9" conid="201" symbol="FIRST"',
+        b'<CashTransaction transactionID="9" conid="202" symbol="SECOND"',
+    )
+    build = service.ledger_snapshot_build_and_persist
+    if fail_before_snapshot:
+        def fail_snapshot(**kwargs):
+            raise RuntimeError('failure after cashflow instrument correction')
+
+        monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+        assert orchestrator.job_execute('ingestion_run').status == 'failed'
+        reports = {
+            conid: client.get(f'/reports/stock-history/{ids[conid]}').json()
+            for conid in ('201', '202')
+        }
+        assert not any(row['event_type'] == 'cashflow' for row in reports['201']['activity'])
+        assert any(row['event_type'] == 'cashflow' for row in reports['202']['activity'])
+        for conid, report in reports.items():
+            assert report['totals'] == before[conid]['totals']
+            assert report['stale'] is True, conid
+            assert report['provisional'] is True, conid
+        monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    reports = {
+        conid: client.get(f'/reports/stock-history/{ids[conid]}').json()
+        for conid in ('201', '202')
+    }
+    assert Decimal(reports['201']['totals'][0]['realized_pnl']) == 0
+    assert Decimal(reports['202']['totals'][0]['realized_pnl']) == 5
+    for conid, report in reports.items():
+        assert report['stale'] is False, conid
+        assert report['provisional'] is False, conid
+        assert report['totals'][0]['unrealized_pnl'] == before[conid]['totals'][0]['unrealized_pnl']
+
+
+@pytest.mark.parametrize('history_database', [
+    _CASHFLOW_MOVE_PAYLOAD.replace(
+        _CASHFLOW_MOVE_PAYLOAD.split(b'<Trades>')[1].split(b'<Trade ibExecID="B1"')[0], b'',
+    ).replace(
+        _CASHFLOW_MOVE_PAYLOAD.split(b'<OpenPositions>')[1].split(b'<OpenPosition conid="202"')[0], b'',
+    ),
+], indirect=True, ids=['cashflow-only-source'])
+@pytest.mark.parametrize('statement_date', ['20260821', '20260822'], ids=['incremental', 'next-day-full'])
+def test_cashflow_only_source_is_cleared_after_instrument_correction(history_database, statement_date):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    with engine.connect() as connection:
+        payload = bytes(connection.scalar(text('SELECT source_payload FROM raw_artifact LIMIT 1')))
+    before = client.get(f"/reports/stock-history/{ids['201']}").json()
+    assert Decimal(before['totals'][0]['realized_pnl']) == 5
+    assert Decimal(before['positions'][0]['position_qty']) == 0
+    adapter.payload_bytes = payload.replace(
+        b'<CashTransaction transactionID="9" conid="201" symbol="FIRST"',
+        b'<CashTransaction transactionID="9" conid="202" symbol="SECOND"',
+    ).replace(b'<FlexStatement reportDate="20260821">', f'<FlexStatement reportDate="{statement_date}">'.encode())
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    for conid, expected in [('201', 0), ('202', 5)]:
+        report = client.get(f'/reports/stock-history/{ids[conid]}').json()
+        assert Decimal(report['totals'][0]['realized_pnl']) == expected
+        assert report['stale'] is False
+        assert report['provisional'] is False
+
+
+def test_stock_history_reads_one_consistent_projection_during_rebuild(history_database):
+    client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="110"')
+    rebuilt = False
+
+    def rebuild_after_snapshot_read(connection, cursor, statement, parameters, context, executemany):
+        nonlocal rebuilt
+        if not rebuilt and 'SELECT DISTINCT ON (s.instrument_id)' in statement:
+            rebuilt = True
+            # Commit a real correction on other connections between the report's
+            # snapshot and lot/activity reads.
+            assert orchestrator.job_execute('ingestion_run').status == 'success'
+
+    event.listen(engine, 'after_cursor_execute', rebuild_after_snapshot_read)
+    try:
+        during = client.get(f"/reports/stock-history/{ids['101']}").json()
+    finally:
+        event.remove(engine, 'after_cursor_execute', rebuild_after_snapshot_read)
+    assert rebuilt is True
+    assert during == before
+    after = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert after['totals'] != before['totals']
+    assert after['lots'] != before['lots']
+    assert after['stale'] is False
+    assert after['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database', [_BASE_CASHFLOW_FX_PAYLOAD], indirect=True, ids=['base-amount'])
+def test_cashflow_reassignment_migration_preserves_freshness_and_restores_previous_trigger(history_database):
+    client, _, ids, engine = history_database
+    command.downgrade(Config('alembic.ini'), '20260910_14')
+    with engine.connect() as connection:
+        original = connection.execute(text(
+            'SELECT source_raw_record_id,ingestion_run_id,updated_at_utc FROM event_cashflow'
+        )).one()
+    command.upgrade(Config('alembic.ini'), 'head')
+    with engine.begin() as connection:
+        assert connection.execute(text(
+            'SELECT source_raw_record_id,ingestion_run_id,updated_at_utc FROM event_cashflow'
+        )).one() == original
+        connection.execute(text('UPDATE event_cashflow SET amount=7'))
+        assert connection.scalar(text('SELECT updated_at_utc FROM event_cashflow')) == original.updated_at_utc
+    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is False
+    with engine.begin() as connection:
+        connection.execute(text('UPDATE event_cashflow SET instrument_id=:id'), {'id': ids['104']})
+        assert connection.scalar(text(
+            'SELECT cashflow_reassigned_at_utc FROM instrument WHERE instrument_id=:id'
+        ), {'id': ids['101']}) > original.updated_at_utc
+    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is True
+    command.downgrade(Config('alembic.ini'), '20260910_14')
+    with engine.begin() as connection:
+        previous = connection.scalar(text('SELECT updated_at_utc FROM event_cashflow'))
+        connection.execute(text('UPDATE event_cashflow SET amount=8'))
+        assert connection.scalar(text('SELECT updated_at_utc FROM event_cashflow')) > previous
+        connection.execute(text('UPDATE event_cashflow SET instrument_id=:id'), {'id': ids['101']})
+        assert connection.scalar(text(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name='instrument' "
+            "AND column_name='cashflow_reassigned_at_utc'"
+        )) == 0
+    command.upgrade(Config('alembic.ini'), 'head')

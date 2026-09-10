@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -166,6 +167,9 @@ class _RepositoryStub:
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """Capture position-lot upsert payload for assertions."""
         self.position_requests.requests = requests
+
+    def db_ledger_projection_transaction(self) -> nullcontext[_RepositoryStub]:
+        return nullcontext(self)
 
     def db_position_lot_reconcile(
         self,

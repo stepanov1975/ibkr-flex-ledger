@@ -20,7 +20,7 @@ from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
 def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> dict[str, Any] | None:
     """Return all imported family activity with the latest cumulative P&L (never summed across dates)."""
     try:
-        with engine.connect() as connection:
+        with engine.connect().execution_options(isolation_level='REPEATABLE READ') as connection:
             instruments = [dict(row) for row in connection.execute(text(
                 "WITH committed_sources AS (SELECT raw.raw_record_id, raw.raw_artifact_id, "
                 "raw.source_payload->>'conid' AS conid FROM raw_record raw JOIN ("
@@ -47,7 +47,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "(array_agg(underlying_symbol ORDER BY report_date_local DESC NULLS LAST, created_at_utc DESC, "
                 "raw_record_id DESC) FILTER (WHERE underlying_symbol IS NOT NULL))[1] AS underlying_symbol "
                 "FROM metadata_rows GROUP BY conid) "
-                "SELECT i.instrument_id, i.conid, i.symbol, i.asset_category, i.description, "
+                "SELECT i.instrument_id, i.conid, i.symbol, i.asset_category, i.description, i.cashflow_reassigned_at_utc, "
                 "m.underlying_conid, m.underlying_symbol FROM instrument i LEFT JOIN metadata m USING (conid) "
                 "WHERE i.account_id=:account_id AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH', 'FX') "
                 "ORDER BY i.symbol, i.instrument_id"
@@ -130,6 +130,12 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     # Unknown legacy calculation times require a rebuild before freshness can be established.
     stale_instruments = {identifier for identifier, row in snapshots.items()
                          if row['calculated_at_utc'] is None or row['fx_dependencies'] is None}
+    for member in family:
+        snapshot = snapshots.get(member['instrument_id'])
+        if (snapshot and member['cashflow_reassigned_at_utc'] is not None
+                and (snapshot['calculated_at_utc'] is None
+                     or member['cashflow_reassigned_at_utc'] > snapshot['calculated_at_utc'])):
+            stale_instruments.add(member['instrument_id'])
     for event in activity:
         recorded_at = event.pop('recorded_at_utc')
         snapshot = snapshots.get(event['instrument_id'], {})

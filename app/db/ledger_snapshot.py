@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from typing import ContextManager
+from contextlib import contextmanager, nullcontext
+from typing import ContextManager, Iterator
 from datetime import date
 import json
 from typing import Any
@@ -132,6 +132,15 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             return nullcontext(self._transaction_connection)
         return self._engine.begin() if write else self._engine.connect()
 
+    @contextmanager
+    def db_ledger_projection_transaction(self) -> Iterator[LedgerSnapshotRepositoryPort]:
+        """Keep lot reconciliation and snapshot writes in the same transaction."""
+        if self._transaction_connection is not None:
+            yield self
+        else:
+            with self._engine.begin() as connection:
+                yield SQLAlchemyLedgerSnapshotService(self._engine, connection=connection)
+
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
         """Retain omitted broker-only holdings in the next snapshot's instrument set."""
         try:
@@ -141,7 +150,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
                     "ORDER BY instrument_id,report_date_local DESC) "
                     "SELECT instrument_id FROM latest JOIN instrument USING(instrument_id) "
-                    "WHERE position_qty<>0 AND UPPER(BTRIM(asset_category)) NOT IN ('CASH','FX')"
+                    "WHERE (position_qty<>0 OR cashflow_reassigned_at_utc IS NOT NULL) "
+                    "AND UPPER(BTRIM(asset_category)) NOT IN ('CASH','FX')"
                 ), {'account_id': account_id, 'day': report_date_local}).scalars()]
         except SQLAlchemyError as error:
             raise RuntimeError("prior broker holdings read failed") from error
@@ -171,7 +181,11 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "OR EXISTS (SELECT 1 FROM event_cashflow cashflow "
                         "WHERE cashflow.account_id = instrument.account_id "
                         "AND cashflow.instrument_id = instrument.instrument_id "
-                        "AND UPPER(BTRIM(cashflow.currency)) = ANY(:currencies))) "
+                        "AND UPPER(BTRIM(cashflow.currency)) = ANY(:currencies)) "
+                        "OR cashflow_reassigned_at_utc > COALESCE((SELECT snapshot.calculated_at_utc "
+                        "FROM pnl_snapshot_daily snapshot WHERE snapshot.account_id=instrument.account_id "
+                        "AND snapshot.instrument_id=instrument.instrument_id "
+                        "ORDER BY snapshot.report_date_local DESC LIMIT 1), '-infinity'::timestamptz)) "
                         "ORDER BY instrument_id"
                     ),
                     {

@@ -564,14 +564,15 @@ class StockLedgerSnapshotService:
                 if request.instrument_id in selected_instrument_ids
             ]
         position_lot_row_count = 0
-        if reconcile_position_lots:
-            position_lot_row_count = self._repository.db_position_lot_reconcile(
-                account_id=normalized_account_id,
-                through_report_date_local=normalized_report_date,
-                requests=position_lot_requests,
-                instrument_ids=instrument_ids,
-            )
-        self._repository.db_pnl_snapshot_daily_upsert_many(snapshot_requests)
+        with self._repository.db_ledger_projection_transaction() as repository:
+            if reconcile_position_lots:
+                position_lot_row_count = repository.db_position_lot_reconcile(
+                    account_id=normalized_account_id,
+                    through_report_date_local=normalized_report_date,
+                    requests=position_lot_requests,
+                    instrument_ids=instrument_ids,
+                )
+            repository.db_pnl_snapshot_daily_upsert_many(snapshot_requests)
 
         return SnapshotBuildResult(
             report_date_local=normalized_report_date,
