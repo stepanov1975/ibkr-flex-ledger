@@ -47,7 +47,8 @@ Goal: define exact UPSERT natural keys for deterministic replay and deduplicatio
 Acceptance checks:
 - Reprocessing same raw input produces identical canonical row identities.
 - Duplicate business events are not created across reruns.
-- Historical replay resolves each selected event to its newest successful source version across account periods and queries; failed versions do not override successful corrections.
+- Historical replay resolves each selected event to its latest successful application across account periods and queries; failed versions do not override successful corrections.
+- Rebuilding a missing trade uses immutable fields from its earliest recorded successful application and overlays only supported corrections from its latest application. Deleted failed-write origins are not inferred.
 
 ---
 

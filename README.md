@@ -499,11 +499,14 @@ or `FLEX_TRADE:<tradeID>`.
 
 Every reprocess reads immutable artifacts, replays their actual report dates
 chronologically, and rebuilds canonical events and snapshots without requesting a new
-IBKR Flex statement. Replayed events use their newest successful source version across
+IBKR Flex statement. Replayed events use their latest successful application across
 the account's periods and queries, while broker valuation retains the selected artifact.
 This rebuilds corrected history without rolling canonical values back to an older
 report. Failed imports cannot supersede successful source versions. Trade corrections
 update both base cash and the execution FX rate alongside local cash and commission.
+Missing trades retain immutable fields from the earliest recorded successful application
+and overlay supported corrections from the latest one. Deleted origins from failed
+writes cannot be reconstructed without additional history.
 Valid split approvals remain in place during replay; equivalent corporate-action
 copies retain their existing source links without making later snapshots stale.
 The ordinary HTTP endpoint, including explicit HTTP scopes, never

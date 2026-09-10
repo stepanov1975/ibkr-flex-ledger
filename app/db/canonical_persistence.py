@@ -169,23 +169,35 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_raw_record_list_successful_events_for_account(
         self, account_id: str,
     ) -> list[RawRecordForCanonicalMapping]:
-        """Read authoritative replay sources without limiting canonical identity to a period."""
+        """Read first and latest known successful applications across periods and queries.
+
+        Recovery can finish an older artifact after a newer one. Keep both a
+        successful raw-row owner and a later completion so retries do not erase
+        the first known successful application. Failed-write lineage is not
+        inferred when no successful application record survives.
+        """
 
         return self._db_canonical_read_raw_rows(
             query_template=(
                 "SELECT raw.raw_record_id, raw.ingestion_run_id, raw.account_id, raw.period_key, "
                 "raw.flex_query_id, raw.report_date_local, raw.section_name, raw.source_row_ref, raw.source_payload "
                 "FROM raw_record raw JOIN raw_artifact artifact USING (raw_artifact_id) "
-                "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
+                "JOIN ingestion_run owner ON owner.ingestion_run_id=raw.ingestion_run_id "
                 "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+                "CROSS JOIN LATERAL ("
+                "SELECT COALESCE(owner.ended_at_utc, owner.started_at_utc) AS applied_at_utc, "
+                "owner.ingestion_run_id AS applied_run_id WHERE owner.status='success' "
+                "UNION ALL SELECT COALESCE(completion.ended_at_utc, completion.started_at_utc), "
+                "completion.ingestion_run_id WHERE completion.status='success' "
+                "AND completion.ingestion_run_id<>owner.ingestion_run_id"
+                ") application "
                 "WHERE raw.account_id=:account_id "
-                "AND ((artifact.completed_ingestion_run_id IS NOT NULL AND completion.status='success') "
-                "OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success')) "
                 "AND ((raw.section_name='Trades' AND raw.source_row_ref LIKE 'Trades:Trade:%') "
                 "OR (raw.section_name='CashTransactions' AND raw.source_row_ref LIKE 'CashTransactions:CashTransaction:%') "
                 "OR (raw.section_name='ConversionRates' AND raw.source_row_ref LIKE 'ConversionRates:ConversionRate:%') "
                 "OR (raw.section_name='CorporateActions' AND raw.source_row_ref LIKE 'CorporateActions:CorporateAction:%')) "
-                "ORDER BY artifact.created_at_utc, artifact.raw_artifact_id, raw.created_at_utc, raw.raw_record_id"
+                "ORDER BY application.applied_at_utc, application.applied_run_id, "
+                "artifact.created_at_utc, artifact.raw_artifact_id, raw.created_at_utc, raw.raw_record_id"
             ),
             parameters={"account_id": self._db_canonical_validate_non_empty_text(account_id, "account_id")},
         )

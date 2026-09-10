@@ -44,6 +44,13 @@ def job_canonical_map_and_persist(
 
     service = mapping_service or CanonicalMappingService()
     origins = source_origins or {}
+    # Map trade origins as well as current rows so rebuilding a missing event
+    # uses the same immutable fields that an existing event's UPSERT retains.
+    selected_raw_ids = {str(row.raw_record_id) for row in raw_records}
+    mapping_rows = [
+        row for row in origins.values()
+        if row.section_name == "Trades" and str(row.raw_record_id) not in selected_raw_ids
+    ] + raw_records
     mapping_input_rows = [
         RawRecordForMapping(
             raw_record_id=row.raw_record_id,
@@ -53,7 +60,7 @@ def job_canonical_map_and_persist(
             report_date_local=row.report_date_local,
             source_payload=row.source_payload,
         )
-        for row in raw_records
+        for row in mapping_rows
     ]
     mapped_batch = service.mapping_build_canonical_batch(
         account_id=account_id,
@@ -65,10 +72,28 @@ def job_canonical_map_and_persist(
         mapped_batch=mapped_batch,
         canonical_persistence_repository=canonical_persistence_repository,
     )
-    conid_by_raw_record_id = _job_canonical_build_conid_index(raw_records=raw_records)
+    conid_by_raw_record_id = _job_canonical_build_conid_index(raw_records=mapping_rows)
+    trades_by_source_id = {request.source_raw_record_id: request for request in mapped_batch.trade_fill_requests}
 
     resolved_trade_requests: list[CanonicalTradeFillUpsertRequest] = []
-    for trade_request in mapped_batch.trade_fill_requests:
+    for latest_trade_request in mapped_batch.trade_fill_requests:
+        if latest_trade_request.source_raw_record_id not in selected_raw_ids:
+            continue
+        trade_request = latest_trade_request
+        origin = origins.get(latest_trade_request.source_raw_record_id)
+        if origin is not None:
+            # This overlay matches the trade conflict clause in canonical persistence.
+            trade_request = replace(
+                trades_by_source_id[str(origin.raw_record_id)],
+                price=latest_trade_request.price,
+                commission=latest_trade_request.commission,
+                realized_pnl=latest_trade_request.realized_pnl,
+                net_cash=latest_trade_request.net_cash,
+                net_cash_in_base=latest_trade_request.net_cash_in_base,
+                fx_rate_to_base=latest_trade_request.fx_rate_to_base,
+                cost=latest_trade_request.cost,
+                description_source_raw_record_id=latest_trade_request.source_raw_record_id,
+            )
         conid = conid_by_raw_record_id.get(trade_request.source_raw_record_id)
         if conid is None:
             raise MappingContractViolationError(
@@ -87,14 +112,6 @@ def job_canonical_map_and_persist(
             trade_request,
             instrument_id=str(instrument_record.instrument_id),
         )
-        origin = origins.get(trade_request.source_raw_record_id)
-        if origin is not None:
-            resolved_trade_request = replace(
-                resolved_trade_request,
-                ingestion_run_id=str(origin.ingestion_run_id),
-                source_raw_record_id=str(origin.raw_record_id),
-                description_source_raw_record_id=trade_request.source_raw_record_id,
-            )
         resolved_trade_requests.append(resolved_trade_request)
 
     resolved_cashflow_requests = []
@@ -136,7 +153,7 @@ def job_canonical_map_and_persist(
 
     return {
         "instrument_upsert_count": len(instrument_id_by_conid),
-        "trade_fill_count": len(mapped_batch.trade_fill_requests),
+        "trade_fill_count": len(resolved_trade_requests),
         "cashflow_count": len(mapped_batch.cashflow_requests),
         "fx_count": len(mapped_batch.fx_requests),
         "corp_action_count": len(mapped_batch.corp_action_requests),

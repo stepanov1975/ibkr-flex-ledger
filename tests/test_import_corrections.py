@@ -185,3 +185,50 @@ def test_replay_retains_event_origins_and_current_description(database, monkeypa
         assert connection.scalar(text("SELECT fx_rate FROM event_fx")) == Decimal("1.2")
         if not rebuild:
             assert trade.updated_at_utc == updated_at
+
+
+@pytest.mark.parametrize(("attribute", "value"), [
+    ("quantity", "3"), ("buySell", "SELL"), ("reportDate", "20260822"),
+    ("dateTime", "20260821;140000"), ("currency", "EUR"), ("fees", "7"),
+    ("conid", "900002"), ("transactionID", "corrected-transaction"),
+])
+@pytest.mark.parametrize("replay_period", ["2026-08-21", "2026-08-22"])
+def test_missing_trade_replay_matches_existing_trade_immutable_fields(
+    database, monkeypatch, attribute, value, replay_period,
+):
+    import xml.etree.ElementTree as element_tree
+
+    harness = _harness(database)
+    orchestrator, adapter, *_ = harness
+    monkeypatch.setattr(ingestion_orchestrator, "snapshot_resolve_report_date_local", lambda _: "2026-08-21")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    root = element_tree.fromstring(_SEEDED_PAYLOAD)
+    trade = root.find(".//Trade")
+    assert trade is not None
+    trade.set(attribute, value)
+    trade.set("tradePrice", "200")
+    trade.set("ibCommission", "2")
+    trade.set("description", "Corrected trade")
+    adapter.payload_bytes = element_tree.tostring(root)
+    monkeypatch.setattr(ingestion_orchestrator, "snapshot_resolve_report_date_local", lambda _: "2026-08-22")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    assert _replay(harness, replay_period).status == "success"
+
+    trade_query = text(
+        "SELECT instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
+        "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
+        "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency, "
+        "description FROM event_trade_fill"
+    )
+    lot_query = text("SELECT open_quantity, open_price, cost_basis_open, remaining_quantity FROM position_lot")
+    with database.begin() as connection:
+        expected_trade = connection.execute(trade_query).one()
+        expected_lot = connection.execute(lot_query).one()
+        connection.execute(text("DELETE FROM position_lot"))
+        connection.execute(text("DELETE FROM pnl_snapshot_daily"))
+        connection.execute(text("DELETE FROM event_trade_fill"))
+
+    assert _replay(harness, replay_period).status == "success"
+    with database.connect() as connection:
+        assert connection.execute(trade_query).one() == expected_trade
+        assert connection.execute(lot_query).one() == expected_lot

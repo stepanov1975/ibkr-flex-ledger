@@ -269,7 +269,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 )
             )
 
-            latest_event_sources = job_replay_event_sources(
+            event_sources = job_replay_event_sources(
                 config.account_id,
                 config.functional_currency,
                 self._raw_read_repository.db_raw_record_list_successful_events_for_account(config.account_id),
@@ -313,18 +313,19 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 canonical_started_at = datetime.now(timezone.utc)
                 selected_event_sources = job_replay_event_sources(
                     config.account_id, config.functional_currency, raw_rows,
-                )
+                ).latest
                 canonical_rows = [row for row in raw_rows if row.section_name not in {
                     "Trades", "CashTransactions", "ConversionRates", "CorporateActions",
                 }]
                 source_origins = {}
                 for key, original in selected_event_sources.items():
-                    latest = latest_event_sources.get(key, original)
+                    latest = event_sources.latest.get(key, original)
                     canonical_rows.append(latest)
-                    source_origins[str(latest.raw_record_id)] = original
+                    source_origins[str(latest.raw_record_id)] = event_sources.first.get(key, original)
                 # Write each event's final version once so historical replay cannot
                 # trigger temporary mutations or invalidate a newer manual decision.
-                # Origins and broker valuation still belong to the selected artifact.
+                # Missing events use the first available successful application as
+                # their origin. Broker valuation still uses the selected artifact.
                 canonical_counts = job_canonical_map_and_persist(
                     account_id=config.account_id,
                     functional_currency=config.functional_currency,
