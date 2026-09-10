@@ -853,6 +853,12 @@ def _raw_row(
 class _CanonicalRepositoryStub:
     """Canonical repository stub implementing read and upsert behaviors."""
 
+    def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
+        pass
+
+    def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
+        return False
+
     def __init__(
         self,
         changed_rows: list[RawRecordForCanonicalMapping] | None = None,

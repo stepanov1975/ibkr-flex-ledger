@@ -352,6 +352,10 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     )
                 )
 
+            if duplicate_skip_reason is None and self._canonical_repository is not None and self._snapshot_service is not None:
+                self._canonical_repository.db_canonical_mark_valuation_pending(
+                    account_id=self._config.account_id, ingestion_run_id=str(semantic_run_id),
+                )
             self._job_append_snapshot_stage_timeline(
                 run_record_id=str(semantic_run_id),
                 report_date_local=(
@@ -537,6 +541,12 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
 
         snapshot_skip_reason: str | None = None
         snapshot_full_rebuild_reason: str | None = None
+        removed_positions = (
+            duplicate_skip_reason is None and self._canonical_repository is not None
+            and self._canonical_repository.db_canonical_has_removed_positions(
+                self._config.account_id, run_record_id, report_date_local,
+            )
+        )
         if duplicate_skip_reason is not None:
             snapshot_result = SnapshotBuildResult(
                 report_date_local=report_date_local,
@@ -547,7 +557,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             snapshot_scope_mode = "skipped"
             snapshot_duration_ms = 0
             snapshot_skip_reason = duplicate_skip_reason
-        elif canonical_raw_rows is None or force_full_rebuild:
+        elif canonical_raw_rows is None or force_full_rebuild or removed_positions:
             snapshot_started_ns = perf_counter_ns()
             snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                 account_id=self._config.account_id,
@@ -558,6 +568,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             snapshot_duration_ms = _duration_ms(snapshot_started_ns)
             snapshot_scope_mode = "full_fallback"
             snapshot_full_rebuild_reason = (
+                "removed_broker_positions" if removed_positions else
                 "prior_failed_run" if force_full_rebuild else "canonical_repository_not_configured"
             )
         else:

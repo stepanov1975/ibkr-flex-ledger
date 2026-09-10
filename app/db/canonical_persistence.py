@@ -257,6 +257,38 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             parameters={"raw_artifact_id": str(raw_artifact_id)},
         )
 
+    def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
+        """Detect deletions that cannot appear in the changed-current-row scope."""
+        try:
+            with self._engine.connect() as connection:
+                return bool(connection.scalar(text(
+                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
+                    "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
+                    "ORDER BY instrument_id,report_date_local DESC) "
+                    "SELECT EXISTS(SELECT 1 FROM latest s JOIN instrument i USING(instrument_id) "
+                    "WHERE s.position_qty<>0 AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH','FX') "
+                    "AND EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
+                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions') "
+                    "AND NOT EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
+                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions' "
+                    "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%' AND r.source_payload->>'conid'=i.conid))"
+                ), {'account_id': account_id, 'run_id': ingestion_run_id, 'day': report_date_local}))
+        except SQLAlchemyError as error:
+            raise RuntimeError("removed broker position check failed") from error
+
+    def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
+        """Persist valuation-attempt time even when no canonical rows changed."""
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(text(
+                    "UPDATE raw_artifact SET valuation_pending_at_utc=clock_timestamp() "
+                    "WHERE account_id=:account_id AND raw_artifact_id IN ("
+                    "SELECT raw_artifact_id FROM raw_record WHERE account_id=:account_id "
+                    "AND ingestion_run_id=CAST(:run_id AS uuid) AND section_name='OpenPositions')"
+                ), {"account_id": account_id, "run_id": ingestion_run_id})
+        except SQLAlchemyError as error:
+            raise RuntimeError("valuation attempt recording failed") from error
+
     def db_canonical_instrument_upsert_many(
         self,
         requests: list[CanonicalInstrumentUpsertRequest],
@@ -483,7 +515,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "INSERT INTO event_trade_fill ("
                             "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
                             "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
-                            "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency"
+                            "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency, description"
                             ") VALUES ("
                             ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
                             "CAST(:source_raw_record_id AS uuid), :ib_exec_id, :transaction_id, "
@@ -491,13 +523,16 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:quantity AS numeric), CAST(:price AS numeric), CAST(:cost AS numeric), "
                             "CAST(:commission AS numeric), CAST(:fees AS numeric), CAST(:realized_pnl AS numeric), "
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
-                            "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency"
+                            "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency, "
+                            "(SELECT NULLIF(BTRIM(source_payload->>'description'), '') FROM raw_record "
+                            "WHERE raw_record_id=CAST(:source_raw_record_id AS uuid))"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
                             "price = EXCLUDED.price, "
                             "commission = EXCLUDED.commission, "
                             "realized_pnl = EXCLUDED.realized_pnl, "
                             "net_cash = EXCLUDED.net_cash, "
-                            "cost = EXCLUDED.cost"
+                            "cost = EXCLUDED.cost, "
+                            "description = COALESCE(EXCLUDED.description, event_trade_fill.description)"
                         ),
                         normalized_trade_requests,
                     )

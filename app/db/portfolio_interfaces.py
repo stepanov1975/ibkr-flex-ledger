@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 
@@ -263,6 +263,8 @@ class PortfolioRepositoryPort(Protocol):
         owner: str | None,
         resolution_note: str | None,
     ) -> CorporateActionManualCaseRecord | None: ...
+
+    def db_report_stock_history(self, account_id: str, instrument_id: UUID) -> dict[str, Any] | None: ...
 
     def db_report_pnl_by_instrument(
         self,

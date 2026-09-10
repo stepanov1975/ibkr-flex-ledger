@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from typing import ContextManager
+from contextlib import contextmanager, nullcontext
+from typing import ContextManager, Iterator
 from datetime import date
+import json
 from typing import Any
 from uuid import UUID
 
@@ -131,6 +132,30 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             return nullcontext(self._transaction_connection)
         return self._engine.begin() if write else self._engine.connect()
 
+    @contextmanager
+    def db_ledger_projection_transaction(self) -> Iterator[LedgerSnapshotRepositoryPort]:
+        """Keep lot reconciliation and snapshot writes in the same transaction."""
+        if self._transaction_connection is not None:
+            yield self
+        else:
+            with self._engine.begin() as connection:
+                yield SQLAlchemyLedgerSnapshotService(self._engine, connection=connection)
+
+    def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
+        """Retain omitted broker-only holdings in the next snapshot's instrument set."""
+        try:
+            with self._connection_scope() as connection:
+                return [str(identifier) for identifier in connection.execute(text(
+                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
+                    "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
+                    "ORDER BY instrument_id,report_date_local DESC) "
+                    "SELECT instrument_id FROM latest JOIN instrument USING(instrument_id) "
+                    "WHERE (position_qty<>0 OR cashflow_reassigned_at_utc IS NOT NULL) "
+                    "AND UPPER(BTRIM(asset_category)) NOT IN ('CASH','FX')"
+                ), {'account_id': account_id, 'day': report_date_local}).scalars()]
+        except SQLAlchemyError as error:
+            raise RuntimeError("prior broker holdings read failed") from error
+
     def db_ledger_instrument_ids_for_scope(
         self,
         account_id: str,
@@ -146,13 +171,21 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     text(
                         "SELECT instrument_id FROM instrument "
                         "WHERE account_id = :account_id "
-                        "AND (conid = ANY(:conids) OR currency = ANY(:currencies) OR EXISTS ("
+                        "AND (conid = ANY(:conids) OR UPPER(BTRIM(currency)) = ANY(:currencies) OR EXISTS ("
                         "SELECT 1 FROM event_trade_fill trade "
                         "JOIN raw_record raw ON raw.raw_record_id = trade.source_raw_record_id "
                         "WHERE trade.account_id = instrument.account_id "
                         "AND trade.instrument_id = instrument.instrument_id "
-                        "AND COALESCE(trade.commission, 0) <> 0 "
-                        "AND UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')) = ANY(:currencies))) "
+                        "AND (UPPER(BTRIM(trade.currency)) = ANY(:currencies) OR (COALESCE(trade.commission, 0) <> 0 "
+                        "AND UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')) = ANY(:currencies)))) "
+                        "OR EXISTS (SELECT 1 FROM event_cashflow cashflow "
+                        "WHERE cashflow.account_id = instrument.account_id "
+                        "AND cashflow.instrument_id = instrument.instrument_id "
+                        "AND UPPER(BTRIM(cashflow.currency)) = ANY(:currencies)) "
+                        "OR cashflow_reassigned_at_utc > COALESCE((SELECT snapshot.calculated_at_utc "
+                        "FROM pnl_snapshot_daily snapshot WHERE snapshot.account_id=instrument.account_id "
+                        "AND snapshot.instrument_id=instrument.instrument_id "
+                        "ORDER BY snapshot.report_date_local DESC LIMIT 1), '-infinity'::timestamptz)) "
                         "ORDER BY instrument_id"
                     ),
                     {
@@ -783,7 +816,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "INSERT INTO pnl_snapshot_daily ("
                         "account_id, report_date_local, instrument_id, position_qty, cost_basis, realized_pnl, unrealized_pnl, "
                         "total_pnl, fees, withholding_tax, currency, calculation_provisional, provisional, "
-                        "valuation_source, fx_source, ingestion_run_id"
+                        "valuation_source, fx_source, ingestion_run_id, fx_dependencies"
                         ") VALUES ("
                         ":account_id, CAST(:report_date_local AS date), CAST(:instrument_id AS uuid), "
                         "CAST(:position_qty AS numeric), CAST(:cost_basis AS numeric), CAST(:realized_pnl AS numeric), "
@@ -794,8 +827,9 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "OR EXISTS (SELECT 1 FROM event_corp_action e "
                         "WHERE e.instrument_id = CAST(:instrument_id AS uuid) AND e.requires_manual)), "
                         ":valuation_source, :fx_source, "
-                        "CAST(:ingestion_run_id AS uuid)"
+                        "CAST(:ingestion_run_id AS uuid), CAST(:fx_dependencies AS jsonb)"
                         ") ON CONFLICT ON CONSTRAINT uq_pnl_snapshot_daily_account_date_instrument DO UPDATE SET "
+                        "calculated_at_utc = clock_timestamp(), "
                         "position_qty = EXCLUDED.position_qty, "
                         "cost_basis = EXCLUDED.cost_basis, "
                         "realized_pnl = EXCLUDED.realized_pnl, "
@@ -808,6 +842,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "provisional = EXCLUDED.provisional, "
                         "valuation_source = EXCLUDED.valuation_source, "
                         "fx_source = EXCLUDED.fx_source, "
+                        "fx_dependencies = EXCLUDED.fx_dependencies, "
                         "ingestion_run_id = EXCLUDED.ingestion_run_id"
                     ),
                     normalized_requests,
@@ -1062,6 +1097,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "provisional": request.provisional,
             "valuation_source": self._db_ledger_validate_optional_text(request.valuation_source),
             "fx_source": self._db_ledger_validate_optional_text(request.fx_source),
+            "fx_dependencies": None if request.fx_dependencies is None else json.dumps(request.fx_dependencies),
             "ingestion_run_id": self._db_ledger_validate_optional_uuid_text(request.ingestion_run_id),
         }
 

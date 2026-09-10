@@ -334,6 +334,9 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                         details=artifact_details,
                     )
                 )
+                self._canonical_persistence_repository.db_canonical_mark_valuation_pending(
+                    account_id=config.account_id, ingestion_run_id=str(semantic_run_id),
+                )
                 snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                     account_id=config.account_id,
                     ingestion_run_id=str(semantic_run_id),

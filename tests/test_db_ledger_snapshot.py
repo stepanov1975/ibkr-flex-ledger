@@ -178,7 +178,7 @@ def test_scope_lookup_uses_conid_currency_union_and_normalizes_ids() -> None:
     )
 
     assert result == [str(instrument_id)]
-    assert "conid = ANY(:conids) OR currency = ANY(:currencies)" in connection.executed_queries[0]
+    assert "conid = ANY(:conids) OR UPPER(BTRIM(currency)) = ANY(:currencies)" in connection.executed_queries[0]
     assert "ORDER BY instrument_id" in connection.executed_queries[0]
     assert connection.executed_parameters[0] == {
         "account_id": "U1",

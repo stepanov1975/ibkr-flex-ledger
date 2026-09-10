@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from app.api.routers.corporate_actions import api_create_corporate_action_router
 from app.db.portfolio import SQLAlchemyPortfolioService
+from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
 import test_ingestion_integrity_regressions as ingestion_tests
 from test_end_to_end_seeded import _SEEDED_PAYLOAD
 
@@ -362,6 +363,8 @@ def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database,
     harness, case, client = split_case
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()
+    with database.connect() as c:
+        original_quantity = c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'"))
     harness[1].payload_bytes = harness[1].payload_bytes.replace(
         b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
     ).replace(
@@ -370,13 +373,13 @@ def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database,
         b'reportDate="20260822" dateTime="20260822;120000" ibCommission="0" fxRateToBase="1" /></Trades>',
     )
 
-    def fail_snapshot(requests):
-        raise RuntimeError("Failure after canonical trades and current lots are committed")
+    def fail_snapshot(self, requests):
+        raise RuntimeError("Failure after canonical trades commit, rolling back projection writes")
 
-    monkeypatch.setattr(harness[5], "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
+    monkeypatch.setattr(SQLAlchemyLedgerSnapshotService, "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
     assert harness[0].job_execute("ingestion_run").status == "failed"
     with database.connect() as c:
-        assert c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'")) == 3
+        assert c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'")) == original_quantity
     before = _state(database)
     for endpoint, body in (("preview", _RATIO), ("apply", {**_RATIO, "preview_token": preview["preview_token"]})):
         response = client.post(base + "/" + endpoint, json=body)
@@ -591,7 +594,7 @@ def test_upgrade_preserves_unchanged_acknowledged_manual_case(database, split_ca
     SQLAlchemyPortfolioService(database).db_manual_case_update(case.case_id, "resolved", None, "Investigating")
     command.downgrade(Config("alembic.ini"), "20260908_08")
     before = _state(database)
-    command.upgrade(Config("alembic.ini"), "head")
+    command.upgrade(Config("alembic.ini"), "20260908_09")
     with database.connect() as c:
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == "resolved"
         assert c.scalar(text("SELECT resolution_note FROM corporate_action_manual_case")) == "Investigating"
@@ -717,11 +720,11 @@ def test_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(
     )
     harness[1].payload_bytes = harness[1].payload_bytes.replace(b'</Trades>', trades + b'</Trades>')
 
-    def fail_snapshot(requests):
-        raise RuntimeError("Same-date ingestion failed after canonical and lot writes")
+    def fail_snapshot(self, requests):
+        raise RuntimeError("Same-date ingestion failed after canonical writes")
 
     with monkeypatch.context() as patch:
-        patch.setattr(harness[5], "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
+        patch.setattr(SQLAlchemyLedgerSnapshotService, "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
         assert harness[0].job_execute("ingestion_run").status == "failed"
     before = _state(database)
     assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 409
