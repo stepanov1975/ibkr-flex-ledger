@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import re
 from typing import Any
 from uuid import UUID
@@ -98,7 +98,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             for table, identifier, kind, columns in (
                 ('event_trade_fill', 'event_trade_fill_id', 'trade',
                  "event.trade_timestamp_utc AS timestamp_utc, event.side AS action, event.quantity, event.price, "
-                 "event.net_cash AS amount, event.currency, raw.source_payload->>'description' AS description"),
+                 "event.net_cash AS amount, event.currency, event.description"),
                 ('event_cashflow', 'event_cashflow_id', 'cashflow',
                  "event.effective_at_utc AS timestamp_utc, event.cash_action AS action, NULL AS quantity, "
                  "NULL AS price, event.amount, event.currency, raw.source_payload->>'description' AS description"),
@@ -140,12 +140,12 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         snapshot = snapshots.get(identifier, {})
         if not snapshot or snapshot['calculated_at_utc'] is None:
             continue
-        origin = origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload')
+        origin = _valuation_inputs(origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload'))
         for valuation in valuations:
             valuation_date = valuation['report_date_local'] or snapshot['report_date_local']
             if valuation_date < snapshot['report_date_local']:
                 continue
-            candidate = (valuation['positions'] or {}).get(member['conid'], {}).get('payload')
+            candidate = _valuation_inputs((valuation['positions'] or {}).get(member['conid'], {}).get('payload'))
             if (candidate != origin and (candidate is not None or snapshot['position_qty'] != 0)
                     and (valuation_date > snapshot['report_date_local']
                          or valuation['recorded_at_utc'] > snapshot['calculated_at_utc'])):
@@ -226,6 +226,28 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         'provisional': missing_snapshot or any(row['provisional'] for row in positions) or len(dates) > 1,
         'totals': totals, 'positions': positions, 'lots': lots, 'activity': activity,
     }
+
+
+def _valuation_inputs(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Compare parsed valuation inputs, ignoring broker labels and numeric formatting."""
+    if payload is None:
+        return None
+    result: dict[str, Any] = {'currency': (payload.get('currency') or '').strip().upper()}
+    for key in ('position', 'markPrice', 'costBasisMoney', 'fifoPnlUnrealized', 'fxRateToBase', 'multiplier'):
+        value = (payload.get(key) or '').strip()
+        try:
+            result[key] = None if value in ('', '-', '--', 'N/A') else Decimal(value.replace(',', ''))
+            if isinstance(result[key], Decimal) and not result[key].is_finite():
+                result[key] = value
+        except InvalidOperation:
+            # Failed imports can retain malformed raw values; keep them distinct.
+            result[key] = value
+    report_date = payload.get('reportDate') or ''
+    try:
+        result['reportDate'] = date.fromisoformat(report_date) if report_date else None
+    except ValueError:
+        result['reportDate'] = report_date
+    return result
 
 
 def _underlying(instrument: dict[str, Any]) -> tuple[str | None, str | None]:

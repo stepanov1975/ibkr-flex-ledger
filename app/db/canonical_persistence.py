@@ -515,7 +515,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "INSERT INTO event_trade_fill ("
                             "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
                             "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
-                            "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency"
+                            "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency, description"
                             ") VALUES ("
                             ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
                             "CAST(:source_raw_record_id AS uuid), :ib_exec_id, :transaction_id, "
@@ -523,13 +523,16 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:quantity AS numeric), CAST(:price AS numeric), CAST(:cost AS numeric), "
                             "CAST(:commission AS numeric), CAST(:fees AS numeric), CAST(:realized_pnl AS numeric), "
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
-                            "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency"
+                            "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency, "
+                            "(SELECT NULLIF(BTRIM(source_payload->>'description'), '') FROM raw_record "
+                            "WHERE raw_record_id=CAST(:source_raw_record_id AS uuid))"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
                             "price = EXCLUDED.price, "
                             "commission = EXCLUDED.commission, "
                             "realized_pnl = EXCLUDED.realized_pnl, "
                             "net_cash = EXCLUDED.net_cash, "
-                            "cost = EXCLUDED.cost"
+                            "cost = EXCLUDED.cost, "
+                            "description = COALESCE(EXCLUDED.description, event_trade_fill.description)"
                         ),
                         normalized_trade_requests,
                     )
