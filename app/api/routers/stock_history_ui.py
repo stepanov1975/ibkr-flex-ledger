@@ -36,12 +36,14 @@ function renderHistory(report){
   for(const item of report.activity){const tr=document.createElement('tr');cell(tr,item.timestamp_utc?formatDateTime(item.timestamp_utc):formatDate(item.report_date_local));cell(tr,item.symbol);cell(tr,({trade:'Trade',cashflow:'Cashflow',corporate_action:'Corporate action'})[item.event_type]);cell(tr,item.action);cell(tr,formatQuantity(item.quantity),'number');cell(tr,formatCurrency(item.price,item.currency),'number');cell(tr,formatCurrency(item.amount,item.currency),'number');cell(tr,item.description);el('activity').append(tr)}
   el('activity-empty').textContent=report.activity.length?'':'No imported activity for this stock or its options.';
 }
+let historyLoading=false;
 async function loadHistory(){
+  if(historyLoading)return;historyLoading=true;
   el('history-error').textContent='';el('history-state').textContent='';el('report-date').textContent='Loading…';
   for(const id of ['realized-pnl','unrealized-pnl','total-pnl'])el(id).textContent='N/A';
   for(const id of ['positions','lots','activity'])el(id).replaceChildren();
   for(const id of ['lots-empty','activity-empty'])el(id).textContent='';
-  try{const response=await fetch('/reports/stock-history/__INSTRUMENT_ID__');const report=await response.json();if(!response.ok)throw new Error(report.message||response.statusText);renderHistory(report)}catch(error){el('history-error').textContent=error.message||'Could not load stock history';el('report-date').textContent='N/A'}
+  try{const response=await fetch('/reports/stock-history/__INSTRUMENT_ID__');const report=await response.json();if(!response.ok)throw new Error(report.message||response.statusText);renderHistory(report)}catch(error){el('history-error').textContent=error.message||'Could not load stock history';el('report-date').textContent='N/A'}finally{historyLoading=false}
 }
 loadHistory();
 </script></body></html>"""

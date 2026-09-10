@@ -96,3 +96,29 @@ def test_history_explains_when_pnl_snapshots_lag_behind_activity():
     message = context.eval("nodes['history-state'].textContent").lower()
     assert 'snapshot' in message
     assert 'activity' in message
+
+
+def test_overlapping_refreshes_do_not_duplicate_rows_and_can_refresh_after_completion():
+    response = _page(f'/ui/stocks/{uuid4()}')
+    script = response.text.split('<script>')[1].split('</script>')[0].rsplit('loadHistory();', 1)[0]
+    context = _context(script)
+    context.eval('''
+      const pending=[];
+      fetch=()=>new Promise(resolve=>pending.push(resolve));
+      const report={symbol:'TEST',totals:[],positions:[{symbol:'TEST'}],
+        lots:[{symbol:'TEST',status:'open'}],activity:[{symbol:'TEST',event_type:'trade'}]};
+      loadHistory();loadHistory();
+      for(const resolve of pending)resolve({ok:true,json:async()=>report});
+    ''')
+    while context.execute_pending_job():
+        pass
+    for table in ('positions', 'lots', 'activity'):
+        assert context.eval(f'nodes.{table}.children.length') == 1
+    context.eval('''
+      loadHistory();
+      pending[pending.length-1]({ok:true,json:async()=>({...report,symbol:'UPDATED',positions:[],lots:[],activity:[]})});
+    ''')
+    while context.execute_pending_job():
+        pass
+    assert context.eval("nodes['stock-name'].textContent") == 'UPDATED'
+    assert context.eval('nodes.activity.children.length') == 0

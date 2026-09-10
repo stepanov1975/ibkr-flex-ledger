@@ -164,6 +164,9 @@ class _ArtifactRawRepository:
 class _CanonicalPersistRepositoryStub:
     """Capture upserted canonical identifiers to assert determinism."""
 
+    def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
+        pass
+
     def __init__(self) -> None:
         """Initialize capture container.
 

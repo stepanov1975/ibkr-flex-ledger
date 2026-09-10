@@ -352,6 +352,10 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     )
                 )
 
+            if duplicate_skip_reason is None and self._canonical_repository is not None and self._snapshot_service is not None:
+                self._canonical_repository.db_canonical_mark_valuation_pending(
+                    account_id=self._config.account_id, ingestion_run_id=str(semantic_run_id),
+                )
             self._job_append_snapshot_stage_timeline(
                 run_record_id=str(semantic_run_id),
                 report_date_local=(

@@ -257,6 +257,19 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             parameters={"raw_artifact_id": str(raw_artifact_id)},
         )
 
+    def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
+        """Persist valuation-attempt time even when no canonical rows changed."""
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(text(
+                    "UPDATE raw_artifact SET valuation_pending_at_utc=clock_timestamp() "
+                    "WHERE account_id=:account_id AND raw_artifact_id IN ("
+                    "SELECT raw_artifact_id FROM raw_record WHERE account_id=:account_id "
+                    "AND ingestion_run_id=CAST(:run_id AS uuid) AND section_name='OpenPositions')"
+                ), {"account_id": account_id, "run_id": ingestion_run_id})
+        except SQLAlchemyError as error:
+            raise RuntimeError("valuation attempt recording failed") from error
+
     def db_canonical_instrument_upsert_many(
         self,
         requests: list[CanonicalInstrumentUpsertRequest],

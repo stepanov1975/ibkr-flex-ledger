@@ -660,6 +660,9 @@ class CanonicalPersistenceRepositoryPort(Protocol):
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
         """Return whether retained run history permits duplicate/incremental skips."""
 
+    def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
+        """Record an attempt to project the semantic run's broker valuations."""
+
     def db_canonical_instrument_upsert_many(
         self,
         requests: list[CanonicalInstrumentUpsertRequest],

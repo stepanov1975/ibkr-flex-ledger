@@ -175,11 +175,15 @@ lot P&L includes trading costs. Amounts are grouped by snapshot currency, while
 activity prices and cash amounts retain their transaction currency. Missing or
 unreconciled lot valuations display `N/A`. Option grouping uses IBKR underlying
 identifiers where available, with standard option-symbol matching as a fallback.
+Symbol-only matches are excluded when multiple stocks share that symbol. Metadata
+backing committed option activity remains available even if its snapshot build fails.
 If imported activity is newer than its P&L snapshot, the page labels the report
 provisional and warns that the displayed P&L does not yet include all activity.
 Migration `20260909_11` records canonical mutation and P&L calculation times so
 corrections and replays also invalidate outdated values. Existing snapshots have
 unknown freshness and remain provisional on this page until rebuilt by reprocessing.
+Migration `20260910_12` extends freshness checks to FX rates and broker valuations,
+including removed positions and repeated valuation attempts after a failed import.
 
 The MVP now includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational

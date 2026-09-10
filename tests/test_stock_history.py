@@ -82,6 +82,14 @@ _ROUNDING_PAYLOAD = ('''<FlexQueryResponse><FlexStatements count="1"><FlexStatem
 <CashTransactions /><CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
 </FlexStatement></FlexStatements></FlexQueryResponse>''').encode()
 
+_NO_CASH_PAYLOAD = _PAYLOAD.replace(
+    _PAYLOAD.split(b'<CashTransactions>')[1].split(b'</CashTransactions>')[0], b'',
+)
+_COMMISSION_FX_PAYLOAD = _NO_CASH_PAYLOAD.replace(b'ibCommission="-2"', b'ibCommission="-2" ibCommissionCurrency="GBP"').replace(
+    b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="GBP" toCurrency="USD" '
+    b'reportDate="20260820" rate="1.5" /></ConversionRates>',
+)
+
 
 @pytest.fixture
 def history_database(request):
@@ -427,3 +435,186 @@ def test_existing_snapshots_require_rebuild_after_freshness_migration(history_da
     assert report['stale'] is False
     assert report['provisional'] is False
     assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
+
+
+@pytest.mark.parametrize('metadata_section', ['Trades', 'SecuritiesInfo'])
+def test_failed_snapshot_keeps_committed_adjusted_option_in_stock_family(history_database, monkeypatch, metadata_section):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    metadata = b'underlyingConid="101" underlyingSymbol="TEST"'
+    trade = (b'<Trade ibExecID="NEWOPT" transactionID="30" conid="106" symbol="ADJUSTED OPTION" '
+             b'assetCategory="OPT" currency="USD" buySell="BUY" quantity="1" tradePrice="2" '
+             b'multiplier="100" reportDate="20260821" dateTime="20260821;140000" ')
+    payload = _PAYLOAD.replace(b'</Trades>', trade+(metadata if metadata_section == 'Trades' else b'')+b'/></Trades>')
+    if metadata_section == 'SecuritiesInfo':
+        payload = payload.replace(b'<SecuritiesInfo />', b'<SecuritiesInfo><SecurityInfo conid="106" '+metadata+b'/></SecuritiesInfo>')
+    adapter.payload_bytes = payload
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after new option canonical commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert '106' in {row['conid'] for row in report['positions']}
+    assert any(row['symbol'] == 'ADJUSTED OPTION' for row in report['activity'])
+    assert report['provisional'] is True
+    assert report['totals'][0]['realized_pnl'] is None
+
+
+@pytest.mark.parametrize('selected_index', [0, 1, 2])
+def test_duplicate_stock_symbols_do_not_share_symbol_only_options(selected_index):
+    instruments = [
+        {'instrument_id': uuid4(), 'conid': '101', 'asset_category': 'STK', 'symbol': 'TEST'},
+        {'instrument_id': uuid4(), 'conid': '201', 'asset_category': 'STK', 'symbol': 'TEST'},
+        {'instrument_id': uuid4(), 'conid': '102', 'asset_category': 'OPT', 'symbol': 'TEST 260918P00100000'},
+        {'instrument_id': uuid4(), 'conid': '103', 'asset_category': 'OPT', 'symbol': 'TEST 260918C00100000',
+         'underlying_conid': '101'},
+    ]
+    root, family = _stock_family(instruments[selected_index], instruments)
+    assert root == instruments[selected_index]
+    assert {row['conid'] for row in family} == [{'101', '103'}, {'201'}, {'102'}][selected_index]
+
+
+@pytest.mark.parametrize('history_database,input_kind', [
+    (_NO_CASH_PAYLOAD, 'valuation'), (_COMMISSION_FX_PAYLOAD, 'commission_fx'),
+], indirect=['history_database'], ids=['valuation', 'commission-fx'])
+def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_database, monkeypatch, input_kind):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['provisional'] is False
+    adapter.payload_bytes = (_NO_CASH_PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"')
+                             if input_kind == 'valuation' else _COMMISSION_FX_PAYLOAD.replace(b'rate="1.5"', b'rate="1.6"'))
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after changed snapshot inputs')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is True
+    assert report['provisional'] is True
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    assert report['totals'] != before['totals']
+
+
+@pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
+def test_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    harness = _harness(engine, account='HISTORY')
+    orchestrator, adapter, _, _, service, _, _ = harness
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"')
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('valuation attempt failed')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert _history_replay(engine, harness).status == 'success'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is False
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is True
+    assert report['provisional'] is True
+
+
+@pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
+def test_failed_removal_from_nonempty_broker_positions_marks_pnl_stale(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    stock_position = (b'<OpenPosition conid="101" symbol="TEST" assetCategory="STK" currency="USD"\n'
+                      b'  position="6" markPrice="130" multiplier="1" reportDate="20260821" />')
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(stock_position, b'')
+    assert stock_position not in adapter.payload_bytes
+
+    def fail_snapshot_stage(**kwargs):
+        raise RuntimeError('failure before snapshot stage')
+
+    monkeypatch.setattr(orchestrator, '_job_append_snapshot_stage_timeline', fail_snapshot_stage)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is True
+    assert report['provisional'] is True
+
+
+@pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
+def test_unchanged_valuations_remain_fresh_after_metadata_only_import(history_database):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(
+        b'<SecuritiesInfo />', b'<SecuritiesInfo><SecurityInfo conid="101" description="Updated description" /></SecuritiesInfo>',
+    )
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['stale'] is False
+    assert report['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database', [
+    _PAYLOAD.replace(b'TEST  260918P00100000', b'ADJUSTED OPTION').replace(
+        b'underlyingConid="101" underlyingSymbol="TEST"', b'',
+    ),
+], indirect=True, ids=['adjusted-option'])
+def test_corrected_option_keeps_new_metadata_after_failed_snapshot(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(b'TEST  260918P00100000', b'ADJUSTED OPTION').replace(
+        b'tradePrice="3"', b'tradePrice="4"',
+    )
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after option correction commit')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert '102' in {row['conid'] for row in report['positions']}
+    assert any(row['symbol'] == 'ADJUSTED OPTION' and Decimal(row['price']) == 4 for row in report['activity'])
+    assert report['stale'] is True
+
+
+@pytest.mark.parametrize('selected_index', [0, 1, 2])
+def test_option_only_families_reject_ambiguous_underlying_symbols(selected_index):
+    instruments = [
+        {'instrument_id': uuid4(), 'conid': '1011', 'asset_category': 'OPT', 'symbol': 'TEST 260918P00100000',
+         'underlying_conid': '101'},
+        {'instrument_id': uuid4(), 'conid': '2011', 'asset_category': 'OPT', 'symbol': 'TEST 260918C00100000',
+         'underlying_conid': '201'},
+        {'instrument_id': uuid4(), 'conid': '3011', 'asset_category': 'OPT', 'symbol': 'TEST 261218P00100000'},
+    ]
+    root, family = _stock_family(instruments[selected_index], instruments)
+    assert root == instruments[selected_index]
+    assert family == [instruments[selected_index]]
+
+
+@pytest.mark.parametrize('history_database', [
+    _NO_CASH_PAYLOAD.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement>'),
+], indirect=True, ids=['no-statement-date'])
+def test_valuation_freshness_without_statement_date_uses_processing_time(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    report = client.get(f"/reports/stock-history/{ids['101']}")
+    assert report.status_code == 200
+    assert report.json()['stale'] is False
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement>').replace(
+        b'markPrice="130"', b'markPrice="140"',
+    )
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after undated valuation attempt')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}")
+    assert report.status_code == 200
+    assert report.json()['stale'] is True
