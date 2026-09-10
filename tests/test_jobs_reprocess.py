@@ -160,6 +160,9 @@ class _ArtifactRawRepository:
         self.operation_log.append(("read_artifact", raw_artifact_id))
         return self.rows_by_artifact[raw_artifact_id]
 
+    def db_raw_record_list_successful_events_for_account(self, account_id: str) -> list[RawRecordForMapping]:
+        return []
+
 
 class _CanonicalPersistRepositoryStub:
     """Capture upserted canonical identifiers to assert determinism."""

@@ -695,16 +695,19 @@ def test_older_period_replay_preserves_later_lot_history(database, split_case, m
         assert harness[0].job_execute("ingestion_run").status == "success"
     before = _state(database)["position_lot"]
     assert len(before) == (3 if invalidated else 2)
+    with database.connect() as c:
+        action_updated_at = c.scalar(text("SELECT updated_at_utc FROM event_corp_action"))
     assert ingestion_tests._replay(harness, original_period).status == "success"
-    if not invalidated:
-        assert _state(database)["position_lot"] == before
-    else:
+    assert _state(database)["position_lot"] == before
+    with database.connect() as c:
+        assert c.scalar(text("SELECT updated_at_utc FROM event_corp_action")) == action_updated_at
+    if invalidated:
         with database.connect() as c:
-            assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is False
-            assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional")) == 0
-            assert c.scalar(text("SELECT count(*) FROM position_lot")) == 2
-            assert c.scalar(text("SELECT count(*) FROM position_lot WHERE status='open'")) == 0
-            assert c.scalar(text("SELECT sum(realized_pnl_to_date) FROM position_lot")) == 159
+            # Replaying the original source must not revive an approval invalidated
+            # by the newer successful corporate-action payload.
+            assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is True
+            assert c.scalar(text("SELECT description FROM event_corp_action")) == "Broker split with changed, missing ratio"
+            assert c.scalar(text("SELECT count(*) FROM pnl_snapshot_daily WHERE provisional")) > 0
 
 
 @pytest.mark.parametrize("split_case", ["flat"], indirect=True)

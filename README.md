@@ -237,7 +237,9 @@ Optional Flex retry strategy tuning settings:
 - `IBKR_FLEX_JITTER_MIN_MULTIPLIER` (default `0.5`)
 - `IBKR_FLEX_JITTER_MAX_MULTIPLIER` (default `1.5`)
 
-Retry behavior uses exponential backoff with jitter and preserves IBKR code-specific retry floors for `1009`, `1018`, and `1019`.
+Both report requests and statement polling use bounded retries with exponential
+backoff, jitter, and IBKR code-specific retry floors for `1009`, `1018`, and `1019`.
+Each phase uses the configured attempt limit independently; fatal errors fail immediately.
 
 If required settings are missing or invalid, startup fails with actionable validation output.
 
@@ -437,6 +439,11 @@ date remain limited to affected instruments and FX source currencies; the first
 snapshot for a report date automatically widens to a full rebuild and records
 `missing_report_date_baseline`. Explicit reprocess commands remain full replays.
 
+Broker identifiers shared by distinct lot or dividend-accrual rows receive
+deterministic suffixes so every row survives raw persistence. Existing artifacts
+and their stored rows remain immutable: this change does not backfill rows omitted
+by earlier imports, and replay reads the rows already stored for those artifacts.
+
 Run-detail diagnostics include request transport, polling, cumulative poll wait,
 preflight, XML extraction, artifact persistence, raw persistence, canonical raw
 read, canonical mapping/persistence, snapshot, and total run durations in integer
@@ -492,7 +499,17 @@ or `FLEX_TRADE:<tradeID>`.
 
 Every reprocess reads immutable artifacts, replays their actual report dates
 chronologically, and rebuilds canonical events and snapshots without requesting a new
-IBKR Flex statement. The ordinary HTTP endpoint, including explicit HTTP scopes, never
+IBKR Flex statement. Replayed events use their latest successful application across
+the account's periods and queries, while broker valuation retains the selected artifact.
+This rebuilds corrected history without rolling canonical values back to an older
+report. Failed imports cannot supersede successful source versions. Trade corrections
+update both base cash and the execution FX rate alongside local cash and commission.
+Missing trades retain immutable fields from the earliest recorded successful application
+and overlay supported corrections from the latest one. Deleted origins from failed
+writes cannot be reconstructed without additional history.
+Valid split approvals remain in place during replay; equivalent corporate-action
+copies retain their existing source links without making later snapshots stale.
+The ordinary HTTP endpoint, including explicit HTTP scopes, never
 deletes snapshots. Only the CLI command with both scope flags may remove unsupported
 derived snapshot dates in that exact account/period/query scope. Back up and verify
 PostgreSQL before using that cleanup-capable command; see `docs/operations.md`.
@@ -511,6 +528,10 @@ Included behavior:
 - Day-level snapshot persistence into `pnl_snapshot_daily` and reconciled open-lot persistence into `position_lot`
 - Stale open lots are closed when deterministic replay no longer produces them
 - UTC timestamps are retained while Flex statement dates drive daily snapshot boundaries
+
+Flex timestamps configured as `yyyy-MM-dd;HH:mm:ss Timezone`, including explicit
+`EST` and `EDT`, are converted to UTC using the supplied offset. Existing timestamps
+without a timezone continue to use the established UTC assumption.
 
 API endpoint additions:
 

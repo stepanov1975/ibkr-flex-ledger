@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import date
+from hashlib import sha256
+import json
 import xml.etree.ElementTree as element_tree
 
 from app.domain.flex_parsing import domain_flex_parse_local_date
@@ -91,7 +94,33 @@ def job_raw_extract_payload_rows(payload_bytes: bytes) -> RawPayloadExtractionRe
                     )
                 )
 
+    _job_raw_disambiguate_source_row_refs(extracted_rows)
     return RawPayloadExtractionResult(report_date_local=report_date_local, rows=extracted_rows)
+
+
+def _job_raw_disambiguate_source_row_refs(rows: list[RawExtractedRow]) -> None:
+    """Keep every colliding row while retaining existing refs for unique rows."""
+
+    reference_counts = Counter((row.section_name, row.source_row_ref) for row in rows)
+    reserved_refs = set(reference_counts)
+    collisions = sorted(
+        (row.section_name, row.source_row_ref, json.dumps(row.source_payload, sort_keys=True), index)
+        for index, row in enumerate(rows)
+        if reference_counts[(row.section_name, row.source_row_ref)] > 1
+    )
+    occurrences: Counter[tuple[str, str]] = Counter()
+    for section_name, source_row_ref, payload_json, index in collisions:
+        payload_digest = sha256(payload_json.encode()).hexdigest()
+        reference_prefix = f"{source_row_ref}:payload={payload_digest}"
+        occurrence_key = (section_name, reference_prefix)
+        # Reserve original refs too: broker IDs can contain our suffix syntax.
+        while True:
+            occurrences[occurrence_key] += 1
+            disambiguated_ref = f"{reference_prefix}:occurrence={occurrences[occurrence_key]}"
+            if (section_name, disambiguated_ref) not in reserved_refs:
+                break
+        reserved_refs.add((section_name, disambiguated_ref))
+        rows[index] = replace(rows[index], source_row_ref=disambiguated_ref)
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,14 @@ from datetime import date, datetime, timezone
 _DOMAIN_FLEX_TIMESTAMP_TZ_ABBREVIATION_TO_OFFSET = {
     "EST": "-0500",
     "EDT": "-0400",
+    "CST": "-0600",
+    "CDT": "-0500",
+    "MST": "-0700",
+    "MDT": "-0600",
+    "PST": "-0800",
+    "PDT": "-0700",
+    "UTC": "+0000",
+    "GMT": "+0000",
 }
 
 _DOMAIN_FLEX_SUPPORTED_DATE_FORMATS = (
@@ -122,11 +130,12 @@ def domain_flex_parse_timestamp_to_utc_iso(value: str) -> str | None:
 
     timestamp_with_numeric_offset = _domain_flex_replace_ibkr_timezone_abbreviation_with_offset(normalized_value)
     if timestamp_with_numeric_offset is not None:
-        try:
-            parsed_value = datetime.strptime(timestamp_with_numeric_offset, "%d %B, %Y %I:%M %p %z")
-        except ValueError:
-            return None
-        return _domain_flex_normalize_timestamp_to_utc_iso(parsed_value)
+        for supported_format in ("%d %B, %Y %I:%M %p %z", "%Y-%m-%d;%H:%M:%S %z", "%Y-%m-%d;%H%M%S %z"):
+            try:
+                parsed_value = datetime.strptime(timestamp_with_numeric_offset, supported_format)
+            except ValueError:
+                continue
+            return _domain_flex_normalize_timestamp_to_utc_iso(parsed_value)
 
     return None
 
