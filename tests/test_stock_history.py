@@ -101,6 +101,15 @@ _DIRECT_BROKER_FX_PAYLOAD = _ROUNDING_PAYLOAD.replace(
     b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" '
     b'reportDate="20260821" rate="1.2" /></ConversionRates>',
 )
+_FALLBACK_BROKER_FX_PAYLOAD = _DIRECT_BROKER_FX_PAYLOAD.replace(
+    b'markPrice="11" multiplier="1" fxRateToBase="1.123456789"', b'markPrice="11" multiplier="1"',
+)
+_EQUIVALENT_DIRECT_BROKER_FX_PAYLOAD = _FALLBACK_BROKER_FX_PAYLOAD.replace(
+    b'markPrice="11" multiplier="1"', b'markPrice="11" multiplier="1" fxRateToBase="1.2"',
+)
+_DIFFERENT_DIRECT_BROKER_FX_PAYLOAD = _FALLBACK_BROKER_FX_PAYLOAD.replace(
+    b'markPrice="11" multiplier="1"', b'markPrice="11" multiplier="1" fxRateToBase="1.3"',
+)
 _DIRECT_TRADE_FX_PAYLOAD = _DIRECT_BROKER_FX_PAYLOAD.replace(
     _DIRECT_BROKER_FX_PAYLOAD.split(b'<OpenPositions>')[1].split(b'</OpenPositions>')[0], b'',
 ).replace(
@@ -1070,3 +1079,41 @@ def test_unused_broker_position_figures_do_not_invalidate_fifo_valuation(history
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert rebuilt['totals'] == before['totals']
+
+
+@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+    pytest.param(_FALLBACK_BROKER_FX_PAYLOAD, _EQUIVALENT_DIRECT_BROKER_FX_PAYLOAD, False,
+                 id='fallback-to-equal-direct'),
+    pytest.param(_EQUIVALENT_DIRECT_BROKER_FX_PAYLOAD, _FALLBACK_BROKER_FX_PAYLOAD, False,
+                 id='direct-to-equal-fallback'),
+    pytest.param(_FALLBACK_BROKER_FX_PAYLOAD, _DIFFERENT_DIRECT_BROKER_FX_PAYLOAD, True,
+                 id='fallback-to-different-direct'),
+    pytest.param(_DIFFERENT_DIRECT_BROKER_FX_PAYLOAD, _FALLBACK_BROKER_FX_PAYLOAD, True,
+                 id='direct-to-different-fallback'),
+], indirect=['history_database'])
+def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
+    history_database, monkeypatch, changed_payload, expected_stale,
+):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
+    assert before['provisional'] is False
+    adapter.payload_bytes = changed_payload
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after broker valuation FX source switch')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is expected_stale
+    assert report['provisional'] is expected_stale
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['stale'] is False
+    assert rebuilt['provisional'] is False
+    assert (rebuilt['totals'] != before['totals']) is expected_stale

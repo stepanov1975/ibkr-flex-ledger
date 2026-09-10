@@ -13,6 +13,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.fx_rates import select_conversion_rate
+from .interfaces import LedgerFxRateRecord
 from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
 
 
@@ -88,7 +89,10 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "a.valuation_pending_at_utc,a.created_at_utc"
             ), valuation_params).mappings()]
             fx_rates = SQLAlchemyLedgerSnapshotService(engine, connection=connection).db_ledger_fx_rate_list_for_account(
-                account_id, max(row['report_date_local'] for row in snapshots.values()).isoformat(),
+                account_id, max(
+                    [row['report_date_local'] for row in snapshots.values()]
+                    + [row['report_date_local'] for row in valuations if row['report_date_local'] is not None]
+                ).isoformat(),
             ) if snapshots else []
             lots = [dict(row) for row in connection.execute(text(
                 "SELECT l.instrument_id, l.open_event_trade_fill_id, l.opened_at_utc, l.closed_at_utc, "
@@ -149,7 +153,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             continue
         origin = _valuation_inputs(
             origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload'),
-            lot_quantities[identifier], snapshot['currency'],
+            lot_quantities[identifier], snapshot['currency'], snapshot['report_date_local'], fx_rates,
         )
         for valuation in valuations:
             valuation_date = valuation['report_date_local'] or snapshot['report_date_local']
@@ -157,7 +161,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 continue
             candidate = _valuation_inputs(
                 (valuation['positions'] or {}).get(member['conid'], {}).get('payload'),
-                lot_quantities[identifier], snapshot['currency'],
+                lot_quantities[identifier], snapshot['currency'], valuation_date, fx_rates,
             )
             if (candidate != origin and (candidate is not None or snapshot['position_qty'] != 0)
                     and (valuation_date > snapshot['report_date_local']
@@ -238,7 +242,10 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     }
 
 
-def _valuation_inputs(payload: dict[str, Any] | None, fifo_quantity: Decimal, base_currency: str) -> dict[str, Any] | None:
+def _valuation_inputs(
+    payload: dict[str, Any] | None, fifo_quantity: Decimal, base_currency: str,
+    report_date: date, fx_rates: list[LedgerFxRateRecord],
+) -> dict[str, Any] | None:
     """Compare parsed valuation inputs, ignoring broker labels and numeric formatting."""
     if payload is None:
         return None
@@ -262,6 +269,11 @@ def _valuation_inputs(payload: dict[str, Any] | None, fifo_quantity: Decimal, ba
         result.pop('multiplier')
     if result['currency'] == base_currency.strip().upper():
         result.pop('fxRateToBase')
+    elif not isinstance(result['fxRateToBase'], Decimal) or result['fxRateToBase'] <= 0:
+        selected_rate = select_conversion_rate(result['currency'], base_currency, report_date, fx_rates)
+        result['fxRateToBase'] = (
+            Decimal(selected_rate.fx_rate) if selected_rate and selected_rate.fx_rate is not None else None
+        )
     if result['position'] == 0:
         for key in ('markPrice', 'multiplier', 'fifoPnlUnrealized'):
             result.pop(key, None)
