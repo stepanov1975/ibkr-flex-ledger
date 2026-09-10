@@ -233,7 +233,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         'instrument_id': root['instrument_id'], 'symbol': root['symbol'], 'description': root['description'],
         'report_date_local': max(dates) if dates else None,
         'stale': bool(stale_instruments),
-        'provisional': missing_snapshot or any(row['provisional'] for row in positions) or len(dates) > 1,
+        'provisional': missing_snapshot or any(row['provisional'] for row in positions),
         'totals': totals, 'positions': positions, 'lots': lots, 'activity': activity,
     }
 
@@ -252,11 +252,6 @@ def _valuation_inputs(payload: dict[str, Any] | None, fifo_quantity: Decimal, ba
         except InvalidOperation:
             # Failed imports can retain malformed raw values; keep them distinct.
             result[key] = value
-    report_date = payload.get('reportDate') or ''
-    try:
-        result['reportDate'] = date.fromisoformat(report_date) if report_date else None
-    except ValueError:
-        result['reportDate'] = report_date
     if result['position'] == fifo_quantity:
         # Reconciled quantities use FIFO basis and broker mark, not broker P&L.
         result.pop('costBasisMoney')

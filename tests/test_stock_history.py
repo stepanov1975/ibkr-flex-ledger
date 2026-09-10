@@ -221,6 +221,47 @@ def test_stock_history_includes_options_partial_closes_and_cashflows(history_dat
     assert client.get('/reports/stock-history/not-a-uuid').status_code == 422
 
 
+def test_current_stock_family_with_mixed_snapshot_dates_is_not_provisional(history_database):
+    client, _, ids, engine = history_database
+    # All inputs are unchanged; a later stock snapshot and earlier cumulative
+    # option snapshots are independently current.
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE pnl_snapshot_daily SET report_date_local='2026-08-22' WHERE instrument_id=:id"
+        ), {'id': ids['101']})
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert {row['report_date_local'] for row in report['positions']} == {'2026-08-21', '2026-08-22'}
+    assert all(row['provisional'] is False for row in report['positions'])
+    assert report['stale'] is False
+    assert report['provisional'] is False
+
+
+def test_unused_valuation_row_date_does_not_invalidate_snapshot(history_database, monkeypatch):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'markPrice="130" multiplier="1" reportDate="20260821"',
+        b'markPrice="130" multiplier="1" reportDate="20260820"',
+    )
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after unused valuation row date correction')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] == before['totals']
+    assert rebuilt['provisional'] is False
+
+
 def test_option_link_resolves_to_the_same_stock_family(history_database):
     client, _, ids, _ = history_database
     response = client.get(f"/reports/stock-history/{ids['102']}")
