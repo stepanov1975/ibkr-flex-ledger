@@ -19,6 +19,7 @@ from app.ledger import StockLedgerSnapshotService
 
 from .canonical_pipeline import job_canonical_map_and_persist
 from .interfaces import JobExecutionResult, JobOrchestratorPort
+from .replay_sources import job_replay_event_sources
 
 
 def job_select_replay_artifacts(
@@ -268,6 +269,11 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 )
             )
 
+            latest_event_sources = job_replay_event_sources(
+                config.account_id,
+                config.functional_currency,
+                self._raw_read_repository.db_raw_record_list_successful_events_for_account(config.account_id),
+            )
             for candidate in selected:
                 artifact_details = {
                     "raw_artifact_id": str(candidate.raw_artifact_id),
@@ -305,11 +311,26 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     )
                 )
                 canonical_started_at = datetime.now(timezone.utc)
+                selected_event_sources = job_replay_event_sources(
+                    config.account_id, config.functional_currency, raw_rows,
+                )
+                canonical_rows = [row for row in raw_rows if row.section_name not in {
+                    "Trades", "CashTransactions", "ConversionRates", "CorporateActions",
+                }]
+                source_origins = {}
+                for key, original in selected_event_sources.items():
+                    latest = latest_event_sources.get(key, original)
+                    canonical_rows.append(latest)
+                    source_origins[str(latest.raw_record_id)] = original
+                # Write each event's final version once so historical replay cannot
+                # trigger temporary mutations or invalidate a newer manual decision.
+                # Origins and broker valuation still belong to the selected artifact.
                 canonical_counts = job_canonical_map_and_persist(
                     account_id=config.account_id,
                     functional_currency=config.functional_currency,
-                    raw_records=raw_rows,
+                    raw_records=canonical_rows,
                     canonical_persistence_repository=self._canonical_persistence_repository,
+                    source_origins=source_origins,
                 )
                 canonical_duration_ms = max(
                     0,

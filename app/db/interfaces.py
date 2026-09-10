@@ -265,6 +265,7 @@ class CanonicalTradeFillUpsertRequest:
         fx_rate_to_base: Optional FX rate decimal string.
         currency: Trade currency code.
         functional_currency: Functional/base currency code.
+        description_source_raw_record_id: Optional current description source when replay preserves an older origin.
     """
 
     account_id: str
@@ -287,6 +288,7 @@ class CanonicalTradeFillUpsertRequest:
     fx_rate_to_base: str | None
     currency: str
     functional_currency: str
+    description_source_raw_record_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -578,6 +580,11 @@ class RawPersistenceRepositoryPort(Protocol):
 
 class RawRecordReadRepositoryPort(Protocol):
     """Port definition for raw-row reads used by canonical mapping workflows."""
+
+    def db_raw_record_list_successful_events_for_account(
+        self, account_id: str,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """List replayable event sources across periods and queries, oldest first."""
 
     def db_raw_record_list_changed_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
         """List raw rows that differ from their immediate prior ingestion version.

@@ -523,7 +523,7 @@ def test_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history
     assert stock_lot['unrealized_pnl'] is None
 
 
-def test_failed_older_artifact_replay_marks_latest_snapshot_stale(history_database, monkeypatch):
+def test_failed_older_artifact_replay_preserves_latest_values_and_freshness(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
@@ -537,16 +537,16 @@ def test_failed_older_artifact_replay_marks_latest_snapshot_stale(history_databa
     assert Decimal(before['totals'][0]['realized_pnl']) == Decimal('81.2')
 
     def fail_snapshot(**kwargs):
-        raise RuntimeError('replay failure after restoring older canonical trade')
+        raise RuntimeError('replay failure after canonical processing')
 
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert _history_replay(engine, harness).status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 100
+    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 200
                for row in report['activity'])
     assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('81.2')
-    assert report['stale'] is True
-    assert report['provisional'] is True
+    assert report['stale'] is False
+    assert report['provisional'] is False
 
 
 def test_successful_replay_clears_stale_after_new_activity(history_database, monkeypatch):

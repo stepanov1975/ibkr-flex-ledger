@@ -39,7 +39,7 @@ Goal: define exact UPSERT natural keys for deterministic replay and deduplicatio
 
 | Event Type | Natural Key Fields (ordered) | Uniqueness Constraint Name | Collision Handling Rule | Notes |
 |---|---|---|---|---|
-| `trade_fill` | `account_id`, `ib_exec_id` | `uq_event_trade_fill_account_exec` | If same key reappears, UPSERT mutable numeric fields (`commission`, `realized_pnl`, `net_cash`, `cost`) and keep earliest `ingestion_run_id` as origin. | Mirrors execution-level identity in references (`fill_execution_id`/`ibExecID`). |
+| `trade_fill` | `account_id`, `ib_exec_id` | `uq_event_trade_fill_account_exec` | If same key reappears, UPSERT mutable numeric fields (`price`, `commission`, `realized_pnl`, `net_cash`, `net_cash_in_base`, `fx_rate_to_base`, `cost`) and keep earliest `ingestion_run_id` as origin. | Mirrors execution-level identity in references (`fill_execution_id`/`ibExecID`). |
 | `cashflow` | `account_id`, `transaction_id`, `cash_action`, `currency` | `uq_event_cashflow_account_txn_action_ccy` | If duplicate key with same amount/date, ignore; if amount/date differs, mark as correction and keep latest `report_date`. | `transactionID` is present across IB Flex sections and is the primary anchor. |
 | `fx` | `account_id`, `transaction_id`, `currency`, `functional_currency` | `uq_event_fx_account_txn_ccy_pair` | If duplicate key reappears, UPSERT computed fields and preserve first-seen source row pointer. | Uses transaction identity first, then currency pair for deterministic uniqueness. |
 | `corp_action` | `account_id`, `action_id` | `uq_event_corp_action_account_action` | If `action_id` is null, fallback key is (`account_id`, `transaction_id`, `conid`, `report_date`, `reorg_code`); conflicts create mandatory manual case. | `actionID`/`transactionID` appear in ibflex corporate-action types. |
@@ -47,6 +47,7 @@ Goal: define exact UPSERT natural keys for deterministic replay and deduplicatio
 Acceptance checks:
 - Reprocessing same raw input produces identical canonical row identities.
 - Duplicate business events are not created across reruns.
+- Historical replay resolves each selected event to its newest successful source version across account periods and queries; failed versions do not override successful corrections.
 
 ---
 

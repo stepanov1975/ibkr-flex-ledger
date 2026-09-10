@@ -21,6 +21,7 @@ def job_canonical_map_and_persist(
     raw_records: list[RawRecordForCanonicalMapping],
     canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
     mapping_service: CanonicalMappingService | None = None,
+    source_origins: dict[str, RawRecordForCanonicalMapping] | None = None,
 ) -> dict[str, int]:
     """Map raw rows into canonical contracts and persist with deterministic UPSERT logic.
 
@@ -30,6 +31,7 @@ def job_canonical_map_and_persist(
         raw_records: Raw rows to process.
         canonical_persistence_repository: Canonical persistence repository.
         mapping_service: Optional mapping service override.
+        source_origins: Optional replay origins keyed by the current raw row identifier.
 
     Returns:
         dict[str, int]: Persisted canonical row counters by event type.
@@ -41,6 +43,7 @@ def job_canonical_map_and_persist(
     """
 
     service = mapping_service or CanonicalMappingService()
+    origins = source_origins or {}
     mapping_input_rows = [
         RawRecordForMapping(
             raw_record_id=row.raw_record_id,
@@ -84,6 +87,14 @@ def job_canonical_map_and_persist(
             trade_request,
             instrument_id=str(instrument_record.instrument_id),
         )
+        origin = origins.get(trade_request.source_raw_record_id)
+        if origin is not None:
+            resolved_trade_request = replace(
+                resolved_trade_request,
+                ingestion_run_id=str(origin.ingestion_run_id),
+                source_raw_record_id=str(origin.raw_record_id),
+                description_source_raw_record_id=trade_request.source_raw_record_id,
+            )
         resolved_trade_requests.append(resolved_trade_request)
 
     resolved_cashflow_requests = []
@@ -105,10 +116,21 @@ def job_canonical_map_and_persist(
             )
         resolved_corp_action_requests.append(corp_action_request)
 
+    resolved_fx_requests = []
+    for fx_request in mapped_batch.fx_requests:
+        origin = origins.get(fx_request.source_raw_record_id)
+        if origin is not None:
+            fx_request = replace(
+                fx_request,
+                ingestion_run_id=str(origin.ingestion_run_id),
+                source_raw_record_id=str(origin.raw_record_id),
+            )
+        resolved_fx_requests.append(fx_request)
+
     canonical_persistence_repository.db_canonical_bulk_upsert(
         trade_requests=resolved_trade_requests,
         cashflow_requests=resolved_cashflow_requests,
-        fx_requests=list(mapped_batch.fx_requests),
+        fx_requests=resolved_fx_requests,
         corp_action_requests=resolved_corp_action_requests,
     )
 

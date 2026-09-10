@@ -166,6 +166,30 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             },
         )
 
+    def db_raw_record_list_successful_events_for_account(
+        self, account_id: str,
+    ) -> list[RawRecordForCanonicalMapping]:
+        """Read authoritative replay sources without limiting canonical identity to a period."""
+
+        return self._db_canonical_read_raw_rows(
+            query_template=(
+                "SELECT raw.raw_record_id, raw.ingestion_run_id, raw.account_id, raw.period_key, "
+                "raw.flex_query_id, raw.report_date_local, raw.section_name, raw.source_row_ref, raw.source_payload "
+                "FROM raw_record raw JOIN raw_artifact artifact USING (raw_artifact_id) "
+                "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
+                "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+                "WHERE raw.account_id=:account_id "
+                "AND ((artifact.completed_ingestion_run_id IS NOT NULL AND completion.status='success') "
+                "OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success')) "
+                "AND ((raw.section_name='Trades' AND raw.source_row_ref LIKE 'Trades:Trade:%') "
+                "OR (raw.section_name='CashTransactions' AND raw.source_row_ref LIKE 'CashTransactions:CashTransaction:%') "
+                "OR (raw.section_name='ConversionRates' AND raw.source_row_ref LIKE 'ConversionRates:ConversionRate:%') "
+                "OR (raw.section_name='CorporateActions' AND raw.source_row_ref LIKE 'CorporateActions:CorporateAction:%')) "
+                "ORDER BY artifact.created_at_utc, artifact.raw_artifact_id, raw.created_at_utc, raw.raw_record_id"
+            ),
+            parameters={"account_id": self._db_canonical_validate_non_empty_text(account_id, "account_id")},
+        )
+
     def db_raw_artifact_replay_candidate_list(
         self,
         account_id: str,
@@ -525,12 +549,15 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
                             "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency, "
                             "(SELECT NULLIF(BTRIM(source_payload->>'description'), '') FROM raw_record "
-                            "WHERE raw_record_id=CAST(:source_raw_record_id AS uuid))"
+                            "WHERE raw_record_id=COALESCE(CAST(:description_source_raw_record_id AS uuid), "
+                            "CAST(:source_raw_record_id AS uuid)))"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
                             "price = EXCLUDED.price, "
                             "commission = EXCLUDED.commission, "
                             "realized_pnl = EXCLUDED.realized_pnl, "
                             "net_cash = EXCLUDED.net_cash, "
+                            "net_cash_in_base = EXCLUDED.net_cash_in_base, "
+                            "fx_rate_to_base = EXCLUDED.fx_rate_to_base, "
                             "cost = EXCLUDED.cost, "
                             "description = COALESCE(EXCLUDED.description, event_trade_fill.description)"
                         ),
@@ -630,6 +657,26 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     # Capture both sides before replacing provenance, including
                     # automatic actions with no manual case or saved factor.
                     for request in corp_action_requests_with_action_id:
+                        connection.execute(text(
+                            "SELECT event_corp_action_id FROM event_corp_action "
+                            "WHERE account_id=:account_id AND action_id=:action_id FOR UPDATE"
+                        ), request)
+                        # Resolve a saved approval against the incoming version before
+                        # UPSERT, avoiding a transient manual-state mutation on replay.
+                        if request["requires_manual"] and connection.scalar(text(
+                            "SELECT EXISTS (SELECT 1 FROM event_corp_action e "
+                            "JOIN corporate_action_manual_case c ON c.event_corp_action_id=e.event_corp_action_id "
+                            "JOIN raw_record original ON original.raw_record_id=c.resolution_source_raw_record_id "
+                            "JOIN raw_record incoming ON incoming.raw_record_id=CAST(:source_raw_record_id AS uuid) "
+                            "WHERE e.account_id=:account_id AND e.action_id=:action_id AND c.split_factor IS NOT NULL "
+                            "AND original.source_payload=incoming.source_payload "
+                            "AND c.resolution_report_date_local=CAST(:report_date_local AS date) "
+                            "AND c.instrument_id=COALESCE(CAST(:instrument_id AS uuid), e.instrument_id) "
+                            "AND c.action_type=:reorg_code AND original.source_payload->>'conid'=:conid "
+                            "AND :reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV'))"
+                        ), request):
+                            request["requires_manual"] = False
+                            request["provisional"] = False
                         invalidated = connection.execute(text(
                             "UPDATE pnl_snapshot_daily p SET calculation_provisional=true, provisional=true "
                             "FROM event_corp_action e, raw_record previous, raw_record incoming "
@@ -667,27 +714,26 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "description = COALESCE(EXCLUDED.description, event_corp_action.description), "
                             "requires_manual = EXCLUDED.requires_manual, "
                             "provisional = EXCLUDED.provisional, "
-                            "manual_case_id = COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id)"
+                            "manual_case_id = COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id) "
+                            # Equivalent source copies must not count as an accounting
+                            # mutation merely because their raw/run identifiers differ.
+                            "WHERE (event_corp_action.conid, event_corp_action.instrument_id, "
+                            "event_corp_action.transaction_id, event_corp_action.reorg_code, "
+                            "event_corp_action.report_date_local, event_corp_action.description, "
+                            "event_corp_action.requires_manual, event_corp_action.provisional, event_corp_action.manual_case_id, "
+                            "(SELECT source_payload FROM raw_record WHERE raw_record_id=event_corp_action.source_raw_record_id)) "
+                            "IS DISTINCT FROM (EXCLUDED.conid, COALESCE(EXCLUDED.instrument_id, event_corp_action.instrument_id), "
+                            "COALESCE(EXCLUDED.transaction_id, event_corp_action.transaction_id), EXCLUDED.reorg_code, "
+                            "EXCLUDED.report_date_local, COALESCE(EXCLUDED.description, event_corp_action.description), "
+                            "EXCLUDED.requires_manual, EXCLUDED.provisional, "
+                            "COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id), "
+                            "(SELECT source_payload FROM raw_record WHERE raw_record_id=EXCLUDED.source_raw_record_id))"
                         ),
                         corp_action_requests_with_action_id,
                     )
 
                 if normalized_corp_action_requests:
                     correction_scope = {"source_ids": [row["source_raw_record_id"] for row in normalized_corp_action_requests]}
-                    # A manual correction remains valid only for the broker payload
-                    # that was previewed. Replaying identical raw data retains it.
-                    connection.execute(text(
-                        "UPDATE event_corp_action e SET requires_manual=false, provisional=false "
-                        "FROM corporate_action_manual_case c, raw_record original, raw_record current "
-                        "WHERE c.event_corp_action_id=e.event_corp_action_id AND c.split_factor IS NOT NULL "
-                        "AND original.raw_record_id=c.resolution_source_raw_record_id "
-                        "AND current.raw_record_id=e.source_raw_record_id "
-                        "AND original.source_payload=current.source_payload "
-                        "AND c.resolution_report_date_local=e.report_date_local AND c.instrument_id=e.instrument_id "
-                        "AND c.action_type=e.reorg_code AND original.source_payload->>'conid'=e.conid "
-                        "AND e.action_id IS NOT NULL AND e.reorg_code IN ('FORWARDSPLIT','REVERSESPLIT','STOCKDIV') "
-                        "AND e.source_raw_record_id=ANY(CAST(:source_ids AS uuid[]))"
-                    ), correction_scope)
                     connection.execute(text(
                         "UPDATE corporate_action_manual_case c SET status='open', resolved_at_utc=NULL, updated_at_utc=now() "
                         "FROM event_corp_action e, raw_record original, raw_record current "
@@ -857,6 +903,9 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 "request.source_raw_record_id",
             ),
             "ib_exec_id": self._db_canonical_validate_non_empty_text(request.ib_exec_id, "request.ib_exec_id"),
+            "description_source_raw_record_id": self._db_canonical_validate_optional_uuid_text(
+                request.description_source_raw_record_id,
+            ),
             "transaction_id": self._db_canonical_validate_optional_text(request.transaction_id),
             "trade_timestamp_utc": self._db_canonical_validate_non_empty_text(
                 request.trade_timestamp_utc,

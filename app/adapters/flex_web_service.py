@@ -45,7 +45,7 @@ class _AdapterRetryStrategy:
 
     Attributes:
         initial_wait_seconds: Fixed delay before the first poll attempt.
-        retry_attempts: Number of polling attempts.
+        retry_attempts: Number of attempts per request or polling phase.
         backoff_base_seconds: Base delay for exponential backoff.
         max_backoff_seconds: Exponential delay cap before jitter.
         jitter_min_multiplier: Minimum jitter multiplier.
@@ -132,7 +132,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             base_url: Base endpoint URL for Flex Web Service.
             api_version: Flex API version value.
             initial_wait_seconds: Delay before first poll attempt.
-            retry_attempts: Number of download polling attempts.
+            retry_attempts: Number of attempts per request or download polling phase.
             retry_backoff_base_seconds: Base retry delay used by exponential backoff.
             retry_max_backoff_seconds: Maximum retry delay cap before applying jitter.
             jitter_min_multiplier: Minimum jitter multiplier for computed retry delay.
@@ -271,18 +271,29 @@ class FlexWebServiceAdapter(FlexAdapterPort):
         request_url = f"{self._base_url}/SendRequest"
         request_parameters = {"t": self._token, "q": normalized_query_id, "v": self._api_version}
         self._adapter_record_stage_event(stage_timeline=stage_timeline, stage="request", status="started")
-        request_transport_started_ns = perf_counter_ns()
-        request_payload = self._adapter_http_get(url=request_url, query_parameters=request_parameters)
-        request_transport_duration_ms = _duration_ms(request_transport_started_ns)
-        response_root = self._adapter_parse_xml(payload=request_payload, context_label="send_request")
+        request_transport_duration_ms = 0
+        for retry_index in range(self._retry_strategy.retry_attempts):
+            request_transport_started_ns = perf_counter_ns()
+            request_payload = self._adapter_http_get(url=request_url, query_parameters=request_parameters)
+            request_transport_duration_ms += _duration_ms(request_transport_started_ns)
+            response_root = self._adapter_parse_xml(payload=request_payload, context_label="send_request")
 
-        status_value = (response_root.findtext("Status") or "").strip()
-        if status_value.lower() != "success":
+            status_value = (response_root.findtext("Status") or "").strip()
+            if status_value.lower() == "success":
+                break
+
             error_code, error_message = self._adapter_extract_response_error(
                 response_root,
                 fallback_message="request rejected by upstream",
             )
-            self._adapter_raise_request_error(error_code=error_code, error_message=error_message)
+            if error_code not in FLEX_RETRYABLE_POLL_CODES or retry_index + 1 == self._retry_strategy.retry_attempts:
+                self._adapter_raise_request_error(error_code=error_code, error_message=error_message)
+
+            wait_seconds = max(
+                self.adapter_calculate_retry_wait_seconds(retry_index=retry_index + 1),
+                self._adapter_retry_delay_seconds_for_error(error_code),
+            )
+            time.sleep(wait_seconds)
 
         reference_code = (response_root.findtext("ReferenceCode") or "").strip()
         statement_url = (response_root.findtext("Url") or "").strip()
