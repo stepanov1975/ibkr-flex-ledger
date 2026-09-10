@@ -12,9 +12,14 @@ depends_on = None
 def _mutation_function(trade_metadata: bool) -> None:
     trade_comparison = """
             IF TG_TABLE_NAME = 'event_trade_fill' THEN
-                IF (to_jsonb(NEW) - ARRAY['cost','realized_pnl','description','updated_at_utc'])
+                IF (to_jsonb(NEW) - ARRAY['cost','realized_pnl','description','updated_at_utc','net_cash'])
                     IS NOT DISTINCT FROM
-                    (to_jsonb(OLD) - ARRAY['cost','realized_pnl','description','updated_at_utc']) THEN
+                    (to_jsonb(OLD) - ARRAY['cost','realized_pnl','description','updated_at_utc','net_cash'])
+                    AND (UPPER(BTRIM(NEW.currency)) = UPPER(BTRIM(NEW.functional_currency))
+                        OR NEW.fx_rate_to_base > 0
+                        OR (NULLIF(ABS(NEW.net_cash_in_base), 0) / NULLIF(ABS(NEW.net_cash), 0))
+                            IS NOT DISTINCT FROM
+                            (NULLIF(ABS(OLD.net_cash_in_base), 0) / NULLIF(ABS(OLD.net_cash), 0))) THEN
                     RETURN NEW;
                 END IF;
             END IF;

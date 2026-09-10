@@ -408,6 +408,17 @@ class StockLedgerSnapshotService:
                     valuation_source = "broker_position_absent"
                 else:
                     valuation_currency = valuation_record.currency.strip().upper()
+                    broker_cost = self._decimal_or_none(valuation_record.cost_basis_money)
+                    broker_unrealized = self._decimal_or_none(valuation_record.broker_unrealized_pnl)
+                    mark_price = self._decimal_or_none(valuation_record.mark_price)
+                    multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
+                    uses_broker_cost = not quantities_match and broker_cost is not None
+                    uses_mark = (mark_price is not None and multiplier is not None
+                                 and (fifo_cost_basis is not None if quantities_match else broker_cost is not None))
+                    uses_valuation_fx = uses_broker_cost or (
+                        broker_position_quantity != 0
+                        and (uses_mark if quantities_match else broker_unrealized is not None or uses_mark)
+                    )
                     valuation_fx_rate: Decimal | None
                     valuation_fx_source: str
                     if valuation_currency == normalized_functional_currency:
@@ -423,14 +434,10 @@ class StockLedgerSnapshotService:
                                 functional_currency=normalized_functional_currency,
                                 report_date_local=parsed_report_date,
                                 fx_rate_rows=fx_rate_rows,
-                                fx_dependencies=fx_dependencies if any(value is not None for value in (
-                                    valuation_record.cost_basis_money, valuation_record.broker_unrealized_pnl,
-                                    valuation_record.mark_price,
-                                )) else None,
+                                fx_dependencies=fx_dependencies if uses_valuation_fx else None,
                             )
                     fx_sources.add(valuation_fx_source)
 
-                    broker_cost = self._decimal_or_none(valuation_record.cost_basis_money)
                     converted_broker_cost = (
                         broker_cost * valuation_fx_rate
                         if broker_cost is not None and valuation_fx_rate is not None
@@ -440,13 +447,10 @@ class StockLedgerSnapshotService:
                         str(converted_broker_cost) if converted_broker_cost is not None else None
                     )
 
-                    broker_unrealized = self._decimal_or_none(valuation_record.broker_unrealized_pnl)
                     if broker_position_quantity == Decimal("0"):
                         unrealized_pnl = Decimal("0")
                         valuation_source = "no_open_position"
                     elif quantities_match:
-                        mark_price = self._decimal_or_none(valuation_record.mark_price)
-                        multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
                         cost_basis = self._decimal_or_none(fifo_cost_basis)
                         if (
                             mark_price is not None
@@ -464,8 +468,6 @@ class StockLedgerSnapshotService:
                         unrealized_pnl = broker_unrealized * valuation_fx_rate
                         valuation_source = "openpositions_unrealized_pnl"
                     else:
-                        mark_price = self._decimal_or_none(valuation_record.mark_price)
-                        multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
                         cost_basis = self._decimal_or_none(snapshot_cost_basis)
                         if (
                             mark_price is not None
@@ -480,15 +482,7 @@ class StockLedgerSnapshotService:
                             missing_valuation = True
                             valuation_source = "EOD_MARK_MISSING_ALL_SOURCES"
 
-                    broker_money_present = any(
-                        value is not None
-                        for value in (
-                            valuation_record.cost_basis_money,
-                            valuation_record.broker_unrealized_pnl,
-                            valuation_record.mark_price,
-                        )
-                    )
-                    if valuation_fx_rate is None and broker_money_present:
+                    if valuation_fx_rate is None and uses_valuation_fx:
                         missing_fx = True
                         if snapshot_cost_basis != fifo_cost_basis or not quantities_match:
                             snapshot_cost_basis = None

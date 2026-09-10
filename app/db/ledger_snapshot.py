@@ -161,13 +161,17 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     text(
                         "SELECT instrument_id FROM instrument "
                         "WHERE account_id = :account_id "
-                        "AND (conid = ANY(:conids) OR currency = ANY(:currencies) OR EXISTS ("
+                        "AND (conid = ANY(:conids) OR UPPER(BTRIM(currency)) = ANY(:currencies) OR EXISTS ("
                         "SELECT 1 FROM event_trade_fill trade "
                         "JOIN raw_record raw ON raw.raw_record_id = trade.source_raw_record_id "
                         "WHERE trade.account_id = instrument.account_id "
                         "AND trade.instrument_id = instrument.instrument_id "
-                        "AND COALESCE(trade.commission, 0) <> 0 "
-                        "AND UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')) = ANY(:currencies))) "
+                        "AND (UPPER(BTRIM(trade.currency)) = ANY(:currencies) OR (COALESCE(trade.commission, 0) <> 0 "
+                        "AND UPPER(BTRIM(raw.source_payload->>'ibCommissionCurrency')) = ANY(:currencies)))) "
+                        "OR EXISTS (SELECT 1 FROM event_cashflow cashflow "
+                        "WHERE cashflow.account_id = instrument.account_id "
+                        "AND cashflow.instrument_id = instrument.instrument_id "
+                        "AND UPPER(BTRIM(cashflow.currency)) = ANY(:currencies))) "
                         "ORDER BY instrument_id"
                     ),
                     {

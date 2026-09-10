@@ -76,7 +76,11 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "FILTER (WHERE r.source_payload->>'conid'=ANY(:conids) "
                 "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%') AS positions "
                 "FROM raw_record r LEFT JOIN raw_artifact a ON a.raw_artifact_id=r.raw_artifact_id "
+                "JOIN ingestion_run run ON run.ingestion_run_id=r.ingestion_run_id "
+                "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=a.completed_ingestion_run_id "
                 "WHERE r.account_id=:account_id AND r.section_name='OpenPositions' "
+                "AND (a.valuation_pending_at_utc IS NOT NULL OR completion.status='success' "
+                "OR (a.completed_ingestion_run_id IS NULL AND run.status='success')) "
                 "AND (CAST(:first_date AS date) IS NULL OR COALESCE(a.report_date_local,r.report_date_local)>=:first_date "
                 "OR COALESCE(a.report_date_local,r.report_date_local) IS NULL "
                 "OR r.ingestion_run_id=ANY(:snapshot_runs)) "
@@ -130,6 +134,9 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                          or recorded_at > snapshot['calculated_at_utc']):
             stale_instruments.add(event['instrument_id'])
     origins: dict[tuple[UUID, str], dict[str, Any]] = {}
+    lot_quantities: dict[UUID, Decimal] = defaultdict(Decimal)
+    for lot in lots:
+        lot_quantities[lot['instrument_id']] += lot['remaining_quantity'] * (1 if lot['side'] == 'BUY' else -1)
     for valuation in valuations:
         for conid, position in (valuation['positions'] or {}).items():
             key = valuation['ingestion_run_id'], conid
@@ -140,12 +147,18 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
         snapshot = snapshots.get(identifier, {})
         if not snapshot or snapshot['calculated_at_utc'] is None:
             continue
-        origin = _valuation_inputs(origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload'))
+        origin = _valuation_inputs(
+            origins.get((snapshot['ingestion_run_id'], member['conid']), {}).get('payload'),
+            lot_quantities[identifier], snapshot['currency'],
+        )
         for valuation in valuations:
             valuation_date = valuation['report_date_local'] or snapshot['report_date_local']
             if valuation_date < snapshot['report_date_local']:
                 continue
-            candidate = _valuation_inputs((valuation['positions'] or {}).get(member['conid'], {}).get('payload'))
+            candidate = _valuation_inputs(
+                (valuation['positions'] or {}).get(member['conid'], {}).get('payload'),
+                lot_quantities[identifier], snapshot['currency'],
+            )
             if (candidate != origin and (candidate is not None or snapshot['position_qty'] != 0)
                     and (valuation_date > snapshot['report_date_local']
                          or valuation['recorded_at_utc'] > snapshot['calculated_at_utc'])):
@@ -172,12 +185,9 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
             'provisional': snapshot.get('provisional', True),
         })
     members = {row['instrument_id']: row for row in family}
-    lot_quantities: dict[UUID, Decimal] = defaultdict(Decimal)
     lot_basis: dict[UUID, Decimal] = defaultdict(Decimal)
     open_lot_counts: dict[UUID, int] = defaultdict(int)
     for lot in lots:
-        direction = Decimal('1') if lot['side'] == 'BUY' else Decimal('-1')
-        lot_quantities[lot['instrument_id']] += direction * lot['remaining_quantity']
         lot_basis[lot['instrument_id']] += lot['cost_basis_remaining']
         open_lot_counts[lot['instrument_id']] += bool(lot['remaining_quantity'])
     for lot in lots:
@@ -228,7 +238,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     }
 
 
-def _valuation_inputs(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+def _valuation_inputs(payload: dict[str, Any] | None, fifo_quantity: Decimal, base_currency: str) -> dict[str, Any] | None:
     """Compare parsed valuation inputs, ignoring broker labels and numeric formatting."""
     if payload is None:
         return None
@@ -247,6 +257,22 @@ def _valuation_inputs(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         result['reportDate'] = date.fromisoformat(report_date) if report_date else None
     except ValueError:
         result['reportDate'] = report_date
+    if result['position'] == fifo_quantity:
+        # Reconciled quantities use FIFO basis and broker mark, not broker P&L.
+        result.pop('costBasisMoney')
+        result.pop('fifoPnlUnrealized')
+    elif result['fifoPnlUnrealized'] is not None:
+        # Unreconciled positions prefer the broker's P&L over its mark.
+        result.pop('markPrice')
+        result.pop('multiplier')
+    if result['currency'] == base_currency.strip().upper():
+        result.pop('fxRateToBase')
+    if result['position'] == 0:
+        for key in ('markPrice', 'multiplier', 'fifoPnlUnrealized'):
+            result.pop(key, None)
+        if result.get('costBasisMoney') is None:
+            result.pop('currency')
+            result.pop('fxRateToBase', None)
     return result
 
 

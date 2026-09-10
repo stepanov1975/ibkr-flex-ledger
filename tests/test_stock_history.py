@@ -114,6 +114,40 @@ _BASE_CASHFLOW_FX_PAYLOAD = _PAYLOAD.replace(
     b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" '
     b'reportDate="20260821" rate="1.2" /></ConversionRates>',
 )
+_BASE_NET_CASH_PAYLOAD = _NO_CASH_PAYLOAD.replace(
+    b'tradePrice="100"', b'tradePrice="100" netCash="-1002"',
+)
+_DIRECT_NET_CASH_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
+    b'tradePrice="10.01"', b'tradePrice="10.01" netCash="-10.01" netCashInBase="-11.25"', 1,
+)
+_RATIO_NET_CASH_PAYLOAD = _DIRECT_NET_CASH_PAYLOAD.replace(b' fxRateToBase="1.123456789"', b'')
+_CLOSED_BROKER_FX_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
+    b'<OpenPositions></OpenPositions>',
+    b'<OpenPositions><OpenPosition conid="101" symbol="ROUND" assetCategory="STK" currency="EUR" '
+    b'position="0" markPrice="11" multiplier="1" costBasisMoney="0" fifoPnlUnrealized="0" '
+    b'reportDate="20260821" /></OpenPositions>',
+)
+
+
+@pytest.mark.parametrize('history_database', [
+    _BASE_CASHFLOW_FX_PAYLOAD.replace(b'amountInBase="5.5" ', b''),
+], indirect=True, ids=['foreign-cashflow'])
+def test_fx_only_import_rebuilds_foreign_cashflow_for_base_currency_instrument(history_database):
+    client, _, ids, engine = history_database
+    # Later security metadata can differ from a historical cashflow's currency.
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE instrument SET currency='USD' WHERE conid='101'"))
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _BASE_CASHFLOW_FX_PAYLOAD.replace(b'amountInBase="5.5" ', b'').replace(
+        b'rate="1.2"', b'rate="1.3"',
+    )
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal(before['totals'][0]['realized_pnl']) + Decimal('0.5')
+    assert report['stale'] is False
+    assert report['provisional'] is False
 
 
 @pytest.fixture
@@ -882,3 +916,116 @@ def test_failed_snapshot_after_trade_description_correction_preserves_freshness(
     assert report['stale'] is False
     assert report['provisional'] is False
     assert any(row['description'] == 'Corrected execution description' for row in report['activity'])
+
+
+@pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
+def test_valuation_from_failed_canonical_mapping_does_not_mark_pnl_stale(history_database):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['provisional'] is False
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"').replace(
+        b'tradePrice="100"', b'tradePrice="not-a-number"',
+    )
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    with engine.connect() as connection:
+        assert connection.scalar(text(
+            "SELECT valuation_pending_at_utc FROM raw_artifact ORDER BY created_at_utc DESC LIMIT 1"
+        )) is None
+        assert connection.scalar(text("SELECT price FROM event_trade_fill WHERE ib_exec_id='S1'")) == Decimal('100')
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is False
+    assert report['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+    pytest.param(
+        _BASE_NET_CASH_PAYLOAD, _BASE_NET_CASH_PAYLOAD.replace(b'netCash="-1002"', b'netCash="-1003"'), False,
+        id='base-currency',
+    ),
+    pytest.param(
+        _DIRECT_NET_CASH_PAYLOAD, _DIRECT_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'), False,
+        id='direct-fx-override',
+    ),
+    pytest.param(
+        _RATIO_NET_CASH_PAYLOAD, _RATIO_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'), True,
+        id='consumed-net-cash-ratio',
+    ),
+], indirect=['history_database'])
+def test_net_cash_correction_only_invalidates_consumed_fx_ratio(history_database, monkeypatch, changed_payload, expected_stale):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['provisional'] is False
+    adapter.payload_bytes = changed_payload
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after net cash correction')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is expected_stale
+    assert report['provisional'] is expected_stale
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['stale'] is False
+    assert rebuilt['provisional'] is False
+    assert (rebuilt['totals'] != before['totals']) is expected_stale
+
+
+@pytest.mark.parametrize('history_database', [_CLOSED_BROKER_FX_PAYLOAD], indirect=True, ids=['closed-broker-position'])
+@pytest.mark.parametrize('new_rate', ['1.3', ''], ids=['changed-rate', 'missing-rate'])
+def test_closed_broker_position_does_not_depend_on_unused_valuation_fx(history_database, monkeypatch, new_rate):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['provisional'] is False
+    assert Decimal(before['positions'][0]['position_qty']) == 0
+    adapter.payload_bytes = _CLOSED_BROKER_FX_PAYLOAD.replace(b'rate="1.2"', f'rate="{new_rate}"'.encode())
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after unused broker FX update')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] == before['totals']
+    assert rebuilt['stale'] is False
+    assert rebuilt['provisional'] is False
+
+
+@pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['reconciled-fifo'])
+@pytest.mark.parametrize('attribute', ['costBasisMoney', 'fifoPnlUnrealized'])
+def test_unused_broker_position_figures_do_not_invalidate_fifo_valuation(history_database, monkeypatch, attribute):
+    client, _, ids, engine = history_database
+    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['provisional'] is False
+    adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(b'markPrice="130"', f'markPrice="130" {attribute}="999"'.encode())
+    build = service.ledger_snapshot_build_and_persist
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after unused broker valuation figure update')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    report = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert report['totals'] == before['totals']
+    assert report['stale'] is False
+    assert report['provisional'] is False
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] == before['totals']
