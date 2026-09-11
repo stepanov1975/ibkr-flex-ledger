@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import random
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from time import perf_counter_ns
 from typing import Callable, Final
 import xml.etree.ElementTree as element_tree
@@ -110,6 +113,7 @@ class FlexWebServiceAdapter(FlexAdapterPort):
 
     _USER_AGENT: Final[str] = "ibkr-flex-ledger/1.0 (Python/httpx)"
     _TRANSPORT_TIMEOUT_RETRY_ATTEMPTS: Final[int] = 3
+    _TRANSIENT_HTTP_STATUS_CODES: Final[frozenset[int]] = frozenset({429, 502, 503, 504})
 
     def __init__(
         self,
@@ -444,26 +448,88 @@ class FlexWebServiceAdapter(FlexAdapterPort):
             FlexAdapterTimeoutError: Raised for timeout conditions.
         """
 
-        for timeout_retry_index in range(self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS):
+        for transport_retry_index in range(self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS):
             try:
                 response = self._http_client.get(url, params=query_parameters)
                 response.raise_for_status()
                 return bytes(response.content)
             except httpx.TimeoutException:
-                if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
-                    continue
-                raise FlexAdapterTimeoutError("Flex transport request timed out") from None
+                if transport_retry_index + 1 == self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
+                    raise FlexAdapterTimeoutError("Flex transport request timed out") from None
+                self._adapter_wait_before_transport_retry(transport_retry_index=transport_retry_index)
             except httpx.HTTPStatusError as error:
                 # HTTPX exception text includes the request URL and its Flex token.
-                raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {error.response.status_code}") from None
+                status_code = error.response.status_code
+                if (
+                    status_code not in self._TRANSIENT_HTTP_STATUS_CODES
+                    or transport_retry_index + 1 == self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS
+                ):
+                    raise FlexAdapterConnectionError(f"Flex upstream returned HTTP {status_code}") from None
+                retry_after_seconds = self._adapter_parse_retry_after_seconds(error.response)
+                if (
+                    retry_after_seconds is not None
+                    and retry_after_seconds > self._retry_strategy.max_backoff_seconds
+                ):
+                    raise FlexAdapterConnectionError(
+                        f"Flex upstream Retry-After {retry_after_seconds} seconds exceeds configured maximum "
+                        f"{float(self._retry_strategy.max_backoff_seconds)} seconds"
+                    ) from None
+                self._adapter_wait_before_transport_retry(
+                    transport_retry_index=transport_retry_index,
+                    retry_after_seconds=retry_after_seconds,
+                )
             except httpx.RequestError as error:
-                if isinstance(error.__cause__, (TimeoutError, socket.timeout)):
-                    if timeout_retry_index + 1 < self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
-                        continue
-                    raise FlexAdapterTimeoutError("Flex transport request timed out") from None
-                raise FlexAdapterConnectionError("Flex transport request failed") from None
+                timed_out = isinstance(error.__cause__, (TimeoutError, socket.timeout))
+                transient_error = timed_out or isinstance(
+                    error,
+                    (httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError),
+                )
+                if not transient_error:
+                    raise FlexAdapterConnectionError("Flex transport request failed") from None
+                if transport_retry_index + 1 == self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
+                    if timed_out:
+                        raise FlexAdapterTimeoutError("Flex transport request timed out") from None
+                    raise FlexAdapterConnectionError("Flex transport request failed") from None
+                self._adapter_wait_before_transport_retry(transport_retry_index=transport_retry_index)
 
-        raise FlexAdapterTimeoutError("Flex transport request timed out")
+        raise FlexAdapterConnectionError("Flex transport request failed")
+
+    def _adapter_wait_before_transport_retry(
+        self,
+        transport_retry_index: int,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        """Sleep for configured backoff before another transport attempt."""
+
+        wait_seconds = self.adapter_calculate_retry_wait_seconds(
+            retry_index=transport_retry_index + 1,
+        )
+        if retry_after_seconds is not None:
+            wait_seconds = max(wait_seconds, retry_after_seconds)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _adapter_parse_retry_after_seconds(self, response: httpx.Response) -> float | None:
+        """Parse Retry-After delay seconds or an HTTP date from a response."""
+
+        header_value = response.headers.get("Retry-After", "").strip()
+        if not header_value:
+            return None
+
+        try:
+            delay_seconds = float(header_value)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(header_value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay_seconds = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+        if not math.isfinite(delay_seconds) or delay_seconds < 0:
+            return None
+        return delay_seconds
 
     def _adapter_poll_payload_is_statement_xml(self, poll_root: element_tree.Element) -> bool:
         """Return whether poll response root contains a Flex statement payload.
