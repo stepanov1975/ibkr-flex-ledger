@@ -304,6 +304,9 @@ class _AdapterStub:
 
 
 class _RawPersistenceStub:
+    def db_raw_successful_broker_account_ids(self, account_id: str) -> frozenset[str]:
+        return frozenset()
+
     """Raw persistence stub returning deterministic artifact and row counters."""
 
     def __init__(
@@ -530,7 +533,7 @@ def test_jobs_ingestion_orchestrator_marks_success_with_stage_timeline() -> None
     complete_payload = (
             b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement reportDate=\"20260220\">"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     repository_stub = _RepositoryStub()
@@ -562,7 +565,7 @@ def test_jobs_ingestion_orchestrator_runs_snapshot_stage_on_success() -> None:
     complete_payload = (
         b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement reportDate=\"20260220\">"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     repository_stub = _RepositoryStub()
@@ -607,7 +610,7 @@ def test_jobs_ingestion_orchestrator_returns_failed_result_on_adapter_timeout() 
     complete_payload = (
         b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
 
@@ -689,7 +692,7 @@ def test_jobs_ingestion_orchestrator_maps_typed_token_error_to_deterministic_cod
     complete_payload = (
         b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
 
@@ -751,7 +754,7 @@ def test_jobs_ingestion_orchestrator_persist_stage_contains_raw_persistence_deta
     complete_payload = (
         b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
         b"<Trades transactionID=\"T1\" /><OpenPositions /><CashTransactions />"
-        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     repository_stub = _RepositoryStub()
@@ -796,7 +799,7 @@ def test_jobs_ingestion_orchestrator_canonical_stage_contains_duration_details()
         b"<Trades transactionID=\"T1\" ibExecID=\"EXEC-1\" conid=\"265598\" buySell=\"BUY\" quantity=\"1\" "
         b"tradePrice=\"100\" currency=\"USD\" reportDate=\"2026-02-14\" dateTime=\"2026-02-14T10:00:00+00:00\" />"
         b"<OpenPositions /><CashTransactions /><CorporateActions /><ConversionRates />"
-        b"<SecuritiesInfo /><AccountInformation />"
+        b"<SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     repository_stub = _RepositoryStub()
@@ -852,6 +855,9 @@ def _raw_row(
 
 class _CanonicalRepositoryStub:
     """Canonical repository stub implementing read and upsert behaviors."""
+
+    def db_canonical_validate_trade_fills(self, requests) -> None:
+        pass
 
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         pass
@@ -1087,7 +1093,7 @@ def _build_orchestrator(
         b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
         b'<Trades><Trade ibExecID="DUP" /></Trades>'
         b"<OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     return IngestionJobOrchestrator(
@@ -1374,7 +1380,7 @@ def test_distinct_artifact_preserves_full_snapshot_when_canonical_repository_is_
     payload = (
         b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     orchestrator = IngestionJobOrchestrator(
@@ -1403,7 +1409,7 @@ def test_exact_duplicate_skips_snapshot_when_canonical_repository_is_absent() ->
     payload = (
         b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     orchestrator = IngestionJobOrchestrator(
@@ -1445,7 +1451,7 @@ def test_absent_snapshot_service_retains_skip_diagnostic() -> None:
     payload = (
         b'<FlexQueryResponse><FlexStatements count="1"><FlexStatement reportDate="20260821">'
         b"<Trades /><OpenPositions /><CashTransactions /><CorporateActions />"
-        b"<ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     orchestrator = IngestionJobOrchestrator(
@@ -1476,7 +1482,7 @@ def test_jobs_ingestion_orchestrator_canonical_stage_skips_when_run_has_no_new_r
     complete_payload = (
         b"<FlexQueryResponse><FlexStatements count=\"1\"><FlexStatement>"
         b"<Trades transactionID=\"T1\" /><OpenPositions /><CashTransactions />"
-        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />"
+        b"<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId=\"U_TEST\" currency=\"USD\" />"
         b"</FlexStatement></FlexStatements></FlexQueryResponse>"
     )
     repository_stub = _RepositoryStub()

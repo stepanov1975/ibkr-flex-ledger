@@ -533,6 +533,9 @@ class IngestionRunRepositoryPort(Protocol):
 class RawPersistenceRepositoryPort(Protocol):
     """Port definition for immutable raw artifact and raw row persistence."""
 
+    def db_raw_successful_broker_account_ids(self, account_id: str) -> frozenset[str]:
+        """Return broker account identities from successfully applied reports."""
+
     def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
         """Persist or reuse immutable raw artifact by dedupe identity key.
 
@@ -669,6 +672,9 @@ class CanonicalPersistenceRepositoryPort(Protocol):
 
     def db_canonical_transaction(self) -> ContextManager[None]:
         """Publish canonical events, projections and completion atomically."""
+
+    def db_canonical_validate_trade_fills(self, requests: list[CanonicalTradeFillUpsertRequest]) -> None:
+        """Reject identity or protected execution economics conflicting with stored history."""
 
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
         """Return whether retained run history permits duplicate/incremental skips."""

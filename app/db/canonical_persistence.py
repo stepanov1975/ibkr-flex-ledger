@@ -10,6 +10,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope, db_transaction_scope
+from .trade_consistency import db_validate_trade_consistency
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -118,6 +119,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_transaction(self) -> ContextManager[None]:
         """Commit canonical events and their projections as one publication."""
         return db_transaction_scope(self._engine)
+
+    def db_canonical_validate_trade_fills(self, requests: list[CanonicalTradeFillUpsertRequest]) -> None:
+        """Reject inconsistent source executions before canonical publication."""
+        with db_connection_scope(self._engine) as connection:
+            db_validate_trade_consistency(connection, requests)
 
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
         """Reject skip assumptions after legacy failed runs that may have partial writes.

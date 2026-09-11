@@ -359,7 +359,8 @@ def test_split_preserves_completed_pre_action_fifo_sale(database, split_case):
     assert Decimal(response.json()["lots_after"][0]["cost_basis_open"]) == 300
 
 
-def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database, split_case, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_correction_rejects_canonical_activity_beyond_snapshot_horizon(database, split_case, monkeypatch):
     harness, case, client = split_case
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()
@@ -555,7 +556,7 @@ def test_upgrade_reclassifies_only_incompatible_legacy_splits(database, split_ca
         assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is manual
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == ("open" if manual else None)
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is manual
-    harness[1].payload_bytes = _SEEDED_PAYLOAD.replace(
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
         b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
     )
     assert harness[0].job_execute("ingestion_run").status == "success"
@@ -711,7 +712,8 @@ def test_older_period_replay_preserves_later_lot_history(database, split_case, m
 
 
 @pytest.mark.parametrize("split_case", ["flat"], indirect=True)
-def test_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(database, split_case, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(database, split_case, monkeypatch):
     harness, case, client = split_case
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()

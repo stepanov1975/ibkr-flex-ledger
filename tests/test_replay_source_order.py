@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from sqlalchemy import text
 
 from app.jobs import ingestion_orchestrator
@@ -17,6 +19,7 @@ def _fail_before_raw_rows(*args, **kwargs):
     raise RuntimeError("artifact persisted before raw-row failure")
 
 
+@pytest.mark.usefixtures("legacy_partial_ingestion")
 def test_replay_sources_follow_recovery_application_order(database, monkeypatch):
     harness = _harness(database)
     orchestrator, adapter, raw, canonical, *_ = harness
@@ -51,6 +54,7 @@ def test_replay_sources_follow_recovery_application_order(database, monkeypatch)
         )
 
 
+@pytest.mark.usefixtures("legacy_partial_ingestion")
 def test_reapplying_successful_artifact_retains_first_application_origin(database, monkeypatch):
     harness = _harness(database)
     orchestrator, adapter, _, canonical, *_ = harness

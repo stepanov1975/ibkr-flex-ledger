@@ -4,6 +4,32 @@ The application exposes ingestion reliability measurements at `GET /operations/s
 
 Operations shows the five latest ingestion runs and links to `/ui/ingestion-runs`, where all runs are listed newest first with 25 runs per page and Previous/Next navigation.
 
+## IBKR import failures
+
+New imports require exactly one broker account and USD AccountInformation base currency.
+`REPORT_CONTEXT_INVALID` means the query metadata or broker account differs from the
+supported context. Correct the Flex query configuration before retrying.
+`TRADE_CONSISTENCY_CONFLICT` means a known execution has different identity or financial
+fields; compare the retained source IDs and named fields with broker evidence. Do not
+resolve it by rewriting stored transactions or silently accepting the latest report.
+
+Every downloaded payload is saved before validation. The failed run and raw artifact
+retain the evidence; only successfully completed artifacts are replayable. Canonical
+writes, snapshots and success markers commit together, so new failed publications cannot
+alter the prior ledger. A lost commit acknowledgement is resolved from durable run state.
+
+The next ingestion/replay automatically recovers unfinished run rows after obtaining the
+account's session advisory lock, recording `INGESTION_RUN_INTERRUPTED`. Overlapping live
+workers and manual split corrections remain excluded. No age-based takeover is used.
+Apply Alembic migrations and restart all workers together during the upgrade, since older
+workers only hold the start lock briefly. Existing non-atomic failed runs retain conservative
+skip behavior; recovery of their possible partial writes requires verified successful raw
+history and operator investigation. This change performs no historical data repair.
+
+Transient HTTP transport failures use at most three attempts per operation, inside the
+existing request/poll budgets. HTTP 429/502/503/504 honor bounded Retry-After; permanent
+HTTP errors fail immediately. Retrying GetStatement retains its reference code.
+
 ## Scheduled operations
 
 The production Docker Compose host uses the checked-in systemd services and timers in

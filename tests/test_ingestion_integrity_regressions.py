@@ -148,7 +148,7 @@ def test_daily_synthetic_fx_history_survives_replay_and_legacy_rows(database):
     harness = _harness(database)
     orchestrator, adapter, _, _, _, _, _ = harness
     for day, rate in [("20260820", "1.1"), ("20260821", "1.2")]:
-        adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"20260821", day.encode()).replace(
+        adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b'reportDate="20260821"', f'reportDate="{day}"'.encode()).replace(
             b"<ConversionRates />",
             f'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" '
             f'reportDate="{day}" rate="{rate}" /></ConversionRates>'.encode(),

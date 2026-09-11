@@ -66,7 +66,7 @@ _SEEDED_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
   <MTMPerformanceSummaryInBase />
   <FIFOPerformanceSummaryInBase />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
@@ -96,7 +96,7 @@ _ALEX_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 _CASH_EVENT_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
@@ -110,7 +110,7 @@ _CASH_EVENT_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 _COST_AND_DIVIDEND_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
@@ -150,7 +150,7 @@ _COST_AND_DIVIDEND_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 _REPLAY_EARLY_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
@@ -171,7 +171,7 @@ _REPLAY_EARLY_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 _REPLAY_LATE_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
@@ -192,7 +192,7 @@ _REPLAY_LATE_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <CorporateActions />
   <ConversionRates />
   <SecuritiesInfo />
-  <AccountInformation />
+  <AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>"""
 
 
@@ -281,7 +281,8 @@ def _completed_details(run: Mapping[str, object], stage: str) -> dict[str, objec
     return cast(dict[str, object], details)
 
 
-def test_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_incremental() -> None:
+@pytest.mark.usefixtures("legacy_trade_corrections")
+def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_incremental() -> None:
     """Prove duplicate and corrected Flex payloads retain auditable incremental results."""
 
     base_url = _reachable_database_url()

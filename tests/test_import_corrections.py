@@ -15,9 +15,11 @@ database = _database
 
 
 @pytest.mark.parametrize("direct_rate", [False, True], ids=["cash-ratio", "direct-rate"])
-def test_trade_correction_updates_execution_fx_inputs(database, direct_rate):
+def test_trade_derived_fx_values_can_refresh(database, direct_rate):
     orchestrator, adapter, *_ = _harness(database)
     original = _SEEDED_PAYLOAD.replace(b'currency="USD"', b'currency="EUR"').replace(
+        b'<AccountInformation accountId="U_TEST" currency="EUR"', b'<AccountInformation accountId="U_TEST" currency="USD"',
+    ).replace(
         b'fifoPnlRealized="0" fxRateToBase="1"',
         b'fifoPnlRealized="0" netCash="-201" netCashInBase="-221.10"'
         + (b' fxRateToBase="1.1"' if direct_rate else b''),
@@ -30,14 +32,12 @@ def test_trade_correction_updates_execution_fx_inputs(database, direct_rate):
         )).one()
 
     adapter.payload_bytes = (
-        original.replace(b'ibCommission="1"', b'ibCommission="2"')
-        .replace(b'netCash="-201"', b'netCash="-202"')
-        .replace(b'netCashInBase="-221.10"', b'netCashInBase="-222.20"')
+        original.replace(b'netCashInBase="-221.10"', b'netCashInBase="-231.15"')
     )
     if direct_rate:
         adapter.payload_bytes = adapter.payload_bytes.replace(
             b'fxRateToBase="1.1"', b'fxRateToBase="1.2"'
-        ).replace(b'netCashInBase="-222.20"', b'netCashInBase="-242.40"')
+        ).replace(b'netCashInBase="-231.15"', b'netCashInBase="-241.20"')
     assert orchestrator.job_execute("ingestion_run").status == "success"
 
     with database.connect() as connection:
@@ -46,17 +46,18 @@ def test_trade_correction_updates_execution_fx_inputs(database, direct_rate):
             "net_cash_in_base, fx_rate_to_base FROM event_trade_fill"
         )).one()
         assert (trade.ingestion_run_id, trade.source_raw_record_id) == tuple(origin)
-        assert trade.commission == Decimal("2")
-        assert trade.net_cash == Decimal("-202")
-        assert trade.net_cash_in_base == Decimal("-242.40" if direct_rate else "-222.20")
+        assert trade.commission == Decimal("1")
+        assert trade.net_cash == Decimal("-201")
+        assert trade.net_cash_in_base == Decimal("-241.20" if direct_rate else "-231.15")
         assert trade.fx_rate_to_base == (Decimal("1.2") if direct_rate else None)
         assert connection.scalar(text("SELECT cost_basis FROM pnl_snapshot_daily")) == Decimal(
-            "242.40" if direct_rate else "222.20"
+            "241.20" if direct_rate else "231.15"
         )
 
 
 @pytest.mark.parametrize("exact_retry", [True, False], ids=["exact-report", "changed-artifact"])
 @pytest.mark.parametrize("padded_execution_id", [False, True])
+@pytest.mark.usefixtures("legacy_trade_corrections")
 def test_historical_replay_preserves_newer_trade_correction(database, monkeypatch, exact_retry, padded_execution_id):
     harness = _harness(database)
     orchestrator, adapter, *_ = harness
@@ -81,6 +82,7 @@ def test_historical_replay_preserves_newer_trade_correction(database, monkeypatc
 
 
 @pytest.mark.parametrize("failed_later_import", [False, True])
+@pytest.mark.usefixtures("legacy_trade_corrections")
 def test_replay_uses_latest_successful_event_versions_across_queries(database, monkeypatch, failed_later_import):
     harness = _harness(database)
     orchestrator, adapter, _, _, snapshot_service, *_ = harness
@@ -136,6 +138,7 @@ def test_replay_uses_latest_successful_event_versions_across_queries(database, m
 
 @pytest.mark.parametrize("rebuild", [False, True], ids=["existing-events", "missing-events"])
 @pytest.mark.parametrize("description_present", [False, True])
+@pytest.mark.usefixtures("legacy_trade_corrections")
 def test_replay_retains_event_origins_and_current_description(database, monkeypatch, rebuild, description_present):
     harness = _harness(database)
     orchestrator, adapter, *_ = harness
@@ -193,6 +196,7 @@ def test_replay_retains_event_origins_and_current_description(database, monkeypa
     ("conid", "900002"), ("transactionID", "corrected-transaction"),
 ])
 @pytest.mark.parametrize("replay_period", ["2026-08-21", "2026-08-22"])
+@pytest.mark.usefixtures("legacy_trade_corrections")
 def test_missing_trade_replay_matches_existing_trade_immutable_fields(
     database, monkeypatch, attribute, value, replay_period,
 ):

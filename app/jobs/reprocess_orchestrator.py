@@ -477,13 +477,14 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             )
             ingestion_repository = self._ingestion_repository
             if run_record is not None and ingestion_repository is not None:
-                ingestion_repository.db_ingestion_run_finalize(
+                finalized = ingestion_repository.db_ingestion_run_finalize(
                     ingestion_run_id=run_record.ingestion_run_id,
                     status="failed",
                     error_code=error_code,
                     error_message=str(error),
                     diagnostics=timeline,
                 )
+                return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status=finalized.state.status)
             return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="failed")
 
     def _job_reprocess_validate_period_key(self, period_key: str) -> str:

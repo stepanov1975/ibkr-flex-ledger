@@ -11,6 +11,8 @@ from test_ingestion_integrity_regressions import _harness, database as database
 def test_ledger_reads_commission_currency_and_scopes_its_fx_updates(database) -> None:  # noqa: F811
     orchestrator, adapter, _, _, _, snapshots, _ = _harness(database)
     adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b'currency="USD"', b'currency="EUR"').replace(
+        b'<AccountInformation accountId="U_TEST" currency="EUR"', b'<AccountInformation accountId="U_TEST" currency="USD"',
+    ).replace(
         b'fxRateToBase="1"', b'fxRateToBase="1.2"'
     ).replace(b'ibCommission="1"', b'ibCommission="-1" ibCommissionCurrency=" gbp "').replace(
         b'<ConversionRates />',

@@ -249,7 +249,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "error_code = :error_code, "
                         "error_message = :error_message, "
                         "diagnostics = CAST(:diagnostics AS jsonb) "
-                        "WHERE ingestion_run_id = :ingestion_run_id "
+                        "WHERE ingestion_run_id = :ingestion_run_id AND status = 'started' "
                         "RETURNING ingestion_run_id"
                     ),
                     {
@@ -261,7 +261,12 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                     },
                 ).mappings().first()
                 if updated_row is None:
-                    raise LookupError("ingestion run not found")
+                    # A COMMIT may succeed even if its acknowledgement is lost.
+                    # Preserve the durable terminal state on a retry/failure path.
+                    stored = self._db_fetch_run_by_id_or_raise(connection, ingestion_run_id)
+                    if status == "success" and stored.state.status != "success":
+                        raise RuntimeError("ingestion run already finalized without success")
+                    return stored
 
                 return self._db_fetch_run_by_id_or_raise(connection=connection, ingestion_run_id=ingestion_run_id)
         except SQLAlchemyError as error:

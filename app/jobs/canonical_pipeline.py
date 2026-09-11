@@ -22,6 +22,7 @@ def job_canonical_map_and_persist(
     canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
     mapping_service: CanonicalMappingService | None = None,
     source_origins: dict[str, RawRecordForCanonicalMapping] | None = None,
+    validate_trade_consistency: bool = False,
 ) -> dict[str, int]:
     """Map raw rows into canonical contracts and persist with deterministic UPSERT logic.
 
@@ -32,6 +33,7 @@ def job_canonical_map_and_persist(
         canonical_persistence_repository: Canonical persistence repository.
         mapping_service: Optional mapping service override.
         source_origins: Optional replay origins keyed by the current raw row identifier.
+        validate_trade_consistency: Enforce live execution consistency; historical replay retains accepted history.
 
     Returns:
         dict[str, int]: Persisted canonical row counters by event type.
@@ -143,6 +145,9 @@ def job_canonical_map_and_persist(
                 source_raw_record_id=str(origin.raw_record_id),
             )
         resolved_fx_requests.append(fx_request)
+
+    if validate_trade_consistency:
+        canonical_persistence_repository.db_canonical_validate_trade_fills(resolved_trade_requests)
 
     canonical_persistence_repository.db_canonical_bulk_upsert(
         trade_requests=resolved_trade_requests,

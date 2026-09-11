@@ -68,7 +68,7 @@ _PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexStatement repor
 </OpenPositions>
 <CashTransactions><CashTransaction transactionID="9" conid="101" symbol="TEST" assetCategory="STK"
  type="Dividends" amount="5" currency="USD" reportDate="20260821" /></CashTransactions>
-<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>'''
 
 
@@ -79,7 +79,7 @@ _ROUNDING_PAYLOAD = ('''<FlexQueryResponse><FlexStatements count="1"><FlexStatem
  reportDate="20260821" dateTime="20260821;10000{i}" />''' for i in range(1, 4)) + '''</Trades>
 <OpenPositions><OpenPosition conid="101" symbol="ROUND" assetCategory="STK" currency="EUR"
  position="3" markPrice="11" multiplier="1" fxRateToBase="1.123456789" reportDate="20260821" /></OpenPositions>
-<CashTransactions /><CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CashTransactions /><CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>''').encode()
 
 _NO_CASH_PAYLOAD = _PAYLOAD.replace(
@@ -143,7 +143,7 @@ _CASHFLOW_MOVE_PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexS
 </OpenPositions>
 <CashTransactions><CashTransaction transactionID="9" conid="201" symbol="FIRST" assetCategory="STK"
  type="Dividends" amount="5" currency="USD" reportDate="20260821" /></CashTransactions>
-<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>'''
 _DIRECT_NET_CASH_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
     b'tradePrice="10.01"', b'tradePrice="10.01" netCash="-10.01" netCashInBase="-11.25"', 1,
@@ -299,7 +299,8 @@ def test_option_link_resolves_to_the_same_stock_family(history_database):
     assert {row['conid'] for row in report['positions']} == {'101', '102', '103'}
 
 
-def test_failed_snapshot_write_rolls_back_lot_projection(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_snapshot_write_rolls_back_lot_projection(history_database, monkeypatch):
     client, _, ids, engine = history_database
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     with engine.connect() as connection:
@@ -457,7 +458,8 @@ def test_option_metadata_from_all_instrument_activity(history_database, section,
 
 
 @pytest.mark.parametrize('activity_date', ['20260821', '20260822'], ids=['same-day', 'next-day'])
-def test_activity_after_failed_snapshot_marks_pnl_stale_until_retry(history_database, monkeypatch, activity_date):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_activity_after_failed_snapshot_marks_pnl_stale_until_retry(history_database, monkeypatch, activity_date):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     new_cashflow = (f'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
@@ -503,7 +505,8 @@ def _history_replay(engine, harness):
     ).job_execute('reprocess_run')
 
 
-def test_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="200"')
@@ -523,7 +526,8 @@ def test_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history
     assert stock_lot['unrealized_pnl'] is None
 
 
-def test_failed_older_artifact_replay_preserves_latest_values_and_freshness(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_older_artifact_replay_preserves_latest_values_and_freshness(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
@@ -549,7 +553,8 @@ def test_failed_older_artifact_replay_preserves_latest_values_and_freshness(hist
     assert report['provisional'] is False
 
 
-def test_successful_replay_clears_stale_after_new_activity(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_successful_replay_clears_stale_after_new_activity(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
@@ -594,7 +599,8 @@ def test_existing_snapshots_require_rebuild_after_freshness_migration(history_da
 
 
 @pytest.mark.parametrize('metadata_section', ['Trades', 'SecuritiesInfo'])
-def test_failed_snapshot_keeps_committed_adjusted_option_in_stock_family(history_database, monkeypatch, metadata_section):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_snapshot_keeps_committed_adjusted_option_in_stock_family(history_database, monkeypatch, metadata_section):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     metadata = b'underlyingConid="101" underlyingSymbol="TEST"'
@@ -635,7 +641,8 @@ def test_duplicate_stock_symbols_do_not_share_symbol_only_options(selected_index
 @pytest.mark.parametrize('history_database,input_kind', [
     (_NO_CASH_PAYLOAD, 'valuation'), (_COMMISSION_FX_PAYLOAD, 'commission_fx'),
 ], indirect=['history_database'], ids=['valuation', 'commission-fx'])
-def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_database, monkeypatch, input_kind):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_database, monkeypatch, input_kind):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -662,7 +669,8 @@ def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_datab
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
@@ -685,7 +693,8 @@ def test_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_da
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_failed_removal_from_nonempty_broker_positions_marks_pnl_stale(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_removal_from_nonempty_broker_positions_marks_pnl_stale(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     stock_position = (b'<OpenPosition conid="101" symbol="TEST" assetCategory="STK" currency="USD"\n'
@@ -721,7 +730,8 @@ def test_unchanged_valuations_remain_fresh_after_metadata_only_import(history_da
         b'underlyingConid="101" underlyingSymbol="TEST"', b'',
     ),
 ], indirect=True, ids=['adjusted-option'])
-def test_corrected_option_keeps_new_metadata_after_failed_snapshot(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_corrected_option_keeps_new_metadata_after_failed_snapshot(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     adapter.payload_bytes = _PAYLOAD.replace(b'TEST  260918P00100000', b'ADJUSTED OPTION').replace(
@@ -756,7 +766,8 @@ def test_option_only_families_reject_ambiguous_underlying_symbols(selected_index
 @pytest.mark.parametrize('history_database', [
     _NO_CASH_PAYLOAD.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement>'),
 ], indirect=True, ids=['no-statement-date'])
-def test_valuation_freshness_without_statement_date_uses_processing_time(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_valuation_freshness_without_statement_date_uses_processing_time(history_database, monkeypatch):
     client, _, ids, engine = history_database
     report = client.get(f"/reports/stock-history/{ids['101']}")
     assert report.status_code == 200
@@ -790,7 +801,8 @@ def test_successful_import_rebuilds_removed_broker_position(history_database):
     assert report['stale'] is False
 
 
-def test_cashflow_description_change_does_not_mark_pnl_stale(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_cashflow_description_change_does_not_mark_pnl_stale(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -861,7 +873,8 @@ def test_successful_import_clears_omitted_holding_without_canonical_activity(his
         ), False, id='new-selection-same-effective-rate',
     ),
 ], indirect=['history_database'])
-def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypatch, changed_payload, expected_stale):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypatch, changed_payload, expected_stale):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -890,7 +903,8 @@ def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypa
 
 @pytest.mark.parametrize('history_database', [_BASE_CASHFLOW_FX_PAYLOAD], indirect=True, ids=['base-amount'])
 @pytest.mark.parametrize('attribute,expected_stale', [('amount', False), ('amountInBase', True)])
-def test_cashflow_amount_override_only_invalidates_consumed_amount(
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_cashflow_amount_override_only_invalidates_consumed_amount(
     history_database, monkeypatch, attribute, expected_stale,
 ):
     client, _, ids, engine = history_database
@@ -949,7 +963,8 @@ def test_equivalent_broker_valuation_after_failed_snapshot_stays_fresh(history_d
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
 @pytest.mark.parametrize('attribute,column', [('cost', 'cost'), ('fifoPnlRealized', 'realized_pnl')])
-def test_unused_broker_trade_figures_after_failed_snapshot_stay_fresh(history_database, monkeypatch, attribute, column):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_unused_broker_trade_figures_after_failed_snapshot_stay_fresh(history_database, monkeypatch, attribute, column):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -1019,7 +1034,8 @@ def test_trade_description_migration_preserves_provenance_and_snapshot_freshness
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_failed_snapshot_after_trade_description_correction_preserves_freshness(history_database, monkeypatch):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_failed_snapshot_after_trade_description_correction_preserves_freshness(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -1082,7 +1098,8 @@ def test_valuation_from_failed_canonical_mapping_does_not_mark_pnl_stale(history
         id='consumed-net-cash-ratio',
     ),
 ], indirect=['history_database'])
-def test_net_cash_correction_only_invalidates_consumed_fx_ratio(history_database, monkeypatch, changed_payload, expected_stale):
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_net_cash_correction_only_invalidates_consumed_fx_ratio(history_database, monkeypatch, changed_payload, expected_stale):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -1170,7 +1187,8 @@ def test_unused_broker_position_figures_do_not_invalidate_fifo_valuation(history
     pytest.param(_DIFFERENT_DIRECT_BROKER_FX_PAYLOAD, _FALLBACK_BROKER_FX_PAYLOAD, True,
                  id='direct-to-different-fallback'),
 ], indirect=['history_database'])
-def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_broker_fx_source_switch_only_invalidates_different_effective_rate(
     history_database, monkeypatch, changed_payload, expected_stale,
 ):
     client, _, ids, engine = history_database
@@ -1200,7 +1218,8 @@ def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
 
 @pytest.mark.parametrize('history_database', [_CASHFLOW_MOVE_PAYLOAD], indirect=True, ids=['two-stocks'])
 @pytest.mark.parametrize('fail_before_snapshot', [False, True], ids=['successful-move', 'failed-move'])
-def test_cashflow_instrument_correction_rebuilds_both_stock_histories(
+@pytest.mark.usefixtures("legacy_partial_ingestion")
+def test_legacy_cashflow_instrument_correction_rebuilds_both_stock_histories(
     history_database, monkeypatch, fail_before_snapshot,
 ):
     client, _, ids, engine = history_database
@@ -1275,7 +1294,8 @@ def test_cashflow_only_source_is_cleared_after_instrument_correction(history_dat
         assert report['provisional'] is False
 
 
-def test_stock_history_reads_one_consistent_projection_during_rebuild(history_database):
+@pytest.mark.usefixtures("legacy_trade_corrections")
+def test_legacy_stock_history_reads_one_consistent_projection_during_rebuild(history_database):
     client, _, ids, engine = history_database
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     orchestrator, adapter, *_ = _harness(engine, account='HISTORY')

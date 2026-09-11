@@ -37,6 +37,7 @@ from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService, snapshot
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import RawPayloadExtractionResult, job_raw_extract_payload_rows
 from .canonical_pipeline import job_canonical_map_and_persist
+from .report_context import job_validate_report_context
 from .incremental_scope import job_build_incremental_snapshot_scope
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
@@ -245,6 +246,14 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 )
             )
 
+            broker_account_id = job_validate_report_context(
+                adapter_result.payload_bytes,
+                self._raw_persistence_repository.db_raw_successful_broker_account_ids(self._config.account_id),
+            )
+            timeline.append(domain_build_stage_event(
+                stage="report_context", status="completed", details={"broker_account_id": broker_account_id},
+            ))
+
             skip_is_safe = (
                 self._canonical_repository is None
                 or self._canonical_repository.db_canonical_skip_is_safe(self._config.account_id)
@@ -350,6 +359,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                                 functional_currency=self._config.functional_currency,
                                 raw_records=canonical_raw_rows,
                                 canonical_persistence_repository=self._canonical_repository,
+                                validate_trade_consistency=True,
                             )
                             canonical_duration_ms = _duration_ms(canonical_started_ns)
                             canonical_skip_reason = None
@@ -422,14 +432,14 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     },
                 )
             )
-            self._ingestion_repository.db_ingestion_run_finalize(
+            finalized = self._ingestion_repository.db_ingestion_run_finalize(
                 ingestion_run_id=run_record.ingestion_run_id,
                 status="failed",
                 error_code=error_code,
                 error_message=str(error),
                 diagnostics=timeline,
             )
-            return JobExecutionResult(job_name=normalized_job_name, status="failed")
+            return JobExecutionResult(job_name=normalized_job_name, status=finalized.state.status)
 
     def _job_handle_preflight_failure(
         self,
@@ -508,6 +518,11 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             return "INGESTION_TIMEOUT_ERROR"
         if isinstance(error, ConnectionError):
             return "INGESTION_CONNECTION_ERROR"
+        code = getattr(error, "code", None)
+        if isinstance(error, ValueError) and code in {
+            "TRADE_CONSISTENCY_CONFLICT", "REPORT_CONTEXT_INVALID",
+        }:
+            return str(code)
         if isinstance(error, ValueError):
             return "INGESTION_CONTRACT_ERROR"
         return "INGESTION_UNEXPECTED_ERROR"

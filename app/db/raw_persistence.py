@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from typing import Any
 from uuid import UUID
 
@@ -42,6 +43,44 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
             raise ValueError("engine must not be None")
 
         self._engine = engine
+
+    def db_raw_successful_broker_account_ids(self, account_id: str) -> frozenset[str]:
+        """Read broker identities from successfully applied immutable reports."""
+        try:
+            with db_connection_scope(self._engine) as connection:
+                rows = connection.execute(text(
+                    "SELECT NULLIF(BTRIM(info.source_payload->>'accountId'), '') AS broker_account_id, "
+                    "CASE WHEN NULLIF(BTRIM(info.source_payload->>'accountId'), '') IS NULL "
+                    "THEN artifact.source_payload END AS header_payload "
+                    "FROM raw_artifact artifact "
+                    "LEFT JOIN raw_record info ON info.raw_artifact_id=artifact.raw_artifact_id "
+                    "AND info.section_name='AccountInformation' "
+                    "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
+                    "LEFT JOIN ingestion_run completed "
+                    "ON completed.ingestion_run_id=artifact.completed_ingestion_run_id "
+                    "WHERE artifact.account_id=:account_id AND "
+                    "((artifact.completed_ingestion_run_id IS NOT NULL AND completed.status='success') "
+                    "OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success'))"
+                ), {"account_id": account_id}).mappings().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("successful broker account lookup failed") from error
+
+        identities: set[str] = set()
+        for row in rows:
+            if row["broker_account_id"]:
+                identities.add(row["broker_account_id"])
+            else:
+                # Some reports identify the account only in the statement header.
+                # Read bytes only for that legacy/optional metadata shape.
+                try:
+                    root = ET.fromstring(bytes(row["header_payload"]))
+                except ET.ParseError as error:
+                    raise RuntimeError("successful report has unreadable account metadata") from error
+                identities.update(
+                    value for statement in root.iter("FlexStatement")
+                    if (value := statement.attrib.get("accountId", "").strip())
+                )
+        return frozenset(identities)
 
     def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
         """Persist or reuse immutable raw artifact by dedupe identity key.
