@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ContextManager
 from uuid import UUID
 
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
+
+from .session import db_connection_scope, db_transaction_scope
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -113,6 +115,10 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
 
         self._engine = engine
 
+    def db_canonical_transaction(self) -> ContextManager[None]:
+        """Commit canonical events and their projections as one publication."""
+        return db_transaction_scope(self._engine)
+
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
         """Reject skip assumptions after any failed run for this account.
 
@@ -123,7 +129,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
 
         normalized_account_id = self._db_canonical_validate_non_empty_text(account_id, "account_id")
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 return not bool(connection.scalar(
                     text("SELECT EXISTS (SELECT 1 FROM ingestion_run "
                          "WHERE account_id = :account_id AND status = 'failed')"),
@@ -216,7 +222,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             "flex_query_id": self._db_canonical_validate_non_empty_text(flex_query_id, "flex_query_id"),
         }
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(self._RAW_ARTIFACT_REPLAY_CANDIDATE_QUERY),
                     parameters,
@@ -296,7 +302,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
         """Detect deletions that cannot appear in the changed-current-row scope."""
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 return bool(connection.scalar(text(
                     "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
                     "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
@@ -315,7 +321,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         """Persist valuation-attempt time even when no canonical rows changed."""
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 connection.execute(text(
                     "UPDATE raw_artifact SET valuation_pending_at_utc=clock_timestamp() "
                     "WHERE account_id=:account_id AND raw_artifact_id IN ("
@@ -367,7 +373,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         )
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 rows = connection.execute(
                     text(
                         "WITH input AS ("
@@ -544,7 +550,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         ]
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 if normalized_trade_requests:
                     connection.execute(
                         text(
@@ -867,7 +873,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         """
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(query_template),
                     parameters,

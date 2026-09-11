@@ -9,6 +9,8 @@ from uuid import UUID
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .session import db_connection_scope
+
 from app.db.interfaces import (
     RawArtifactPersistRequest,
     RawArtifactPersistResult,
@@ -60,7 +62,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
             raise ValueError("request.source_payload must be bytes")
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 persisted_row = connection.execute(
                     text(
                         "INSERT INTO raw_artifact ("
@@ -134,7 +136,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
         ]
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 insert_result = connection.execute(
                     text(
                         "INSERT INTO raw_record ("
@@ -167,7 +169,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
             raise ValueError("completed_ingestion_run_id must not be None")
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 updated_row = connection.execute(
                     text(
                         "UPDATE raw_artifact SET "

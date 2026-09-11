@@ -11,6 +11,8 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .session import db_connection_scope
+
 from .interfaces import (
     IngestionRunAlreadyActiveError,
     IngestionRunRecord,
@@ -111,7 +113,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         advisory_key_1, advisory_key_2 = self._build_advisory_lock_keys(normalized_account_id)
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 lock_row = connection.execute(
                     text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2) AS lock_acquired"),
                     {"key_1": advisory_key_1, "key_2": advisory_key_2},
@@ -188,7 +190,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             diagnostics_payload = json.dumps(diagnostics)
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 updated_row = connection.execute(
                     text(
                         "UPDATE ingestion_run SET "
@@ -230,7 +232,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         """
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 row = connection.execute(
                     text(
                         "SELECT "
@@ -286,7 +288,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         query_template = self._INGESTION_RUN_LIST_QUERY_BY_SORT[(normalized_sort_by, normalized_sort_dir)]
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(query_template),
                     {"limit": limit, "offset": offset},
@@ -331,7 +333,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             "started_at_utc, ended_at_utc, duration_ms, error_code, error_message, diagnostics, created_at_utc"
         )
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(f"SELECT {columns} FROM ingestion_run WHERE {where} ORDER BY {order} {direction} NULLS LAST, ingestion_run_id {direction} LIMIT :limit OFFSET :offset"),
                     params,

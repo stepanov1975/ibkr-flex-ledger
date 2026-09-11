@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import traceback
@@ -243,172 +244,152 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             )
 
         try:
-            timeline.append(domain_build_stage_event(stage="raw_read", status="started"))
-            candidates = self._raw_read_repository.db_raw_artifact_replay_candidate_list(
-                account_id=config.account_id,
-                period_key=config.period_key,
-                flex_query_id=config.flex_query_id,
-            )
-            selected = job_select_replay_artifacts(candidates)
-            if not selected:
-                raise ValueError(
-                    "ABORT_EMPTY_SELECTION: no replayable artifacts found for "
-                    f"period_key={config.period_key} flex_query_id={config.flex_query_id}"
-                )
-            timeline.append(
-                domain_build_stage_event(
-                    stage="raw_read",
-                    status="completed",
-                    details={
-                        "candidate_count": len(candidates),
-                        "selected_artifact_count": len(selected),
-                        "selected_report_dates": [
-                            candidate.report_date_local.isoformat() for candidate in selected
-                        ],
-                    },
-                )
-            )
-
-            event_sources = job_replay_event_sources(
-                config.account_id,
-                config.functional_currency,
-                self._raw_read_repository.db_raw_record_list_successful_events_for_account(config.account_id),
-            )
-            for candidate in selected:
-                artifact_details = {
-                    "raw_artifact_id": str(candidate.raw_artifact_id),
-                    "ingestion_run_id": str(candidate.ingestion_run_id),
-                    "report_date_local": candidate.report_date_local.isoformat(),
-                }
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="artifact_raw_read",
-                        status="started",
-                        details=artifact_details,
-                    )
-                )
-                raw_rows = self._raw_read_repository.db_raw_record_list_for_artifact(
-                    raw_artifact_id=candidate.raw_artifact_id,
-                )
-                raw_row_run_ids = {row.ingestion_run_id for row in raw_rows}
-                if len(raw_row_run_ids) != 1:
-                    raise RuntimeError("raw artifact rows must reference exactly one ingestion run")
-                semantic_run_id = next(iter(raw_row_run_ids))
-                artifact_details["ingestion_run_id"] = str(semantic_run_id)
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="artifact_raw_read",
-                        status="completed",
-                        details={**artifact_details, "raw_row_count": len(raw_rows)},
-                    )
-                )
-
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="canonical_mapping",
-                        status="started",
-                        details=artifact_details,
-                    )
-                )
-                canonical_started_at = datetime.now(timezone.utc)
-                selected_event_sources = job_replay_event_sources(
-                    config.account_id, config.functional_currency, raw_rows,
-                ).latest
-                canonical_rows = [row for row in raw_rows if row.section_name not in {
-                    "Trades", "CashTransactions", "ConversionRates", "CorporateActions",
-                }]
-                source_origins = {}
-                for key, original in selected_event_sources.items():
-                    latest = event_sources.latest.get(key, original)
-                    canonical_rows.append(latest)
-                    source_origins[str(latest.raw_record_id)] = event_sources.first.get(key, original)
-                # Write each event's final version once so historical replay cannot
-                # trigger temporary mutations or invalidate a newer manual decision.
-                # Missing events use the first available successful application as
-                # their origin. Broker valuation still uses the selected artifact.
-                canonical_counts = job_canonical_map_and_persist(
-                    account_id=config.account_id,
-                    functional_currency=config.functional_currency,
-                    raw_records=canonical_rows,
-                    canonical_persistence_repository=self._canonical_persistence_repository,
-                    source_origins=source_origins,
-                )
-                canonical_duration_ms = max(
-                    0,
-                    int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
-                )
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="canonical_mapping",
-                        status="completed",
-                        details={
-                            **artifact_details,
-                            **canonical_counts,
-                            "canonical_duration_ms": canonical_duration_ms,
-                        },
-                    )
-                )
-
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="snapshot",
-                        status="started",
-                        details=artifact_details,
-                    )
-                )
-                self._canonical_persistence_repository.db_canonical_mark_valuation_pending(
-                    account_id=config.account_id, ingestion_run_id=str(semantic_run_id),
-                )
-                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
-                    account_id=config.account_id,
-                    ingestion_run_id=str(semantic_run_id),
-                    report_date_local=candidate.report_date_local.isoformat(),
-                    functional_currency=config.functional_currency,
-                )
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="snapshot",
-                        status="completed",
-                        details={
-                            **artifact_details,
-                            "snapshot_row_count": snapshot_result.snapshot_row_count,
-                            "position_lot_row_count": snapshot_result.position_lot_row_count,
-                            "missing_solid_valuation_count": snapshot_result.missing_solid_valuation_count,
-                            "broker_position_match_count": snapshot_result.broker_position_match_count,
-                            "broker_position_mismatch_count": snapshot_result.broker_position_mismatch_count,
-                            "broker_only_position_count": snapshot_result.broker_only_position_count,
-                            "broker_absent_nonzero_fifo_count": snapshot_result.broker_absent_nonzero_fifo_count,
-                        },
-                    )
-                )
-
-            supported_report_dates = tuple(
-                candidate.report_date_local.isoformat() for candidate in selected
-            )
-            if supported_report_dates:
-                cleanup_candidates = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_list(
+            transaction = getattr(self._canonical_persistence_repository, "db_canonical_transaction", nullcontext)
+            with transaction():
+                timeline.append(domain_build_stage_event(stage="raw_read", status="started"))
+                candidates = self._raw_read_repository.db_raw_artifact_replay_candidate_list(
                     account_id=config.account_id,
                     period_key=config.period_key,
                     flex_query_id=config.flex_query_id,
-                    supported_report_dates=supported_report_dates,
                 )
+                selected = job_select_replay_artifacts(candidates)
+                if not selected:
+                    raise ValueError(
+                        "ABORT_EMPTY_SELECTION: no replayable artifacts found for "
+                        f"period_key={config.period_key} flex_query_id={config.flex_query_id}"
+                    )
                 timeline.append(
                     domain_build_stage_event(
-                        stage="snapshot_cleanup",
+                        stage="raw_read",
                         status="completed",
                         details={
-                            "candidates": [
-                                {
-                                    "report_date_local": candidate.report_date_local.isoformat(),
-                                    "row_count": candidate.row_count,
-                                }
-                                for candidate in cleanup_candidates
-                            ]
+                            "candidate_count": len(candidates),
+                            "selected_artifact_count": len(selected),
+                            "selected_report_dates": [
+                                candidate.report_date_local.isoformat() for candidate in selected
+                            ],
                         },
                     )
                 )
-                if allow_unsupported_snapshot_cleanup:
-                    deleted_row_count = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_delete(
+
+                event_sources = job_replay_event_sources(
+                    config.account_id,
+                    config.functional_currency,
+                    self._raw_read_repository.db_raw_record_list_successful_events_for_account(config.account_id),
+                )
+                for candidate in selected:
+                    artifact_details = {
+                        "raw_artifact_id": str(candidate.raw_artifact_id),
+                        "ingestion_run_id": str(candidate.ingestion_run_id),
+                        "report_date_local": candidate.report_date_local.isoformat(),
+                    }
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="artifact_raw_read",
+                            status="started",
+                            details=artifact_details,
+                        )
+                    )
+                    raw_rows = self._raw_read_repository.db_raw_record_list_for_artifact(
+                        raw_artifact_id=candidate.raw_artifact_id,
+                    )
+                    raw_row_run_ids = {row.ingestion_run_id for row in raw_rows}
+                    if len(raw_row_run_ids) != 1:
+                        raise RuntimeError("raw artifact rows must reference exactly one ingestion run")
+                    semantic_run_id = next(iter(raw_row_run_ids))
+                    artifact_details["ingestion_run_id"] = str(semantic_run_id)
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="artifact_raw_read",
+                            status="completed",
+                            details={**artifact_details, "raw_row_count": len(raw_rows)},
+                        )
+                    )
+
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="canonical_mapping",
+                            status="started",
+                            details=artifact_details,
+                        )
+                    )
+                    canonical_started_at = datetime.now(timezone.utc)
+                    selected_event_sources = job_replay_event_sources(
+                        config.account_id, config.functional_currency, raw_rows,
+                    ).latest
+                    canonical_rows = [row for row in raw_rows if row.section_name not in {
+                        "Trades", "CashTransactions", "ConversionRates", "CorporateActions",
+                    }]
+                    source_origins = {}
+                    for key, original in selected_event_sources.items():
+                        latest = event_sources.latest.get(key, original)
+                        canonical_rows.append(latest)
+                        source_origins[str(latest.raw_record_id)] = event_sources.first.get(key, original)
+                    # Write each event's final version once so historical replay cannot
+                    # trigger temporary mutations or invalidate a newer manual decision.
+                    # Missing events use the first available successful application as
+                    # their origin. Broker valuation still uses the selected artifact.
+                    canonical_counts = job_canonical_map_and_persist(
+                        account_id=config.account_id,
+                        functional_currency=config.functional_currency,
+                        raw_records=canonical_rows,
+                        canonical_persistence_repository=self._canonical_persistence_repository,
+                        source_origins=source_origins,
+                    )
+                    canonical_duration_ms = max(
+                        0,
+                        int((datetime.now(timezone.utc) - canonical_started_at).total_seconds() * 1000),
+                    )
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="canonical_mapping",
+                            status="completed",
+                            details={
+                                **artifact_details,
+                                **canonical_counts,
+                                "canonical_duration_ms": canonical_duration_ms,
+                            },
+                        )
+                    )
+
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="snapshot",
+                            status="started",
+                            details=artifact_details,
+                        )
+                    )
+                    self._canonical_persistence_repository.db_canonical_mark_valuation_pending(
+                        account_id=config.account_id, ingestion_run_id=str(semantic_run_id),
+                    )
+                    snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
+                        account_id=config.account_id,
+                        ingestion_run_id=str(semantic_run_id),
+                        report_date_local=candidate.report_date_local.isoformat(),
+                        functional_currency=config.functional_currency,
+                    )
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="snapshot",
+                            status="completed",
+                            details={
+                                **artifact_details,
+                                "snapshot_row_count": snapshot_result.snapshot_row_count,
+                                "position_lot_row_count": snapshot_result.position_lot_row_count,
+                                "missing_solid_valuation_count": snapshot_result.missing_solid_valuation_count,
+                                "broker_position_match_count": snapshot_result.broker_position_match_count,
+                                "broker_position_mismatch_count": snapshot_result.broker_position_mismatch_count,
+                                "broker_only_position_count": snapshot_result.broker_only_position_count,
+                                "broker_absent_nonzero_fifo_count": snapshot_result.broker_absent_nonzero_fifo_count,
+                            },
+                        )
+                    )
+
+                supported_report_dates = tuple(
+                    candidate.report_date_local.isoformat() for candidate in selected
+                )
+                if supported_report_dates:
+                    cleanup_candidates = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_list(
                         account_id=config.account_id,
                         period_key=config.period_key,
                         flex_query_id=config.flex_query_id,
@@ -418,21 +399,43 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                         domain_build_stage_event(
                             stage="snapshot_cleanup",
                             status="completed",
-                            details={"deleted_row_count": deleted_row_count},
+                            details={
+                                "candidates": [
+                                    {
+                                        "report_date_local": candidate.report_date_local.isoformat(),
+                                        "row_count": candidate.row_count,
+                                    }
+                                    for candidate in cleanup_candidates
+                                ]
+                            },
                         )
                     )
+                    if allow_unsupported_snapshot_cleanup:
+                        deleted_row_count = self._snapshot_repository.db_pnl_snapshot_daily_unsupported_delete(
+                            account_id=config.account_id,
+                            period_key=config.period_key,
+                            flex_query_id=config.flex_query_id,
+                            supported_report_dates=supported_report_dates,
+                        )
+                        timeline.append(
+                            domain_build_stage_event(
+                                stage="snapshot_cleanup",
+                                status="completed",
+                                details={"deleted_row_count": deleted_row_count},
+                            )
+                        )
 
-            timeline.append(domain_build_stage_event(stage="run", status="success"))
-            ingestion_repository = self._ingestion_repository
-            if run_record is not None and ingestion_repository is not None:
-                ingestion_repository.db_ingestion_run_finalize(
-                    ingestion_run_id=run_record.ingestion_run_id,
-                    status="success",
-                    error_code=None,
-                    error_message=None,
-                    diagnostics=timeline,
-                )
-            return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
+                timeline.append(domain_build_stage_event(stage="run", status="success"))
+                ingestion_repository = self._ingestion_repository
+                if run_record is not None and ingestion_repository is not None:
+                    ingestion_repository.db_ingestion_run_finalize(
+                        ingestion_run_id=run_record.ingestion_run_id,
+                        status="success",
+                        error_code=None,
+                        error_message=None,
+                        diagnostics=timeline,
+                    )
+                return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
         except Exception as error:
             error_code = "REPROCESS_UNEXPECTED_ERROR"
             if isinstance(error, FlexRequestError):

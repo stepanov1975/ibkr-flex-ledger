@@ -664,6 +664,9 @@ class RawRecordReadRepositoryPort(Protocol):
 class CanonicalPersistenceRepositoryPort(Protocol):
     """Port definition for canonical event and instrument UPSERT operations."""
 
+    def db_canonical_transaction(self) -> ContextManager[None]:
+        """Publish canonical events, projections and completion atomically."""
+
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
         """Return whether retained run history permits duplicate/incremental skips."""
 

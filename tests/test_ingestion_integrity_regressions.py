@@ -84,7 +84,7 @@ def _replay(harness, period):
 
 
 @pytest.mark.parametrize("exact", [True, False])
-def test_successful_source_restores_failed_canonical_write(database, monkeypatch, exact):
+def test_successful_source_after_failed_import_remains_consistent(database, monkeypatch, exact):
     harness = _harness(database)
     orchestrator, adapter, _, _, service, _, _ = harness
     assert orchestrator.job_execute("ingestion_run").status == "success"
@@ -98,7 +98,7 @@ def test_successful_source_restores_failed_canonical_write(database, monkeypatch
     assert orchestrator.job_execute("ingestion_run").status == "failed"
     monkeypatch.setattr(service, "ledger_snapshot_build_and_persist", build)
     with database.connect() as connection:
-        assert connection.scalar(text("SELECT price FROM event_trade_fill")) == Decimal("200")
+        assert connection.scalar(text("SELECT price FROM event_trade_fill")) == Decimal("100")
 
     # Another failure and a successful partial import must not clear invalidation.
     fetch = adapter.adapter_fetch_report

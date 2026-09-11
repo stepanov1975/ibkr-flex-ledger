@@ -1351,9 +1351,9 @@ def test_ingestion_completed_stages_use_distinct_monotonic_operation_boundaries(
 
     details = _completed_stage_details(repository)
     expected = {
-        ("preflight", "preflight_duration_ms"): 2,
-        ("xml_extraction", "xml_extraction_duration_ms"): 3,
-        ("persist", "artifact_persistence_duration_ms"): 5,
+        ("preflight", "preflight_duration_ms"): 5,
+        ("xml_extraction", "xml_extraction_duration_ms"): 2,
+        ("persist", "artifact_persistence_duration_ms"): 3,
         ("persist", "raw_persistence_duration_ms"): 7,
         ("canonical_mapping", "canonical_raw_read_duration_ms"): 11,
         ("canonical_mapping", "canonical_duration_ms"): 13,

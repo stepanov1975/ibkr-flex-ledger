@@ -14,6 +14,8 @@ from sqlalchemy import Connection, Engine, text
 from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
+from .session import db_connection_scope
+
 from app.db.interfaces import (
     LedgerCashflowRecord,
     LedgerCorporateActionRecord,
@@ -130,7 +132,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         """Join an outer correction transaction when supplied."""
         if self._transaction_connection is not None:
             return nullcontext(self._transaction_connection)
-        return self._engine.begin() if write else self._engine.connect()
+        return db_connection_scope(self._engine, write=write)
 
     @contextmanager
     def db_ledger_projection_transaction(self) -> Iterator[LedgerSnapshotRepositoryPort]:
@@ -138,7 +140,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if self._transaction_connection is not None:
             yield self
         else:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
                 yield SQLAlchemyLedgerSnapshotService(self._engine, connection=connection)
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
