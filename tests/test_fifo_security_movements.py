@@ -149,6 +149,22 @@ def test_same_day_distribution_precedes_its_transfer_and_preserves_distribution_
     assert lot.transfer_event_corp_action_id == "a-transfer"
 
 
+@pytest.mark.parametrize('raw_ids', [('raw-a', 'raw-z'), ('raw-z', 'raw-a')])
+@pytest.mark.parametrize('transfer', [False, True])
+def test_same_day_distribution_fifo_is_stable_when_replay_replaces_raw_ids(raw_ids, transfer):
+    movements = tuple(replace(_movement(None, '2', basis, event=event), source_raw_record_id=raw_id,
+                              destination_instrument_id='old' if transfer else 'new')
+                      for basis, event, raw_id in zip(('20', '40'), ('a-distribution', 'z-distribution'), raw_ids, strict=True))
+    if transfer:
+        movements += (_movement('old', '4', day=21, event='transfer'),)
+    result = fifo.fifo_compute_portfolio(
+        [_request('old', []), _request('new', [_trade(22, 'SELL', '1', '30', 'sale')])], movements,
+    )['new']
+    assert result.realized_pnl == 20
+    assert [(lot.open_event_corp_action_id, lot.remaining_quantity, lot.cost_basis_remaining)
+            for lot in result.open_lots] == [('a-distribution', 1, 10), ('z-distribution', 2, 40)]
+
+
 @pytest.mark.parametrize("reverse_input", [False, True])
 def test_same_day_independent_transfers_keep_separate_cost_basis(reverse_input):
     requests = [_request("old", [_trade(10, "BUY", "8", "10", "buy-old")]),

@@ -1419,3 +1419,85 @@ def test_later_distribution_fx_context_does_not_flow_through_an_earlier_transfer
     assert snapshot.fx_dependencies == []
     assert snapshot.provisional is False
     assert Decimal(snapshot.cost_basis) == 80
+
+
+@pytest.mark.parametrize("trade_day", [20, 21])
+def test_source_trades_on_or_after_transfer_do_not_contaminate_destination_fx(trade_day):
+    from app.db.interfaces import LedgerSecurityMovementRecord
+    old, new = uuid4(), uuid4()
+    opening = replace(_trade(old, "BUY", "8", "10"), report_date_local=date(2026, 8, 19),
+                      trade_timestamp_utc=datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+    later = replace(_trade(old, "BUY", "1", "20"), currency="EUR", report_date_local=date(2026, 8, trade_day),
+                    trade_timestamp_utc=datetime(2026, 8, trade_day, 12, tzinfo=timezone.utc))
+    transfer = LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=old,
+        destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="8",
+        cost_basis=None, currency="USD",
+    )
+    repository = _RepositoryStub(trades=[opening, later],
+                                 valuations=[_broker_position(old, "1"), _broker_position(new, "8")])
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [transfer]
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", str(uuid4()), "2026-08-21", "USD")
+    snapshots = {row.instrument_id: row for row in repository.snapshot_requests.requests}
+    assert snapshots[str(old)].provisional is True
+    assert snapshots[str(old)].fx_dependencies == [{"currency": "EUR", "functional_currency": "USD",
+                                                  "date": f"2026-08-{trade_day}", "rate": None}]
+    destination = snapshots[str(new)]
+    assert destination.provisional is False
+    assert destination.fx_dependencies == []
+    assert destination.fx_source == "base_currency"
+    assert Decimal(destination.cost_basis) == 80
+    assert Decimal(destination.unrealized_pnl) == 16
+
+
+def test_transferred_lots_exclude_fx_from_source_lots_closed_before_transfer():
+    from app.db.interfaces import LedgerSecurityMovementRecord
+    old, new = uuid4(), uuid4()
+    trades = [replace(_trade(old, side, quantity, price), currency=currency, report_date_local=date(2026, 8, day),
+                      trade_timestamp_utc=datetime(2026, 8, day, 12, tzinfo=timezone.utc))
+              for day, side, quantity, price, currency in [(17, "BUY", "1", "10", "EUR"),
+                                                          (18, "SELL", "1", "20", "USD"),
+                                                          (19, "BUY", "8", "10", "USD")]]
+    transfer = LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=old,
+        destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="8",
+        cost_basis=None, currency="USD",
+    )
+    repository = _RepositoryStub(trades=trades, valuations=[_broker_position(new, "8")])
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [transfer]
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", str(uuid4()), "2026-08-20", "USD")
+    snapshots = {row.instrument_id: row for row in repository.snapshot_requests.requests}
+    assert snapshots[str(old)].provisional is True
+    assert snapshots[str(new)].provisional is False
+    assert snapshots[str(new)].fx_dependencies == []
+    assert Decimal(snapshots[str(new)].cost_basis) == 80
+
+
+@pytest.mark.parametrize("fx_rate", [None, "2"])
+def test_split_rounding_keeps_donor_fx_context_when_surviving_lot_transfers(fx_rate):
+    from app.db.interfaces import LedgerSecurityMovementRecord
+    old, new = uuid4(), uuid4()
+    donor = replace(_trade(old, "BUY", "0.00000001", "100000000"), currency="EUR",
+                    report_date_local=date(2026, 8, 18), trade_timestamp_utc=datetime(2026, 8, 18, 12, tzinfo=timezone.utc))
+    survivor = replace(_trade(old, "BUY", "1", "10"), report_date_local=date(2026, 8, 19),
+                       trade_timestamp_utc=datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+    transfer = LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=old,
+        destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="0.1",
+        cost_basis=None, currency="USD",
+    )
+    rates = [] if fx_rate is None else [LedgerFxRateRecord(
+        report_date_local=date(2026, 8, 18), currency="EUR", functional_currency="USD", fx_rate=fx_rate,
+        fx_source="test", ingestion_run_id=uuid4(), source_raw_record_id=uuid4(),
+    )]
+    repository = _RepositoryStub(
+        trades=[donor, survivor], valuations=[_broker_position(new, "0.1", mark="120")], fx_rates=rates,
+        corporate_actions=[LedgerCorporateActionRecord(old, date(2026, 8, 20), "REVERSESPLIT", "0.1")],
+    )
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [transfer]
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", str(uuid4()), "2026-08-20", "USD")
+    snapshot = next(row for row in repository.snapshot_requests.requests if row.instrument_id == str(new))
+    assert snapshot.fx_dependencies == [{"currency": "EUR", "functional_currency": "USD",
+                                         "date": "2026-08-18", "rate": fx_rate}]
+    assert snapshot.provisional is (fx_rate is None)
+    assert Decimal(snapshot.cost_basis) == (10 if fx_rate is None else 12)

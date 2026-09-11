@@ -167,3 +167,45 @@ def test_multiple_distribution_lots_survive_persisted_round_trip_without_identit
     _rebuild(database, '2026-08-21', run_id)
     with database.connect() as connection:
         assert connection.scalar(text('SELECT count(*) FROM position_lot')) == 6
+
+
+def test_equivalent_distribution_import_preserves_fifo_when_raw_uuid_order_reverses(database):
+    import re
+    with database.begin() as connection:
+        connection.execute(text('CREATE SEQUENCE fixture_raw_identity'))
+        connection.execute(text("ALTER TABLE raw_record ALTER COLUMN raw_record_id SET DEFAULT "
+                                "lpad(to_hex(nextval('fixture_raw_identity')),32,'0')::uuid"))
+    harness = ingestion_tests._harness(database)
+    payload = _payload('SO').replace(b'actionID="MOVE"', b'actionID="FIRST"')
+    first_leg = re.search(rb'<CorporateAction actionID="FIRST"[^>]*/>', payload).group()
+    second_leg = first_leg.replace(b'actionID="FIRST"', b'actionID="SECOND"').replace(b'transactionID="IN"', b'transactionID="IN2"')
+    payload = payload.replace(b'</CorporateActions>', second_leg + b'</CorporateActions>').replace(
+        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260823">',
+    ).replace(b'reportDate="20260821" position="5"', b'reportDate="20260823" position="9"').replace(
+        b'</Trades>', b'<Trade transactionID="SALE" ibExecID="SALE" conid="900002" symbol="NEXT" '
+        b'assetCategory="STK" buySell="SELL" quantity="1" tradePrice="30" currency="USD" '
+        b'reportDate="20260822" dateTime="20260822;130000" /></Trades>',
+    )
+    harness[1].payload_bytes = payload
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.connect() as connection:
+        events = dict(connection.execute(text('SELECT action_id,event_corp_action_id FROM event_corp_action')).all())
+        run_id = connection.scalar(text('SELECT ingestion_run_id FROM ingestion_run LIMIT 1'))
+    for action, event in events.items():
+        _resolve(database, {'FIRST': '50', 'SECOND': '100'}[action], event)
+    _rebuild(database, '2026-08-23', run_id)
+    economics = text("SELECT p.position_qty,p.cost_basis,p.realized_pnl FROM pnl_snapshot_daily p "
+                     "JOIN instrument i USING(instrument_id) WHERE i.symbol='NEXT' AND p.report_date_local='2026-08-23'")
+    with database.begin() as connection:
+        before = connection.execute(economics).one()
+        original_sources = dict(connection.execute(text('SELECT action_id,source_raw_record_id FROM event_corp_action')).all())
+        connection.execute(text("ALTER TABLE raw_record ALTER COLUMN raw_record_id SET DEFAULT "
+                                "lpad(to_hex(1000000-nextval('fixture_raw_identity')),32,'0')::uuid"))
+    harness[1].payload_bytes = payload.replace(b'<CorporateActions>', b'<CorporateActions>\n')
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.connect() as connection:
+        replay_sources = dict(connection.execute(text('SELECT action_id,source_raw_record_id FROM event_corp_action')).all())
+        assert original_sources != replay_sources
+        assert sorted(original_sources, key=original_sources.get) != sorted(replay_sources, key=replay_sources.get)
+        assert connection.execute(economics).one() == before
+        assert connection.scalar(text('SELECT count(*) FROM corporate_action_resolution WHERE active')) == 2

@@ -603,7 +603,8 @@ The review queue counts only available decisions. Paired identifier changes show
 broker legs and offer **Preview transfer**. Equal outgoing/incoming quantities must match
 the full long holding; the transfer carries surviving FIFO basis and acquisition dates,
 leaves earlier realized gains with the source, and supports later sales under the new
-security. Same-day chains follow their holding dependencies; cyclic or competing
+security. Stock history includes the original purchases referenced by transferred lots.
+Same-day chains follow their holding dependencies; cyclic or competing
 transfers require accounting support. A single credited distribution offers **Enter distribution basis**, followed
 by preview and apply. Blank basis is never zero. This treatment records an independent
 received security; allocating basis out of the parent still requires accounting support.

@@ -126,6 +126,7 @@ class FifoOpenLotResult:
         open_event_corp_action_id: Distribution or transfer that introduced this instrument's lot.
         opening_transaction_id: Original broker fill identity for tied acquisition times.
         transfer_event_corp_action_id: Latest transfer, distinguishing return visits to an instrument.
+        basis_source_raw_record_ids: Acquisition sources contributing basis, including split-rounding donors.
     """
 
     open_event_trade_fill_id: str | None
@@ -142,6 +143,7 @@ class FifoOpenLotResult:
     open_event_corp_action_id: str | None = None
     opening_transaction_id: str | None = None
     transfer_event_corp_action_id: str | None = None
+    basis_source_raw_record_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -162,6 +164,7 @@ class _OpenFifoLot:
     open_event_corp_action_id: str | None = None
     opening_transaction_id: str | None = None
     transfer_event_corp_action_id: str | None = None
+    basis_source_raw_record_ids: tuple[str, ...] = ()
 
 
 def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedgerComputationResult:
@@ -232,6 +235,7 @@ def _fifo_compute_instrument(
             open_event_corp_action_id=lot.open_event_corp_action_id,
             opening_transaction_id=lot.opening_transaction_id,
             transfer_event_corp_action_id=lot.transfer_event_corp_action_id,
+            basis_source_raw_record_ids=lot.basis_source_raw_record_ids,
         ) for lot in (initial.open_lots if initial else ())
     ]
     realized_pnl = initial.realized_pnl if initial else Decimal("0")
@@ -311,6 +315,7 @@ def _fifo_compute_instrument(
                     unit_execution_price=trade.price,
                     realized_pnl_to_date=Decimal("0"),
                     opening_transaction_id=trade.transaction_id,
+                    basis_source_raw_record_ids=(trade.source_raw_record_id,),
                 )
             )
 
@@ -345,6 +350,7 @@ def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None, closed_
         open_event_corp_action_id=lot.open_event_corp_action_id,
         opening_transaction_id=lot.opening_transaction_id,
         transfer_event_corp_action_id=lot.transfer_event_corp_action_id,
+        basis_source_raw_record_ids=lot.basis_source_raw_record_ids,
         source_raw_record_id=lot.source_raw_record_id,
         opened_at_utc=lot.opened_at_utc,
         open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
@@ -448,6 +454,7 @@ def _fifo_apply_security_movement(
         incoming = (FifoOpenLotResult(
             open_event_trade_fill_id=None, open_event_corp_action_id=movement.event_corp_action_id,
             source_raw_record_id=movement.source_raw_record_id,
+            basis_source_raw_record_ids=(movement.source_raw_record_id,),
             opened_at_utc=snapshot_report_date_start_utc(movement.report_date_local).isoformat(),
             open_quantity=movement.quantity, remaining_quantity=movement.quantity,
             open_price=basis / movement.quantity, cost_basis_open=basis, cost_basis_remaining=basis,
@@ -478,7 +485,9 @@ def _fifo_apply_security_movement(
             (Decimal(lot.opening_transaction_id)
              if lot.opening_transaction_id is not None and lot.opening_transaction_id.isascii()
              and lot.opening_transaction_id.isdigit() else Decimal("-1")),
-            lot.opening_transaction_id or "", lot.source_raw_record_id,
+            lot.opening_transaction_id or "",
+            # Distribution provenance changes on replay; its action identity does not.
+            (lot.open_event_corp_action_id if lot.open_event_trade_fill_id is None else None) or lot.source_raw_record_id,
             lot.open_event_trade_fill_id or "", lot.open_event_corp_action_id or "",
         ))),
     )
@@ -509,6 +518,9 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) 
         if quantity > 0:
             recipient = lot
         else:
+            recipient.basis_source_raw_record_ids = tuple(sorted(set(
+                recipient.basis_source_raw_record_ids + lot.basis_source_raw_record_ids,
+            )))
             recipient.cost_basis_open += lot.unit_basis * lot.remaining_quantity * (1 if lot.direction == "long" else -1)
             recipient.unit_basis += lot.unit_basis * lot.remaining_quantity / recipient.remaining_quantity
             execution_value = lot.unit_execution_price * lot.remaining_quantity

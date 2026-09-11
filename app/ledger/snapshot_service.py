@@ -23,7 +23,7 @@ from app.db import (
 from .snapshot_dates import snapshot_report_date_start_utc
 from .fifo_engine import (
     FifoLedgerComputationRequest, FifoOpenLotResult, FifoSecurityMovementInput,
-    FifoSplitInput, FifoTradeFillInput, fifo_compute_portfolio, fifo_order_security_movements,
+    FifoSplitInput, FifoTradeFillInput, fifo_compute_portfolio,
 )
 
 
@@ -254,6 +254,7 @@ class StockLedgerSnapshotService:
 
         fifo_requests: list[FifoLedgerComputationRequest] = []
         trade_context: dict[str, tuple[list[FifoTradeFillInput], set[str], dict[tuple[str, str, date], str | None], bool]] = {}
+        origin_fx_context: dict[str, tuple[set[str], dict[tuple[str, str, date], str | None], bool]] = {}
         for instrument_id in sorted(instrument_keys):
             instrument_trades = trades_by_instrument.get(instrument_id, [])
             converted_trades: list[FifoTradeFillInput] = []
@@ -263,6 +264,9 @@ class StockLedgerSnapshotService:
             fx_dependencies: dict[tuple[str, str, date], str | None] = {}
             missing_fx = False
             for trade in instrument_trades:
+                input_fx_sources: set[str] = set()
+                input_fx_dependencies: dict[tuple[str, str, date], str | None] = {}
+                input_missing_fx = False
                 contract_multiplier = self._trade_contract_multiplier(trade)
                 trade_fx_rate, trade_fx_source = self._resolve_fx_rate(
                     currency=trade.currency,
@@ -270,11 +274,11 @@ class StockLedgerSnapshotService:
                     report_date_local=trade.report_date_local,
                     fx_rate_rows=fx_rate_rows,
                     trade=trade,
-                    fx_dependencies=fx_dependencies,
+                    fx_dependencies=input_fx_dependencies,
                 )
-                fx_sources.add(trade_fx_source)
+                input_fx_sources.add(trade_fx_source)
                 if trade_fx_rate is None:
-                    missing_fx = True
+                    input_missing_fx = True
                     trade_fx_rate = Decimal("0")
                 commission = abs(Decimal(trade.commission or "0"))
                 commission_fx_rate = trade_fx_rate
@@ -285,14 +289,18 @@ class StockLedgerSnapshotService:
                         functional_currency=normalized_functional_currency,
                         report_date_local=trade.report_date_local,
                         fx_rate_rows=fx_rate_rows,
-                        fx_dependencies=fx_dependencies,
+                        fx_dependencies=input_fx_dependencies,
                     )
-                    fx_sources.add(commission_fx_source)
+                    input_fx_sources.add(commission_fx_source)
                     if resolved_commission_fx_rate is None:
-                        missing_fx = True
+                        input_missing_fx = True
                         commission_fx_rate = Decimal("0")
                     else:
                         commission_fx_rate = resolved_commission_fx_rate
+                origin_fx_context[str(trade.source_raw_record_id)] = input_fx_sources, input_fx_dependencies, input_missing_fx
+                fx_sources.update(input_fx_sources)
+                fx_dependencies.update(input_fx_dependencies)
+                missing_fx |= input_missing_fx
                 quantity = Decimal(trade.quantity)
                 price = Decimal(trade.price) * contract_multiplier * trade_fx_rate
                 converted_trades.append(
@@ -326,30 +334,23 @@ class StockLedgerSnapshotService:
             cost_basis=Decimal(movement.cost_basis) if movement.cost_basis is not None else None,
         ) for movement in movement_rows]
         movement_currencies = {str(movement.event_corp_action_id): movement.currency for movement in movement_rows}
-        ordered_movements = (
-            movement for day in sorted({row.report_date_local for row in movement_inputs})
-            for movement in fifo_order_security_movements([row for row in movement_inputs if row.report_date_local == day])
-        )
         movements: list[FifoSecurityMovementInput] = []
-        for movement in ordered_movements:
-            destination_id = movement.destination_instrument_id
-            converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[destination_id]
+        for movement in movement_inputs:
+            input_fx_sources = set()
+            input_fx_dependencies = {}
+            input_missing_fx = False
             basis = movement.cost_basis
             if movement.source_instrument_id is None and basis is not None and basis != 0:
                 movement_fx, movement_fx_source = self._resolve_fx_rate(
                     currency=movement_currencies[movement.event_corp_action_id], functional_currency=normalized_functional_currency,
                     report_date_local=movement.report_date_local, fx_rate_rows=fx_rate_rows,
-                    fx_dependencies=fx_dependencies,
+                    fx_dependencies=input_fx_dependencies,
                 )
-                fx_sources.add(movement_fx_source)
-                missing_fx |= movement_fx is None
+                input_fx_sources.add(movement_fx_source)
+                input_missing_fx = movement_fx is None
                 basis *= movement_fx or Decimal("0")
-            if movement.source_instrument_id is not None:
-                _, source_fx, source_dependencies, source_missing = trade_context[movement.source_instrument_id]
-                fx_sources.update(source_fx)
-                fx_dependencies.update(source_dependencies)
-                missing_fx |= source_missing
-            trade_context[destination_id] = converted_trades, fx_sources, fx_dependencies, missing_fx
+            if movement.source_instrument_id is None:
+                origin_fx_context[movement.source_raw_record_id] = input_fx_sources, input_fx_dependencies, input_missing_fx
             movements.append(replace(movement, cost_basis=basis))
         fifo_results = fifo_compute_portfolio(fifo_requests, tuple(movements))
 
@@ -361,6 +362,12 @@ class StockLedgerSnapshotService:
             broker_eligible = instrument_asset_categories[instrument_id].strip().upper() not in {"CASH", "FX"}
             converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[instrument_id]
             fifo_result = fifo_results[instrument_id]
+            for lot in (*fifo_result.open_lots, *fifo_result.closed_lots):
+                for source_id in lot.basis_source_raw_record_ids:
+                    origin_sources, origin_dependencies, origin_missing = origin_fx_context[source_id]
+                    fx_sources.update(origin_sources)
+                    fx_dependencies.update(origin_dependencies)
+                    missing_fx |= origin_missing
             fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
 
             cashflow_amount_total = Decimal("0")
