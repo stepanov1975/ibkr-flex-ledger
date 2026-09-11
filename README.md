@@ -241,6 +241,10 @@ Optional Flex retry strategy tuning settings:
 Both report requests and statement polling use bounded retries with exponential
 backoff, jitter, and IBKR code-specific retry floors for `1009`, `1018`, and `1019`.
 Each phase uses the configured attempt limit independently; fatal errors fail immediately.
+Each HTTP operation has at most three transport attempts for transient connection/read
+failures and HTTP 429/502/503/504. Retry-After seconds or dates are honored within the
+configured maximum wait; excessive delays fail explicitly. Poll retries reuse the same
+statement reference. Credentials are redacted from adapter errors.
 
 If required settings are missing or invalid, startup fails with actionable validation output.
 
@@ -299,50 +303,39 @@ Operational note for live IBKR runs:
 - If ingestion fails with `MISSING_REQUIRED_SECTION`, update the IBKR Flex query configuration to include the missing sections, then re-run ingestion.
 - During assisted troubleshooting, the operator should be asked to add missing sections in IBKR query settings before retrying.
 
-### Recovering a stale `started` ingestion run
+### Import validation and interrupted-run recovery
 
-Use this manual procedure only after an abrupt process death. There is no
-automatic timeout or lease that marks an ingestion run failed.
+Live reports must contain one FlexStatement for one broker account and an
+AccountInformation section with USD base currency. Include accountId in the header
+or AccountInformation. All row account IDs must agree, and subsequent imports must
+match successful broker-account history. The configured internal account label may differ.
 
-1. Confirm that no app, CLI ingestion command, scheduler, or other worker is
-   still executing the affected account/run. Stop the worker first if there is
-   any uncertainty.
-2. Back up PostgreSQL before changing run state:
+Downloaded bytes are retained even when XML, required-section, or account validation
+fails. Canonical events, lots, snapshots, artifact completion and successful run status
+publish in one transaction. A failed publication leaves the previous ledger intact.
 
-   ```bash
-   docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > stock_app_before_stale_run.dump
-   ```
+Ingestion and replay check execution identity and financial fields before publication. A changed
+execution/transaction identity, instrument, side, quantity, timestamp, currency, price,
+commission, fees or net cash fails with `TRADE_CONSISTENCY_CONFLICT`; retained raw IDs
+and conflicting fields identify the evidence. Optional IDs learned from successful raw
+reports remain part of later consistency checks without rewriting the canonical origin.
+No automatic merging or correction occurs.
+Report-derived close prices, FIFO/tax figures, descriptions and base FX values may refresh.
+Explicit placeholder execution IDs (`-`, `--`, `N/A`) are rejected; genuinely blank
+execution IDs retain the existing BookTrade fallback.
 
-3. Inspect and copy the exact `ingestion_run_id`; confirm that its current
-   status is still `started`:
+Ingestion and replay hold the account's PostgreSQL session lock through the entire run,
+sharing that session with publication. Once an interrupted worker loses ownership, the
+next trigger records its unfinished run as `INGESTION_RUN_INTERRUPTED` and proceeds.
+A live lock owner is never displaced based on elapsed time. Manual split corrections
+use the same lock. A committed success remains successful if its acknowledgement is lost.
 
-   ```sql
-   SELECT ingestion_run_id, account_id, started_at_utc, status
-   FROM ingestion_run
-   WHERE ingestion_run_id = '<exact-run-uuid>'::uuid;
-   ```
-
-4. Mark only that exact run failed in one transaction:
-
-   ```sql
-   BEGIN;
-   UPDATE ingestion_run
-   SET status = 'failed',
-       ended_at_utc = now(),
-       duration_ms = GREATEST(
-           0,
-           CAST(EXTRACT(EPOCH FROM (now() - started_at_utc)) * 1000 AS BIGINT)
-       ),
-       error_code = 'INGESTION_OPERATOR_RECOVERY',
-       error_message = 'Marked failed after confirmed abrupt process termination'
-   WHERE ingestion_run_id = '<exact-run-uuid>'::uuid
-     AND status = 'started'
-   RETURNING ingestion_run_id, account_id, status, ended_at_utc;
-   COMMIT;
-   ```
-
-Do not bulk-update `started` runs, and do not infer staleness from elapsed time
-alone.
+All imports publish atomically, so failed runs do not disable duplicate-report skipping.
+The application requires the current repository guard and transaction interfaces.
+Restart ingestion/replay workers together when deploying this behavior. Migrations
+`20260911_16` and `20260911_17` add a separate source for refreshed trade metadata and
+store broker account identity without repeatedly loading historical report bytes.
+Existing trade origins and raw payloads remain unchanged.
 
 API endpoints:
 
@@ -503,11 +496,11 @@ chronologically, and rebuilds canonical events and snapshots without requesting 
 IBKR Flex statement. Replayed events use their latest successful application across
 the account's periods and queries, while broker valuation retains the selected artifact.
 This rebuilds corrected history without rolling canonical values back to an older
-report. Failed imports cannot supersede successful source versions. Trade corrections
-update both base cash and the execution FX rate alongside local cash and commission.
+report. Failed imports cannot supersede successful source versions. Replay validates
+original and current execution values before restoring source provenance; conflicting
+values fail the replay. Derived base cash and FX rates can refresh.
 Missing trades retain immutable fields from the earliest recorded successful application
-and overlay supported corrections from the latest one. Deleted origins from failed
-writes cannot be reconstructed without additional history.
+and retain validated report-derived values from the latest one.
 Valid split approvals remain in place during replay; equivalent corporate-action
 copies retain their existing source links without making later snapshots stale.
 The ordinary HTTP endpoint, including explicit HTTP scopes, never

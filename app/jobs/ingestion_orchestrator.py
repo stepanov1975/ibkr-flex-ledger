@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -34,8 +35,9 @@ from app.domain import domain_build_stage_event
 from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService, snapshot_resolve_report_date_local
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
-from .raw_extraction import job_raw_extract_payload_rows
+from .raw_extraction import RawPayloadExtractionResult, job_raw_extract_payload_rows
 from .canonical_pipeline import job_canonical_map_and_persist
+from .report_context import job_validate_report_context
 from .incremental_scope import job_build_incremental_snapshot_scope
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
@@ -155,6 +157,11 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         if normalized_job_name != self._INGESTION_JOB_NAME:
             raise ValueError(f"unsupported job_name={normalized_job_name}")
 
+        with self._ingestion_repository.db_ingestion_run_guard(self._config.account_id):
+            return self._job_execute_guarded(normalized_job_name)
+
+    def _job_execute_guarded(self, normalized_job_name: str) -> JobExecutionResult:
+        """Execute while the database guard owns this account's run."""
         period_key = snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat())
         timeline: list[dict[str, object]] = []
         timeline.append(domain_build_stage_event(stage="run", status="started"))
@@ -170,6 +177,45 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         try:
             adapter_result = self._flex_adapter.adapter_fetch_report(query_id=self._config.flex_query_id)
             timeline.extend(adapter_result.stage_timeline)
+
+            timeline.append(domain_build_stage_event(stage="xml_extraction", status="started"))
+            extraction_started_ns = perf_counter_ns()
+            extraction_error: ValueError | None = None
+            try:
+                extraction_result = job_raw_extract_payload_rows(payload_bytes=adapter_result.payload_bytes)
+            except ValueError as error:
+                extraction_error = error
+                extraction_result = RawPayloadExtractionResult(report_date_local=None, rows=[])
+            xml_extraction_duration_ms = _duration_ms(extraction_started_ns)
+            timeline.append(
+                domain_build_stage_event(
+                    stage="xml_extraction",
+                    status="completed",
+                    details={"xml_extraction_duration_ms": xml_extraction_duration_ms},
+                )
+            )
+
+            payload_sha256 = hashlib.sha256(adapter_result.payload_bytes).hexdigest()
+            timeline.append(domain_build_stage_event(stage="persist", status="started"))
+            artifact_request = RawArtifactPersistRequest(
+                ingestion_run_id=run_record.ingestion_run_id,
+                reference=RawArtifactReference(
+                    account_id=self._config.account_id,
+                    period_key=period_key,
+                    flex_query_id=self._config.flex_query_id,
+                    payload_sha256=payload_sha256,
+                    report_date_local=extraction_result.report_date_local,
+                ),
+                source_payload=adapter_result.payload_bytes,
+            )
+            artifact_persistence_started_ns = perf_counter_ns()
+            artifact_result = self._raw_persistence_repository.db_raw_artifact_upsert(
+                request=artifact_request,
+            )
+            artifact_persistence_duration_ms = _duration_ms(artifact_persistence_started_ns)
+
+            if extraction_error is not None:
+                raise extraction_error
 
             timeline.append(domain_build_stage_event(stage="preflight", status="started"))
             preflight_started_ns = perf_counter_ns()
@@ -199,44 +245,17 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 )
             )
 
-            timeline.append(domain_build_stage_event(stage="xml_extraction", status="started"))
-            extraction_started_ns = perf_counter_ns()
-            extraction_result = job_raw_extract_payload_rows(payload_bytes=adapter_result.payload_bytes)
-            xml_extraction_duration_ms = _duration_ms(extraction_started_ns)
-            timeline.append(
-                domain_build_stage_event(
-                    stage="xml_extraction",
-                    status="completed",
-                    details={"xml_extraction_duration_ms": xml_extraction_duration_ms},
-                )
+            broker_account_id = job_validate_report_context(
+                adapter_result.payload_bytes,
+                self._raw_persistence_repository.db_raw_successful_broker_account_ids(self._config.account_id),
             )
+            timeline.append(domain_build_stage_event(
+                stage="report_context", status="completed", details={"broker_account_id": broker_account_id},
+            ))
 
-            payload_sha256 = hashlib.sha256(adapter_result.payload_bytes).hexdigest()
-            timeline.append(domain_build_stage_event(stage="persist", status="started"))
-            artifact_request = RawArtifactPersistRequest(
-                ingestion_run_id=run_record.ingestion_run_id,
-                reference=RawArtifactReference(
-                    account_id=self._config.account_id,
-                    period_key=period_key,
-                    flex_query_id=self._config.flex_query_id,
-                    payload_sha256=payload_sha256,
-                    report_date_local=extraction_result.report_date_local,
-                ),
-                source_payload=adapter_result.payload_bytes,
-            )
-            artifact_persistence_started_ns = perf_counter_ns()
-            artifact_result = self._raw_persistence_repository.db_raw_artifact_upsert(
-                request=artifact_request,
-            )
-            artifact_persistence_duration_ms = _duration_ms(artifact_persistence_started_ns)
-
-            skip_is_safe = (
-                self._canonical_repository is None
-                or self._canonical_repository.db_canonical_skip_is_safe(self._config.account_id)
-            )
             completed_duplicate = False
             completed_ingestion_run_id = artifact_result.artifact.completed_ingestion_run_id
-            if skip_is_safe and artifact_result.deduplicated and completed_ingestion_run_id is not None:
+            if artifact_result.deduplicated and completed_ingestion_run_id is not None:
                 completed_ingestion_run = self._ingestion_repository.db_ingestion_run_get_by_id(
                     completed_ingestion_run_id
                 )
@@ -288,106 +307,110 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 domain_build_stage_event(stage="persist", status="completed", details=persist_details)
             )
 
-            canonical_raw_rows: list[RawRecordForCanonicalMapping] | None = None
-            if self._canonical_repository is not None:
-                timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
-                canonical_counts = {
-                    "instrument_upsert_count": 0,
-                    "trade_fill_count": 0,
-                    "cashflow_count": 0,
-                    "fx_count": 0,
-                    "corp_action_count": 0,
-                }
-                if duplicate_skip_reason is not None:
-                    canonical_raw_rows = []
-                    canonical_raw_read_duration_ms = 0
-                    canonical_duration_ms = 0
-                    canonical_skip_reason = duplicate_skip_reason
-                else:
-                    canonical_raw_read_started_ns = perf_counter_ns()
-                    if recover_artifact_rows or not skip_is_safe:
-                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_artifact(
-                            raw_artifact_id=artifact_result.artifact.raw_artifact_id,
-                        )
-                        artifact_row_run_ids = {
-                            raw_row.ingestion_run_id for raw_row in canonical_raw_rows
-                        }
-                        if len(artifact_row_run_ids) > 1:
-                            raise RuntimeError(
-                                "raw artifact rows reference multiple ingestion runs"
-                            )
-                        if artifact_row_run_ids:
-                            semantic_run_id = next(iter(artifact_row_run_ids))
-                    else:
-                        canonical_raw_rows = self._canonical_repository.db_raw_record_list_changed_for_run(
-                            ingestion_run_id=run_record.ingestion_run_id,
-                        )
-                    canonical_raw_read_duration_ms = _duration_ms(canonical_raw_read_started_ns)
-                    if len(canonical_raw_rows) == 0:
+            transaction = (
+                self._canonical_repository.db_canonical_transaction()
+                if self._canonical_repository is not None else nullcontext()
+            )
+            with transaction:
+                canonical_raw_rows: list[RawRecordForCanonicalMapping] | None = None
+                if self._canonical_repository is not None:
+                    timeline.append(domain_build_stage_event(stage="canonical_mapping", status="started"))
+                    canonical_counts = {
+                        "instrument_upsert_count": 0,
+                        "trade_fill_count": 0,
+                        "cashflow_count": 0,
+                        "fx_count": 0,
+                        "corp_action_count": 0,
+                    }
+                    if duplicate_skip_reason is not None:
+                        canonical_raw_rows = []
+                        canonical_raw_read_duration_ms = 0
                         canonical_duration_ms = 0
-                        canonical_skip_reason = "no_new_raw_rows_for_run"
+                        canonical_skip_reason = duplicate_skip_reason
                     else:
-                        canonical_started_ns = perf_counter_ns()
-                        canonical_counts = job_canonical_map_and_persist(
-                            account_id=self._config.account_id,
-                            functional_currency=self._config.functional_currency,
-                            raw_records=canonical_raw_rows,
-                            canonical_persistence_repository=self._canonical_repository,
+                        canonical_raw_read_started_ns = perf_counter_ns()
+                        if recover_artifact_rows:
+                            canonical_raw_rows = self._canonical_repository.db_raw_record_list_for_artifact(
+                                raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                            )
+                            artifact_row_run_ids = {
+                                raw_row.ingestion_run_id for raw_row in canonical_raw_rows
+                            }
+                            if len(artifact_row_run_ids) > 1:
+                                raise RuntimeError(
+                                    "raw artifact rows reference multiple ingestion runs"
+                                )
+                            if artifact_row_run_ids:
+                                semantic_run_id = next(iter(artifact_row_run_ids))
+                        else:
+                            canonical_raw_rows = self._canonical_repository.db_raw_record_list_changed_for_run(
+                                ingestion_run_id=run_record.ingestion_run_id,
+                            )
+                        canonical_raw_read_duration_ms = _duration_ms(canonical_raw_read_started_ns)
+                        if len(canonical_raw_rows) == 0:
+                            canonical_duration_ms = 0
+                            canonical_skip_reason = "no_new_raw_rows_for_run"
+                        else:
+                            canonical_started_ns = perf_counter_ns()
+                            canonical_counts = job_canonical_map_and_persist(
+                                account_id=self._config.account_id,
+                                functional_currency=self._config.functional_currency,
+                                raw_records=canonical_raw_rows,
+                                canonical_persistence_repository=self._canonical_repository,
+                            )
+                            canonical_duration_ms = _duration_ms(canonical_started_ns)
+                            canonical_skip_reason = None
+                    canonical_details: dict[str, object] = {
+                        **canonical_counts,
+                        "canonical_input_row_count": len(canonical_raw_rows),
+                        "canonical_raw_read_duration_ms": canonical_raw_read_duration_ms,
+                        "canonical_duration_ms": canonical_duration_ms,
+                    }
+                    if canonical_skip_reason is not None:
+                        canonical_details["canonical_skip_reason"] = canonical_skip_reason
+                    timeline.append(
+                        domain_build_stage_event(
+                            stage="canonical_mapping",
+                            status="completed",
+                            details=canonical_details,
                         )
-                        canonical_duration_ms = _duration_ms(canonical_started_ns)
-                        canonical_skip_reason = None
-                canonical_details: dict[str, object] = {
-                    **canonical_counts,
-                    "canonical_input_row_count": len(canonical_raw_rows),
-                    "canonical_raw_read_duration_ms": canonical_raw_read_duration_ms,
-                    "canonical_duration_ms": canonical_duration_ms,
-                }
-                if canonical_skip_reason is not None:
-                    canonical_details["canonical_skip_reason"] = canonical_skip_reason
-                timeline.append(
-                    domain_build_stage_event(
-                        stage="canonical_mapping",
-                        status="completed",
-                        details=canonical_details,
                     )
+
+                if duplicate_skip_reason is None and self._canonical_repository is not None and self._snapshot_service is not None:
+                    self._canonical_repository.db_canonical_mark_valuation_pending(
+                        account_id=self._config.account_id, ingestion_run_id=str(semantic_run_id),
+                    )
+                self._job_append_snapshot_stage_timeline(
+                    run_record_id=str(semantic_run_id),
+                    report_date_local=(
+                        extraction_result.report_date_local.isoformat()
+                        if extraction_result.report_date_local is not None
+                        else period_key
+                    ),
+                    canonical_raw_rows=canonical_raw_rows,
+                    duplicate_skip_reason=duplicate_skip_reason,
+                    timeline=timeline,
                 )
 
-            if duplicate_skip_reason is None and self._canonical_repository is not None and self._snapshot_service is not None:
-                self._canonical_repository.db_canonical_mark_valuation_pending(
-                    account_id=self._config.account_id, ingestion_run_id=str(semantic_run_id),
-                )
-            self._job_append_snapshot_stage_timeline(
-                run_record_id=str(semantic_run_id),
-                report_date_local=(
-                    extraction_result.report_date_local.isoformat()
-                    if extraction_result.report_date_local is not None
-                    else period_key
-                ),
-                canonical_raw_rows=canonical_raw_rows,
-                duplicate_skip_reason=duplicate_skip_reason,
-                timeline=timeline,
-                force_full_rebuild=not skip_is_safe,
-            )
+                if (
+                    duplicate_skip_reason is None
+                    and self._canonical_repository is not None
+                    and self._snapshot_service is not None
+                ):
+                    self._raw_persistence_repository.db_raw_artifact_mark_completed(
+                        raw_artifact_id=artifact_result.artifact.raw_artifact_id,
+                        completed_ingestion_run_id=run_record.ingestion_run_id,
+                    )
 
-            if (
-                duplicate_skip_reason is None
-                and self._canonical_repository is not None
-                and self._snapshot_service is not None
-            ):
-                self._raw_persistence_repository.db_raw_artifact_mark_completed(
-                    raw_artifact_id=artifact_result.artifact.raw_artifact_id,
-                    completed_ingestion_run_id=run_record.ingestion_run_id,
+                timeline.append(domain_build_stage_event(stage="run", status="success"))
+                self._ingestion_repository.db_ingestion_run_finalize(
+                    ingestion_run_id=run_record.ingestion_run_id,
+                    status="success",
+                    error_code=None,
+                    error_message=None,
+                    diagnostics=timeline,
                 )
-
-            timeline.append(domain_build_stage_event(stage="run", status="success"))
-            self._ingestion_repository.db_ingestion_run_finalize(
-                ingestion_run_id=run_record.ingestion_run_id,
-                status="success",
-                error_code=None,
-                error_message=None,
-                diagnostics=timeline,
-            )
-            return JobExecutionResult(job_name=normalized_job_name, status="success")
+                return JobExecutionResult(job_name=normalized_job_name, status="success")
         except Exception as error:
             error_code = self._job_error_code_for_exception(error)
             error_stage_timeline = getattr(error, "stage_timeline", [])
@@ -405,14 +428,14 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     },
                 )
             )
-            self._ingestion_repository.db_ingestion_run_finalize(
+            finalized = self._ingestion_repository.db_ingestion_run_finalize(
                 ingestion_run_id=run_record.ingestion_run_id,
                 status="failed",
                 error_code=error_code,
                 error_message=str(error),
                 diagnostics=timeline,
             )
-            return JobExecutionResult(job_name=normalized_job_name, status="failed")
+            return JobExecutionResult(job_name=normalized_job_name, status=finalized.state.status)
 
     def _job_handle_preflight_failure(
         self,
@@ -491,6 +514,11 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             return "INGESTION_TIMEOUT_ERROR"
         if isinstance(error, ConnectionError):
             return "INGESTION_CONNECTION_ERROR"
+        code = getattr(error, "code", None)
+        if isinstance(error, ValueError) and code in {
+            "TRADE_CONSISTENCY_CONFLICT", "REPORT_CONTEXT_INVALID",
+        }:
+            return str(code)
         if isinstance(error, ValueError):
             return "INGESTION_CONTRACT_ERROR"
         return "INGESTION_UNEXPECTED_ERROR"
@@ -502,7 +530,6 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         canonical_raw_rows: list[RawRecordForCanonicalMapping] | None,
         duplicate_skip_reason: str | None,
         timeline: list[dict[str, object]],
-        force_full_rebuild: bool = False,
     ) -> None:
         """Append snapshot stage timeline events for automatic Task 7 execution.
 
@@ -557,7 +584,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             snapshot_scope_mode = "skipped"
             snapshot_duration_ms = 0
             snapshot_skip_reason = duplicate_skip_reason
-        elif canonical_raw_rows is None or force_full_rebuild or removed_positions:
+        elif canonical_raw_rows is None or removed_positions:
             snapshot_started_ns = perf_counter_ns()
             snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                 account_id=self._config.account_id,
@@ -569,7 +596,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             snapshot_scope_mode = "full_fallback"
             snapshot_full_rebuild_reason = (
                 "removed_broker_positions" if removed_positions else
-                "prior_failed_run" if force_full_rebuild else "canonical_repository_not_configured"
+                "canonical_repository_not_configured"
             )
         else:
             scope = job_build_incremental_snapshot_scope(canonical_raw_rows)

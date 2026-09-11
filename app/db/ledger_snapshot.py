@@ -14,6 +14,8 @@ from sqlalchemy import Connection, Engine, text
 from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
+from .session import db_connection_scope
+
 from app.db.interfaces import (
     LedgerCashflowRecord,
     LedgerCorporateActionRecord,
@@ -130,7 +132,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         """Join an outer correction transaction when supplied."""
         if self._transaction_connection is not None:
             return nullcontext(self._transaction_connection)
-        return self._engine.begin() if write else self._engine.connect()
+        return db_connection_scope(self._engine, write=write)
 
     @contextmanager
     def db_ledger_projection_transaction(self) -> Iterator[LedgerSnapshotRepositoryPort]:
@@ -138,7 +140,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if self._transaction_connection is not None:
             yield self
         else:
-            with self._engine.begin() as connection:
+            with self._connection_scope(write=True) as connection:
                 yield SQLAlchemyLedgerSnapshotService(self._engine, connection=connection)
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
@@ -173,7 +175,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                         "WHERE account_id = :account_id "
                         "AND (conid = ANY(:conids) OR UPPER(BTRIM(currency)) = ANY(:currencies) OR EXISTS ("
                         "SELECT 1 FROM event_trade_fill trade "
-                        "JOIN raw_record raw ON raw.raw_record_id = trade.source_raw_record_id "
+                        "JOIN raw_record raw ON raw.raw_record_id = "
+                        "COALESCE(trade.metadata_source_raw_record_id, trade.source_raw_record_id) "
                         "WHERE trade.account_id = instrument.account_id "
                         "AND trade.instrument_id = instrument.instrument_id "
                         "AND (UPPER(BTRIM(trade.currency)) = ANY(:currencies) OR (COALESCE(trade.commission, 0) <> 0 "
@@ -297,7 +300,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'closePrice'), ',', '')::numeric END AS close_price "
             "FROM event_trade_fill etf "
             "JOIN instrument i ON i.instrument_id = etf.instrument_id AND i.account_id = etf.account_id "
-            "LEFT JOIN raw_record rr ON rr.raw_record_id = etf.source_raw_record_id "
+            "LEFT JOIN raw_record rr ON rr.raw_record_id = "
+            "COALESCE(etf.metadata_source_raw_record_id, etf.source_raw_record_id) "
             "WHERE etf.account_id = :account_id "
             "AND (CAST(:through_report_date_local AS date) IS NULL "
             "OR etf.report_date_local <= CAST(:through_report_date_local AS date)) "

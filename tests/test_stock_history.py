@@ -68,7 +68,7 @@ _PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexStatement repor
 </OpenPositions>
 <CashTransactions><CashTransaction transactionID="9" conid="101" symbol="TEST" assetCategory="STK"
  type="Dividends" amount="5" currency="USD" reportDate="20260821" /></CashTransactions>
-<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>'''
 
 
@@ -79,7 +79,7 @@ _ROUNDING_PAYLOAD = ('''<FlexQueryResponse><FlexStatements count="1"><FlexStatem
  reportDate="20260821" dateTime="20260821;10000{i}" />''' for i in range(1, 4)) + '''</Trades>
 <OpenPositions><OpenPosition conid="101" symbol="ROUND" assetCategory="STK" currency="EUR"
  position="3" markPrice="11" multiplier="1" fxRateToBase="1.123456789" reportDate="20260821" /></OpenPositions>
-<CashTransactions /><CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CashTransactions /><CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>''').encode()
 
 _NO_CASH_PAYLOAD = _PAYLOAD.replace(
@@ -143,7 +143,7 @@ _CASHFLOW_MOVE_PAYLOAD = b'''<FlexQueryResponse><FlexStatements count="1"><FlexS
 </OpenPositions>
 <CashTransactions><CashTransaction transactionID="9" conid="201" symbol="FIRST" assetCategory="STK"
  type="Dividends" amount="5" currency="USD" reportDate="20260821" /></CashTransactions>
-<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation />
+<CorporateActions /><ConversionRates /><SecuritiesInfo /><AccountInformation accountId="U_TEST" currency="USD" />
 </FlexStatement></FlexStatements></FlexQueryResponse>'''
 _DIRECT_NET_CASH_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
     b'tradePrice="10.01"', b'tradePrice="10.01" netCash="-10.01" netCashInBase="-11.25"', 1,
@@ -299,31 +299,36 @@ def test_option_link_resolves_to_the_same_stock_family(history_database):
     assert {row['conid'] for row in report['positions']} == {'101', '102', '103'}
 
 
-def test_failed_snapshot_write_rolls_back_lot_projection(history_database, monkeypatch):
+def test_failed_snapshot_write_rolls_back_canonical_and_lot_projection(history_database, monkeypatch):
     client, _, ids, engine = history_database
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     with engine.connect() as connection:
         old_lots = connection.execute(text('SELECT * FROM position_lot ORDER BY position_lot_id')).all()
     orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
-    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="101"')
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'</Trades>', b'<Trade ibExecID="NEWBUY" transactionID="30" conid="101" symbol="TEST" '
+        b'assetCategory="STK" currency="USD" buySell="BUY" quantity="1" tradePrice="110" '
+        b'reportDate="20260821" dateTime="20260821;150000" /></Trades>',
+    ).replace(b'position="6"', b'position="7"')
+    snapshot_attempted = False
 
     def fail_snapshot(self, requests):
+        nonlocal snapshot_attempted
+        snapshot_attempted = True
         raise RuntimeError('snapshot write fails after lot reconciliation')
 
     with monkeypatch.context() as patch:
         patch.setattr(SQLAlchemyLedgerSnapshotService, 'db_pnl_snapshot_daily_upsert_many', fail_snapshot)
         assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    assert snapshot_attempted is True
     with engine.connect() as connection:
         assert connection.execute(text('SELECT * FROM position_lot ORDER BY position_lot_id')).all() == old_lots
-    report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is True
-    assert {row['conid']: row['realized_pnl'] for row in report['lots']} == {
-        row['conid']: row['realized_pnl'] for row in before['lots']
-    }
+        assert connection.scalar(text("SELECT count(*) FROM event_trade_fill WHERE ib_exec_id='NEWBUY'")) == 0
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert rebuilt['totals'] != before['totals']
+    assert rebuilt['lots'] != before['lots']
     assert rebuilt['stale'] is False
 
 
@@ -411,7 +416,7 @@ def test_option_metadata_survives_successful_retry_of_failed_artifact(history_da
     build = service.ledger_snapshot_build_and_persist
 
     def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after canonical commit')
+        raise RuntimeError('failure after canonical mapping')
 
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
@@ -457,34 +462,30 @@ def test_option_metadata_from_all_instrument_activity(history_database, section,
 
 
 @pytest.mark.parametrize('activity_date', ['20260821', '20260822'], ids=['same-day', 'next-day'])
-def test_activity_after_failed_snapshot_marks_pnl_stale_until_retry(history_database, monkeypatch, activity_date):
+def test_failed_activity_import_preserves_history_until_retry(history_database, monkeypatch, activity_date):
     client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     new_cashflow = (f'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
                     f'type="Dividends" amount="7" currency="USD" reportDate="{activity_date}" />').encode()
     adapter.payload_bytes = _PAYLOAD.replace(b'</CashTransactions>', new_cashflow+b'</CashTransactions>').replace(
         b'<FlexStatement reportDate="20260821">', f'<FlexStatement reportDate="{activity_date}">'.encode(),
     )
-    build = service.ledger_snapshot_build_and_persist
 
     def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after canonical commit')
+        raise RuntimeError('failure after canonical mapping')
 
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert orchestrator.job_execute('ingestion_run').status == 'failed'
-    report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['provisional'] is True
-    assert report['stale'] is True
-    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
-    stock_lot = next(row for row in report['lots'] if row['conid'] == '101')
-    assert stock_lot['provisional'] is True
-    assert stock_lot['unrealized_pnl'] is None
-    assert any(row['event_type'] == 'cashflow' and Decimal(row['amount']) == 7 for row in report['activity'])
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    with monkeypatch.context() as patch:
+        patch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+        assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM event_cashflow WHERE transaction_id='21'")) == 0
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert report['stale'] is False
     assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('488.2')
+    assert any(row['event_type'] == 'cashflow' and Decimal(row['amount']) == 7 for row in report['activity'])
 
 
 def _history_replay(engine, harness):
@@ -503,54 +504,55 @@ def _history_replay(engine, harness):
     ).job_execute('reprocess_run')
 
 
-def test_same_day_trade_correction_after_failed_snapshot_marks_pnl_stale(history_database, monkeypatch):
+def test_same_day_trade_price_conflict_preserves_published_history(history_database):
     client, _, ids, engine = history_database
-    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    harness = _harness(engine, account='HISTORY')
+    orchestrator, adapter, *_ = harness
     adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="200"')
-
-    def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after corrected trade commit')
-
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert orchestrator.job_execute('ingestion_run').status == 'failed'
-    report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 200
-               for row in report['activity'])
-    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('481.2')
-    assert report['stale'] is True
-    assert report['provisional'] is True
-    stock_lot = next(row for row in report['lots'] if row['conid'] == '101')
-    assert stock_lot['unrealized_pnl'] is None
+    result = orchestrator.job_execute('ingestion_run')
+    assert result.status == 'failed'
+    with engine.connect() as connection:
+        failure = connection.execute(text(
+            'SELECT error_code, error_message FROM ingestion_run ORDER BY started_at_utc DESC LIMIT 1'
+        )).one()
+    assert failure.error_code == 'TRADE_CONSISTENCY_CONFLICT'
+    assert 'price' in failure.error_message
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    assert _history_replay(engine, harness).status == 'success'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
 
 
 def test_failed_older_artifact_replay_preserves_latest_values_and_freshness(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
-    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="200"').replace(
-        b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
-    )
+    adapter.payload_bytes = _PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"').replace(
+        b'tradePrice="100"', b'tradePrice="100" description="Latest execution description"',
+    ).replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">')
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert before['stale'] is False
     assert before['provisional'] is False
-    assert Decimal(before['totals'][0]['realized_pnl']) == Decimal('81.2')
+    assert Decimal(before['totals'][0]['unrealized_pnl']) == Decimal('487.8')
 
     def fail_snapshot(**kwargs):
         raise RuntimeError('replay failure after canonical processing')
 
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert _history_replay(engine, harness).status == 'failed'
+    with monkeypatch.context() as patch:
+        patch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+        assert _history_replay(engine, harness).status == 'failed'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    assert _history_replay(engine, harness).status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert any(row['symbol'] == 'TEST' and row['action'] == 'BUY' and Decimal(row['price']) == 200
-               for row in report['activity'])
-    assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('81.2')
+    assert report['totals'] == before['totals']
     assert report['stale'] is False
-    assert report['provisional'] is False
+    assert any(row['description'] == 'Latest execution description' for row in report['activity'])
 
 
-def test_successful_replay_clears_stale_after_new_activity(history_database, monkeypatch):
+def test_successful_replay_excludes_failed_activity_until_import_retry(history_database, monkeypatch):
     client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
     new_cashflow = (b'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
@@ -559,13 +561,15 @@ def test_successful_replay_clears_stale_after_new_activity(history_database, mon
     build = service.ledger_snapshot_build_and_persist
 
     def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after new dividend commit')
+        raise RuntimeError('failure after new dividend mapping')
 
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
-    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is True
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert _history_replay(engine, harness).status == 'success'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert Decimal(report['totals'][0]['realized_pnl']) == Decimal('488.2')
     assert report['stale'] is False
@@ -594,8 +598,9 @@ def test_existing_snapshots_require_rebuild_after_freshness_migration(history_da
 
 
 @pytest.mark.parametrize('metadata_section', ['Trades', 'SecuritiesInfo'])
-def test_failed_snapshot_keeps_committed_adjusted_option_in_stock_family(history_database, monkeypatch, metadata_section):
+def test_adjusted_option_enters_stock_family_only_after_successful_retry(history_database, monkeypatch, metadata_section):
     client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     metadata = b'underlyingConid="101" underlyingSymbol="TEST"'
     trade = (b'<Trade ibExecID="NEWOPT" transactionID="30" conid="106" symbol="ADJUSTED OPTION" '
@@ -607,15 +612,19 @@ def test_failed_snapshot_keeps_committed_adjusted_option_in_stock_family(history
     adapter.payload_bytes = payload
 
     def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after new option canonical commit')
+        raise RuntimeError('failure after new option mapping')
 
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    with monkeypatch.context() as patch:
+        patch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+        assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM instrument WHERE conid='106'")) == 0
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert '106' in {row['conid'] for row in report['positions']}
     assert any(row['symbol'] == 'ADJUSTED OPTION' for row in report['activity'])
-    assert report['provisional'] is True
-    assert report['totals'][0]['realized_pnl'] is None
+    assert report['stale'] is False
 
 
 @pytest.mark.parametrize('selected_index', [0, 1, 2])
@@ -635,7 +644,7 @@ def test_duplicate_stock_symbols_do_not_share_symbol_only_options(selected_index
 @pytest.mark.parametrize('history_database,input_kind', [
     (_NO_CASH_PAYLOAD, 'valuation'), (_COMMISSION_FX_PAYLOAD, 'commission_fx'),
 ], indirect=['history_database'], ids=['valuation', 'commission-fx'])
-def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_database, monkeypatch, input_kind):
+def test_failed_valuation_or_fx_change_preserves_history_until_retry(history_database, monkeypatch, input_kind):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -650,9 +659,7 @@ def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_datab
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is True
-    assert report['provisional'] is True
+    assert report == before
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -662,7 +669,7 @@ def test_failed_valuation_or_fx_change_marks_pnl_stale_until_retry(history_datab
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_database, monkeypatch):
+def test_failed_valuation_retry_after_replay_preserves_published_history(history_database, monkeypatch):
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
@@ -676,17 +683,18 @@ def test_retrying_old_valuation_artifact_after_replay_marks_pnl_stale(history_da
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert _history_replay(engine, harness).status == 'success'
-    assert client.get(f"/reports/stock-history/{ids['101']}").json()['stale'] is False
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert before['stale'] is False
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['stale'] is True
-    assert report['provisional'] is True
+    assert report == before
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_failed_removal_from_nonempty_broker_positions_marks_pnl_stale(history_database, monkeypatch):
+def test_failed_removal_from_broker_positions_preserves_published_history(history_database, monkeypatch):
     client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     stock_position = (b'<OpenPosition conid="101" symbol="TEST" assetCategory="STK" currency="USD"\n'
                       b'  position="6" markPrice="130" multiplier="1" reportDate="20260821" />')
@@ -699,8 +707,7 @@ def test_failed_removal_from_nonempty_broker_positions_marks_pnl_stale(history_d
     monkeypatch.setattr(orchestrator, '_job_append_snapshot_stage_timeline', fail_snapshot_stage)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['stale'] is True
-    assert report['provisional'] is True
+    assert report == before
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
@@ -721,22 +728,29 @@ def test_unchanged_valuations_remain_fresh_after_metadata_only_import(history_da
         b'underlyingConid="101" underlyingSymbol="TEST"', b'',
     ),
 ], indirect=True, ids=['adjusted-option'])
-def test_corrected_option_keeps_new_metadata_after_failed_snapshot(history_database, monkeypatch):
+def test_option_price_conflict_does_not_publish_new_family_metadata(history_database):
     client, _, ids, engine = history_database
-    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    option_before = client.get(f"/reports/stock-history/{ids['102']}").json()
+    assert '102' not in {row['conid'] for row in before['positions']}
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
     adapter.payload_bytes = _PAYLOAD.replace(b'TEST  260918P00100000', b'ADJUSTED OPTION').replace(
         b'tradePrice="3"', b'tradePrice="4"',
     )
-
-    def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after option correction commit')
-
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    result = orchestrator.job_execute('ingestion_run')
+    assert result.status == 'failed'
+    with engine.connect() as connection:
+        assert connection.scalar(text(
+            'SELECT error_code FROM ingestion_run ORDER BY started_at_utc DESC LIMIT 1'
+        )) == 'TRADE_CONSISTENCY_CONFLICT'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    assert client.get(f"/reports/stock-history/{ids['102']}").json() == option_before
+    adapter.payload_bytes = adapter.payload_bytes.replace(b'tradePrice="4"', b'tradePrice="3"', 1)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert '102' in {row['conid'] for row in report['positions']}
-    assert any(row['symbol'] == 'ADJUSTED OPTION' and Decimal(row['price']) == 4 for row in report['activity'])
-    assert report['stale'] is True
+    assert any(row['symbol'] == 'ADJUSTED OPTION' and Decimal(row['price']) == 3 for row in report['activity'])
+    assert report['stale'] is False
 
 
 @pytest.mark.parametrize('selected_index', [0, 1, 2])
@@ -756,11 +770,12 @@ def test_option_only_families_reject_ambiguous_underlying_symbols(selected_index
 @pytest.mark.parametrize('history_database', [
     _NO_CASH_PAYLOAD.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement>'),
 ], indirect=True, ids=['no-statement-date'])
-def test_valuation_freshness_without_statement_date_uses_processing_time(history_database, monkeypatch):
+def test_failed_undated_valuation_preserves_history_until_retry(history_database, monkeypatch):
     client, _, ids, engine = history_database
     report = client.get(f"/reports/stock-history/{ids['101']}")
     assert report.status_code == 200
     assert report.json()['stale'] is False
+    before = report.json()
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement>').replace(
         b'markPrice="130"', b'markPrice="140"',
@@ -769,11 +784,17 @@ def test_valuation_freshness_without_statement_date_uses_processing_time(history
     def fail_snapshot(**kwargs):
         raise RuntimeError('failure after undated valuation attempt')
 
+    build = service.ledger_snapshot_build_and_persist
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}")
     assert report.status_code == 200
-    assert report.json()['stale'] is True
+    assert report.json() == before
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] != before['totals']
+    assert rebuilt['stale'] is False
 
 
 def test_successful_import_rebuilds_removed_broker_position(history_database):
@@ -790,7 +811,7 @@ def test_successful_import_rebuilds_removed_broker_position(history_database):
     assert report['stale'] is False
 
 
-def test_cashflow_description_change_does_not_mark_pnl_stale(history_database, monkeypatch):
+def test_cashflow_description_publishes_only_after_successful_retry(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -799,13 +820,17 @@ def test_cashflow_description_change_does_not_mark_pnl_stale(history_database, m
     def fail_snapshot(**kwargs):
         raise RuntimeError('failure after non-accounting cashflow update')
 
+    build = service.ledger_snapshot_build_and_persist
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert any(row['description'] == 'Corrected description' for row in report['activity'])
-    assert report['totals'] == before['totals']
-    assert report['stale'] is False
-    assert report['provisional'] is False
+    assert report == before
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert any(row['description'] == 'Corrected description' for row in rebuilt['activity'])
+    assert rebuilt['totals'] == before['totals']
+    assert rebuilt['stale'] is False
 
 
 @pytest.mark.parametrize('history_database', [
@@ -823,7 +848,7 @@ def test_successful_import_clears_omitted_holding_without_canonical_activity(his
     assert report['provisional'] is False
 
 
-@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+@pytest.mark.parametrize('history_database,changed_payload,expected_totals_change', [
     pytest.param(
         _SUPERSEDED_FX_PAYLOAD, _SUPERSEDED_FX_PAYLOAD.replace(b'rate="1.2"', b'rate="1.3"'), False,
         id='superseded-rate',
@@ -861,7 +886,7 @@ def test_successful_import_clears_omitted_holding_without_canonical_activity(his
         ), False, id='new-selection-same-effective-rate',
     ),
 ], indirect=['history_database'])
-def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypatch, changed_payload, expected_stale):
+def test_fx_retry_updates_only_consumed_effective_rates(history_database, monkeypatch, changed_payload, expected_totals_change):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -875,23 +900,20 @@ def test_fx_freshness_tracks_consumed_effective_rates(history_database, monkeypa
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     pending = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert pending['totals'] == before['totals']
-    assert pending['stale'] is expected_stale
-    if not expected_stale:
-        assert pending['provisional'] is False
+    assert pending == before
 
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert rebuilt['stale'] is False
     assert rebuilt['provisional'] is False
-    assert (rebuilt['totals'] != before['totals']) is expected_stale
+    assert (rebuilt['totals'] != before['totals']) is expected_totals_change
 
 
 @pytest.mark.parametrize('history_database', [_BASE_CASHFLOW_FX_PAYLOAD], indirect=True, ids=['base-amount'])
-@pytest.mark.parametrize('attribute,expected_stale', [('amount', False), ('amountInBase', True)])
-def test_cashflow_amount_override_only_invalidates_consumed_amount(
-    history_database, monkeypatch, attribute, expected_stale,
+@pytest.mark.parametrize('attribute,expected_totals_change', [('amount', False), ('amountInBase', True)])
+def test_cashflow_amount_retry_updates_only_consumed_amount(
+    history_database, monkeypatch, attribute, expected_totals_change,
 ):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
@@ -909,15 +931,13 @@ def test_cashflow_amount_override_only_invalidates_consumed_amount(
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is expected_stale
-    assert report['provisional'] is expected_stale
+    assert report == before
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert rebuilt['stale'] is False
     assert rebuilt['provisional'] is False
-    assert (rebuilt['totals'] != before['totals']) is expected_stale
+    assert (rebuilt['totals'] != before['totals']) is expected_totals_change
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
@@ -949,11 +969,13 @@ def test_equivalent_broker_valuation_after_failed_snapshot_stays_fresh(history_d
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
 @pytest.mark.parametrize('attribute,column', [('cost', 'cost'), ('fifoPnlRealized', 'realized_pnl')])
-def test_unused_broker_trade_figures_after_failed_snapshot_stay_fresh(history_database, monkeypatch, attribute, column):
+def test_broker_trade_figures_publish_only_after_successful_retry(history_database, monkeypatch, attribute, column):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert before['provisional'] is False
+    with engine.connect() as connection:
+        original = connection.scalar(text(f"SELECT {column} FROM event_trade_fill WHERE ib_exec_id='S1'"))
     adapter.payload_bytes = _NO_CASH_PAYLOAD.replace(
         b'tradePrice="100"', f'tradePrice="100" {attribute}="999"'.encode(),
     )
@@ -961,14 +983,20 @@ def test_unused_broker_trade_figures_after_failed_snapshot_stay_fresh(history_da
     def fail_snapshot(**kwargs):
         raise RuntimeError('failure after broker-only trade figure correction')
 
+    build = service.ledger_snapshot_build_and_persist
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     with engine.connect() as connection:
-        assert connection.scalar(text(f"SELECT {column} FROM event_trade_fill WHERE ib_exec_id='S1'")) == Decimal('999')
+        assert connection.scalar(text(f"SELECT {column} FROM event_trade_fill WHERE ib_exec_id='S1'")) == original
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is False
-    assert report['provisional'] is False
+    assert report == before
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    with engine.connect() as connection:
+        assert connection.scalar(text(f"SELECT {column} FROM event_trade_fill WHERE ib_exec_id='S1'")) == Decimal('999')
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert rebuilt['totals'] == before['totals']
+    assert rebuilt['stale'] is False
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
@@ -1019,7 +1047,7 @@ def test_trade_description_migration_preserves_provenance_and_snapshot_freshness
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
-def test_failed_snapshot_after_trade_description_correction_preserves_freshness(history_database, monkeypatch):
+def test_trade_description_publishes_only_after_successful_retry(history_database, monkeypatch):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
@@ -1034,6 +1062,7 @@ def test_failed_snapshot_after_trade_description_correction_preserves_freshness(
     def fail_snapshot(**kwargs):
         raise RuntimeError('failure after description-only correction')
 
+    build = service.ledger_snapshot_build_and_persist
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     with engine.connect() as connection:
@@ -1041,10 +1070,13 @@ def test_failed_snapshot_after_trade_description_correction_preserves_freshness(
             "SELECT source_raw_record_id,ingestion_run_id,updated_at_utc FROM event_trade_fill WHERE ib_exec_id='S1'"
         )).one() == original
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is False
-    assert report['provisional'] is False
-    assert any(row['description'] == 'Corrected execution description' for row in report['activity'])
+    assert report == before
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert any(row['description'] == 'Corrected execution description' for row in rebuilt['activity'])
+    assert rebuilt['totals'] == before['totals']
+    assert rebuilt['stale'] is False
 
 
 @pytest.mark.parametrize('history_database', [_NO_CASH_PAYLOAD], indirect=True, ids=['no-cash'])
@@ -1068,43 +1100,37 @@ def test_valuation_from_failed_canonical_mapping_does_not_mark_pnl_stale(history
     assert report['provisional'] is False
 
 
-@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+@pytest.mark.parametrize('history_database,changed_payload', [
     pytest.param(
-        _BASE_NET_CASH_PAYLOAD, _BASE_NET_CASH_PAYLOAD.replace(b'netCash="-1002"', b'netCash="-1003"'), False,
+        _BASE_NET_CASH_PAYLOAD, _BASE_NET_CASH_PAYLOAD.replace(b'netCash="-1002"', b'netCash="-1003"'),
         id='base-currency',
     ),
     pytest.param(
-        _DIRECT_NET_CASH_PAYLOAD, _DIRECT_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'), False,
+        _DIRECT_NET_CASH_PAYLOAD, _DIRECT_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'),
         id='direct-fx-override',
     ),
     pytest.param(
-        _RATIO_NET_CASH_PAYLOAD, _RATIO_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'), True,
+        _RATIO_NET_CASH_PAYLOAD, _RATIO_NET_CASH_PAYLOAD.replace(b'netCash="-10.01"', b'netCash="-20.02"'),
         id='consumed-net-cash-ratio',
     ),
 ], indirect=['history_database'])
-def test_net_cash_correction_only_invalidates_consumed_fx_ratio(history_database, monkeypatch, changed_payload, expected_stale):
+def test_net_cash_conflict_is_rejected_regardless_of_consumed_fx_source(history_database, changed_payload):
     client, _, ids, engine = history_database
-    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    harness = _harness(engine, account='HISTORY')
+    orchestrator, adapter, *_ = harness
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert before['provisional'] is False
     adapter.payload_bytes = changed_payload
-    build = service.ledger_snapshot_build_and_persist
-
-    def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after net cash correction')
-
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
-    assert orchestrator.job_execute('ingestion_run').status == 'failed'
-    report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is expected_stale
-    assert report['provisional'] is expected_stale
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
-    assert orchestrator.job_execute('ingestion_run').status == 'success'
-    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert rebuilt['stale'] is False
-    assert rebuilt['provisional'] is False
-    assert (rebuilt['totals'] != before['totals']) is expected_stale
+    result = orchestrator.job_execute('ingestion_run')
+    assert result.status == 'failed'
+    with engine.connect() as connection:
+        failure = connection.execute(text(
+            'SELECT error_code, error_message FROM ingestion_run ORDER BY started_at_utc DESC LIMIT 1'
+        )).one()
+    assert failure.error_code == 'TRADE_CONSISTENCY_CONFLICT'
+    assert 'net_cash' in failure.error_message
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
+    assert _history_replay(engine, harness).status == 'success'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
 
 
 @pytest.mark.parametrize('history_database', [_CLOSED_BROKER_FX_PAYLOAD], indirect=True, ids=['closed-broker-position'])
@@ -1160,7 +1186,7 @@ def test_unused_broker_position_figures_do_not_invalidate_fifo_valuation(history
     assert rebuilt['totals'] == before['totals']
 
 
-@pytest.mark.parametrize('history_database,changed_payload,expected_stale', [
+@pytest.mark.parametrize('history_database,changed_payload,expected_totals_change', [
     pytest.param(_FALLBACK_BROKER_FX_PAYLOAD, _EQUIVALENT_DIRECT_BROKER_FX_PAYLOAD, False,
                  id='fallback-to-equal-direct'),
     pytest.param(_EQUIVALENT_DIRECT_BROKER_FX_PAYLOAD, _FALLBACK_BROKER_FX_PAYLOAD, False,
@@ -1170,8 +1196,8 @@ def test_unused_broker_position_figures_do_not_invalidate_fifo_valuation(history
     pytest.param(_DIFFERENT_DIRECT_BROKER_FX_PAYLOAD, _FALLBACK_BROKER_FX_PAYLOAD, True,
                  id='direct-to-different-fallback'),
 ], indirect=['history_database'])
-def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
-    history_database, monkeypatch, changed_payload, expected_stale,
+def test_broker_fx_source_retry_changes_only_different_effective_rates(
+    history_database, monkeypatch, changed_payload, expected_totals_change,
 ):
     client, _, ids, engine = history_database
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
@@ -1187,20 +1213,18 @@ def test_broker_fx_source_switch_only_invalidates_different_effective_rate(
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is expected_stale
-    assert report['provisional'] is expected_stale
+    assert report == before
     monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert rebuilt['stale'] is False
     assert rebuilt['provisional'] is False
-    assert (rebuilt['totals'] != before['totals']) is expected_stale
+    assert (rebuilt['totals'] != before['totals']) is expected_totals_change
 
 
 @pytest.mark.parametrize('history_database', [_CASHFLOW_MOVE_PAYLOAD], indirect=True, ids=['two-stocks'])
 @pytest.mark.parametrize('fail_before_snapshot', [False, True], ids=['successful-move', 'failed-move'])
-def test_cashflow_instrument_correction_rebuilds_both_stock_histories(
+def test_cashflow_instrument_correction_atomically_rebuilds_both_stock_histories(
     history_database, monkeypatch, fail_before_snapshot,
 ):
     client, _, ids, engine = history_database
@@ -1227,12 +1251,7 @@ def test_cashflow_instrument_correction_rebuilds_both_stock_histories(
             conid: client.get(f'/reports/stock-history/{ids[conid]}').json()
             for conid in ('201', '202')
         }
-        assert not any(row['event_type'] == 'cashflow' for row in reports['201']['activity'])
-        assert any(row['event_type'] == 'cashflow' for row in reports['202']['activity'])
-        for conid, report in reports.items():
-            assert report['totals'] == before[conid]['totals']
-            assert report['stale'] is True, conid
-            assert report['provisional'] is True, conid
+        assert reports == before
         monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     reports = {
@@ -1279,14 +1298,18 @@ def test_stock_history_reads_one_consistent_projection_during_rebuild(history_da
     client, _, ids, engine = history_database
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
-    adapter.payload_bytes = _PAYLOAD.replace(b'tradePrice="100"', b'tradePrice="110"')
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'</Trades>', b'<Trade ibExecID="CONCURRENT" transactionID="30" conid="101" symbol="TEST" '
+        b'assetCategory="STK" currency="USD" buySell="BUY" quantity="1" tradePrice="110" '
+        b'reportDate="20260821" dateTime="20260821;150000" /></Trades>',
+    ).replace(b'position="6"', b'position="7"')
     rebuilt = False
 
     def rebuild_after_snapshot_read(connection, cursor, statement, parameters, context, executemany):
         nonlocal rebuilt
         if not rebuilt and 'SELECT DISTINCT ON (s.instrument_id)' in statement:
             rebuilt = True
-            # Commit a real correction on other connections between the report's
+            # Commit new activity on another connection between the report's
             # snapshot and lot/activity reads.
             assert orchestrator.job_execute('ingestion_run').status == 'success'
 
@@ -1337,3 +1360,28 @@ def test_cashflow_reassignment_migration_preserves_freshness_and_restores_previo
             "AND column_name='cashflow_reassigned_at_utc'"
         )) == 0
     command.upgrade(Config('alembic.ini'), 'head')
+
+
+def test_atomic_failed_import_preserves_published_history_freshness(history_database, monkeypatch):
+    """A current workflow failure leaves both the read model and executions unchanged."""
+    client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    orchestrator, adapter, _, _, service, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'</Trades>',
+        b'<Trade ibExecID="ATOMIC-NEW" transactionID="ATOMIC-NEW" conid="101" '
+        b'symbol="TEST" assetCategory="STK" currency="USD" buySell="BUY" quantity="1" '
+        b'tradePrice="130" reportDate="20260821" dateTime="20260821;150000" /></Trades>',
+    )
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after mapping a new execution')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    after = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert after['totals'] == before['totals']
+    assert after['stale'] == before['stale']
+    assert after['provisional'] == before['provisional']
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM event_trade_fill WHERE ib_exec_id='ATOMIC-NEW'")) == 0

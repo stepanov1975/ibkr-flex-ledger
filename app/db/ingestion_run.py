@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID
 
 from sqlalchemy import Connection, Engine, text
 from sqlalchemy.exc import SQLAlchemyError
+
+from .session import db_connection_scope, db_workflow_connection_scope
 
 from .interfaces import (
     IngestionRunAlreadyActiveError,
@@ -18,6 +22,9 @@ from .interfaces import (
     IngestionRunRepositoryPort,
     IngestionRunState,
 )
+
+
+_active_run_guard: ContextVar[tuple[Engine, str] | None] = ContextVar("db_run_guard", default=None)
 
 
 class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
@@ -77,6 +84,47 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             raise ValueError("engine must not be None")
         self._engine = engine
 
+    @contextmanager
+    def db_ingestion_run_guard(self, account_id: str) -> Iterator[None]:
+        """Own an atomic workflow until exit; recover rows only without a live owner."""
+        account = self._validate_non_empty_text(account_id, "account_id")
+        key_1, key_2 = self._build_advisory_lock_keys(account)
+        keys = {"key_1": key_1, "key_2": key_2}
+        # Session ownership survives the short audit/semantic transactions, but
+        # PostgreSQL releases it if the worker's connection dies.
+        with self._engine.connect() as connection:
+            acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:key_1, :key_2)"), keys)
+            connection.commit()
+            if not acquired:
+                raise IngestionRunAlreadyActiveError("run already active")
+            token = _active_run_guard.set((self._engine, account))
+            try:
+                connection.execute(text(
+                    "UPDATE ingestion_run SET status='failed', ended_at_utc=clock_timestamp(), "
+                    "duration_ms=GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp()-started_at_utc))*1000)::bigint, "
+                    "error_code='INGESTION_RUN_INTERRUPTED', "
+                    "error_message='Previous worker exited before finalizing this run.', "
+                    "diagnostics=COALESCE(diagnostics, '[]'::jsonb) || CAST(:diagnostic AS jsonb) "
+                    "WHERE account_id=:account_id AND status='started'"
+                ), {"account_id": account, "diagnostic": json.dumps([{
+                    "stage": "run", "status": "failed",
+                    "details": {"error_code": "INGESTION_RUN_INTERRUPTED",
+                                "error_message": "Recovered after acquiring ownership; no live worker holds the lock."},
+                }])})
+                connection.commit()
+                with db_workflow_connection_scope(self._engine, connection):
+                    yield
+            finally:
+                _active_run_guard.reset(token)
+                try:
+                    if not connection.invalidated and not connection.closed:
+                        connection.execute(text("SELECT pg_advisory_unlock(:key_1, :key_2)"), keys)
+                        connection.commit()
+                except SQLAlchemyError:
+                    # Never put an uncertain session-lock owner back in the pool.
+                    connection.invalidate()
+                    raise
+
     def db_ingestion_run_create_started(
         self,
         account_id: str,
@@ -108,17 +156,11 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         normalized_period_key = self._validate_non_empty_text(period_key, "period_key")
         normalized_flex_query_id = self._validate_non_empty_text(flex_query_id, "flex_query_id")
 
-        advisory_key_1, advisory_key_2 = self._build_advisory_lock_keys(normalized_account_id)
+        if _active_run_guard.get() != (self._engine, normalized_account_id):
+            raise RuntimeError("ingestion run creation requires account guard")
 
         try:
-            with self._engine.begin() as connection:
-                lock_row = connection.execute(
-                    text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2) AS lock_acquired"),
-                    {"key_1": advisory_key_1, "key_2": advisory_key_2},
-                ).mappings().one()
-                if not bool(lock_row["lock_acquired"]):
-                    raise IngestionRunAlreadyActiveError("run already active")
-
+            with db_connection_scope(self._engine, write=True) as connection:
                 active_row = connection.execute(
                     text(
                         "SELECT ingestion_run_id "
@@ -188,7 +230,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             diagnostics_payload = json.dumps(diagnostics)
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 updated_row = connection.execute(
                     text(
                         "UPDATE ingestion_run SET "
@@ -198,7 +240,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "error_code = :error_code, "
                         "error_message = :error_message, "
                         "diagnostics = CAST(:diagnostics AS jsonb) "
-                        "WHERE ingestion_run_id = :ingestion_run_id "
+                        "WHERE ingestion_run_id = :ingestion_run_id AND status = 'started' "
                         "RETURNING ingestion_run_id"
                     ),
                     {
@@ -210,7 +252,12 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                     },
                 ).mappings().first()
                 if updated_row is None:
-                    raise LookupError("ingestion run not found")
+                    # A COMMIT may succeed even if its acknowledgement is lost.
+                    # Preserve the durable terminal state on a retry/failure path.
+                    stored = self._db_fetch_run_by_id_or_raise(connection, ingestion_run_id)
+                    if status == "success" and stored.state.status != "success":
+                        raise RuntimeError("ingestion run already finalized without success")
+                    return stored
 
                 return self._db_fetch_run_by_id_or_raise(connection=connection, ingestion_run_id=ingestion_run_id)
         except SQLAlchemyError as error:
@@ -230,7 +277,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         """
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 row = connection.execute(
                     text(
                         "SELECT "
@@ -286,7 +333,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         query_template = self._INGESTION_RUN_LIST_QUERY_BY_SORT[(normalized_sort_by, normalized_sort_dir)]
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(query_template),
                     {"limit": limit, "offset": offset},
@@ -331,7 +378,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             "started_at_utc, ended_at_utc, duration_ms, error_code, error_message, diagnostics, created_at_utc"
         )
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(f"SELECT {columns} FROM ingestion_run WHERE {where} ORDER BY {order} {direction} NULLS LAST, ingestion_run_id {direction} LIMIT :limit OFFSET :offset"),
                     params,

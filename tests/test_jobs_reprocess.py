@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
@@ -29,6 +31,7 @@ from app.db.interfaces import (
     RawArtifactReplayCandidate,
     RawRecordReadRepositoryPort,
 )
+from app.db.trade_consistency import TradeConsistencyError
 from app.jobs import reprocess_orchestrator as reprocess_module
 from app.jobs.reprocess_orchestrator import (
     CanonicalReprocessOrchestrator,
@@ -83,6 +86,20 @@ def test_reprocess_rejects_selected_artifact_without_open_positions() -> None:
 
 def test_reprocess_selection_is_empty_without_candidates() -> None:
     assert job_select_replay_artifacts([]) == ()
+
+
+@pytest.mark.parametrize("run_repository", [{}, {"ingestion_repository": None}])
+def test_reprocess_requires_run_repository(run_repository: dict[str, Any]) -> None:
+    operation_log: list[tuple[object, ...]] = []
+    with pytest.raises((TypeError, ValueError), match="ingestion_repository"):
+        CanonicalReprocessOrchestrator(
+            raw_read_repository=cast(RawRecordReadRepositoryPort, _ArtifactRawRepository([], {}, operation_log)),
+            canonical_persistence_repository=cast(CanonicalPersistenceRepositoryPort, _CanonicalPersistRepositoryStub()),
+            snapshot_service=cast(StockLedgerSnapshotService, _SnapshotServiceStub(operation_log)),
+            snapshot_repository=cast(LedgerSnapshotRepositoryPort, _CleanupRepositoryStub(operation_log)),
+            config=CanonicalReprocessOrchestratorConfig("U_TEST", "2026-02-20", "query", "USD"),
+            **run_repository,
+        )
 
 
 def test_reprocess_empty_selection_finalizes_failed() -> None:
@@ -166,6 +183,12 @@ class _ArtifactRawRepository:
 
 class _CanonicalPersistRepositoryStub:
     """Capture upserted canonical identifiers to assert determinism."""
+
+    def db_canonical_transaction(self):
+        return nullcontext()
+
+    def db_canonical_validate_trade_fills(self, requests):
+        pass
 
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         pass
@@ -319,6 +342,9 @@ class _FinalizeCall(TypedDict):
 
 class _IngestionRepositoryStub:
     """Capture reprocess run finalize diagnostics for assertions."""
+
+    def db_ingestion_run_guard(self, account_id: str):
+        return nullcontext()
 
     def __init__(self) -> None:
         """Initialize deterministic run record and capture buffer.
@@ -528,11 +554,7 @@ def _reprocess_orchestrator(
             snapshot_repository,
         ),
         config=config,
-        ingestion_repository=(
-            cast(IngestionRunRepositoryPort, ingestion_repository)
-            if ingestion_repository is not None
-            else None
-        ),
+        ingestion_repository=cast(IngestionRunRepositoryPort, ingestion_repository or _IngestionRepositoryStub()),
     )
 
 
@@ -844,6 +866,32 @@ def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code(
 
     assert result.status == "failed"
     assert ingestion_repository.finalize_calls[0]["error_code"] == "REPROCESS_STATEMENT_ERROR"
+
+
+def test_jobs_reprocess_preserves_trade_consistency_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_trade_consistency_error(**_kwargs: object) -> NoReturn:
+        raise TradeConsistencyError(
+            identity="ib_exec_id=EXEC-conflict",
+            conflicting_fields=("price",),
+            source_raw_record_ids=(str(UUID(int=91)), str(UUID(int=92))),
+        )
+
+    monkeypatch.setattr(
+        reprocess_module,
+        "job_canonical_map_and_persist",
+        raise_trade_consistency_error,
+    )
+    harness = _build_reprocess_harness([])
+
+    result = harness.orchestrator.job_execute(job_name="reprocess_run")
+
+    assert result.status == "failed"
+    assert (
+        harness.ingestion_repository.finalize_calls[0]["error_code"]
+        == "TRADE_CONSISTENCY_CONFLICT"
+    )
 
 
 def test_reprocess_bootstrap_provides_snapshot_dependencies(

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from uuid import uuid4
+
+import pytest
 
 from app.db.interfaces import CanonicalInstrumentRecord, CanonicalInstrumentUpsertRequest, RawRecordForCanonicalMapping
 from app.jobs.canonical_pipeline import job_canonical_map_and_persist
@@ -51,6 +54,9 @@ class _CanonicalPipelineRepositoryStub:
             )
             for request in requests
         ]
+
+    def db_canonical_validate_trade_fills(self, requests) -> None:
+        pass
 
     def db_canonical_bulk_upsert(self, trade_requests, cashflow_requests, fx_requests, corp_action_requests) -> None:
         """Capture bulk upsert invocation.
@@ -141,3 +147,29 @@ def test_jobs_canonical_pipeline_deduplicated_instruments_use_one_batch_call() -
     assert [request.conid for request in repository_stub.instrument_requests] == ["265598"]
     assert result_counts["instrument_upsert_count"] == 1
     assert result_counts["trade_fill_count"] == 2
+
+
+def test_replay_validates_report_values_before_restoring_provenance():
+    repository = _CanonicalPipelineRepositoryStub()
+    original = RawRecordForCanonicalMapping(
+        raw_record_id=uuid4(), ingestion_run_id=uuid4(), account_id="U_TEST",
+        period_key="2026-02-14", flex_query_id="query", report_date_local=date(2026, 2, 14),
+        section_name="Trades", source_row_ref="Trades:Trade:transactionID=1",
+        source_payload={"ibExecID": "E1", "transactionID": "1", "conid": "1", "buySell": "BUY",
+                        "quantity": "1", "tradePrice": "100", "currency": "USD",
+                        "reportDate": "20260214", "dateTime": "20260214;100000"},
+    )
+    current = replace(original, raw_record_id=uuid4(), ingestion_run_id=uuid4(),
+                      source_payload={**original.source_payload, "quantity": "2"})
+
+    def reject_conflicting_versions(requests):
+        assert {request.quantity for request in requests} == {"1", "2"}
+        raise ValueError("conflicting replay values")
+
+    repository.db_canonical_validate_trade_fills = reject_conflicting_versions
+    with pytest.raises(ValueError, match="conflicting replay values"):
+        job_canonical_map_and_persist(
+            "U_TEST", "USD", [current], repository,
+            source_origins={str(current.raw_record_id): original},
+        )
+    assert repository.bulk_upsert_calls == 0

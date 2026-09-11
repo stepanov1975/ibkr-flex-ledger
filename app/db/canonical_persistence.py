@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ContextManager
 from uuid import UUID
 
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
+
+from .session import db_connection_scope, db_transaction_scope
+from .trade_consistency import db_validate_trade_consistency
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -113,24 +116,14 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
 
         self._engine = engine
 
-    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
-        """Reject skip assumptions after any failed run for this account.
+    def db_canonical_transaction(self) -> ContextManager[None]:
+        """Commit canonical events and their projections as one publication."""
+        return db_transaction_scope(self._engine)
 
-        Canonical commits precede snapshot completion. A successful partial report
-        cannot certify that all failed writes were repaired. Run status is retained
-        even after diagnostic retention, so this conservative guard stays durable.
-        """
-
-        normalized_account_id = self._db_canonical_validate_non_empty_text(account_id, "account_id")
-        try:
-            with self._engine.connect() as connection:
-                return not bool(connection.scalar(
-                    text("SELECT EXISTS (SELECT 1 FROM ingestion_run "
-                         "WHERE account_id = :account_id AND status = 'failed')"),
-                    {"account_id": normalized_account_id},
-                ))
-        except SQLAlchemyError as error:
-            raise RuntimeError("canonical skip safety read failed") from error
+    def db_canonical_validate_trade_fills(self, requests: list[CanonicalTradeFillUpsertRequest]) -> None:
+        """Reject inconsistent source executions before canonical publication."""
+        with db_connection_scope(self._engine) as connection:
+            db_validate_trade_consistency(connection, requests)
 
     def db_raw_record_list_for_period(
         self,
@@ -216,7 +209,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             "flex_query_id": self._db_canonical_validate_non_empty_text(flex_query_id, "flex_query_id"),
         }
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(self._RAW_ARTIFACT_REPLAY_CANDIDATE_QUERY),
                     parameters,
@@ -296,7 +289,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
         """Detect deletions that cannot appear in the changed-current-row scope."""
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 return bool(connection.scalar(text(
                     "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
                     "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
@@ -315,7 +308,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         """Persist valuation-attempt time even when no canonical rows changed."""
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 connection.execute(text(
                     "UPDATE raw_artifact SET valuation_pending_at_utc=clock_timestamp() "
                     "WHERE account_id=:account_id AND raw_artifact_id IN ("
@@ -367,7 +360,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         )
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 rows = connection.execute(
                     text(
                         "WITH input AS ("
@@ -544,24 +537,27 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         ]
 
         try:
-            with self._engine.begin() as connection:
+            with db_connection_scope(self._engine, write=True) as connection:
                 if normalized_trade_requests:
                     connection.execute(
                         text(
                             "INSERT INTO event_trade_fill ("
-                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
+                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, metadata_source_raw_record_id, "
+                            "ib_exec_id, transaction_id, "
                             "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
                             "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency, description"
                             ") VALUES ("
                             ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
-                            "CAST(:source_raw_record_id AS uuid), :ib_exec_id, :transaction_id, "
+                            "CAST(:source_raw_record_id AS uuid), "
+                            "COALESCE(CAST(:metadata_source_raw_record_id AS uuid), CAST(:source_raw_record_id AS uuid)), "
+                            ":ib_exec_id, :transaction_id, "
                             "CAST(:trade_timestamp_utc AS timestamptz), CAST(:report_date_local AS date), :side, "
                             "CAST(:quantity AS numeric), CAST(:price AS numeric), CAST(:cost AS numeric), "
                             "CAST(:commission AS numeric), CAST(:fees AS numeric), CAST(:realized_pnl AS numeric), "
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
                             "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency, "
                             "(SELECT NULLIF(BTRIM(source_payload->>'description'), '') FROM raw_record "
-                            "WHERE raw_record_id=COALESCE(CAST(:description_source_raw_record_id AS uuid), "
+                            "WHERE raw_record_id=COALESCE(CAST(:metadata_source_raw_record_id AS uuid), "
                             "CAST(:source_raw_record_id AS uuid)))"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
                             "price = EXCLUDED.price, "
@@ -571,6 +567,19 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "net_cash_in_base = EXCLUDED.net_cash_in_base, "
                             "fx_rate_to_base = EXCLUDED.fx_rate_to_base, "
                             "cost = EXCLUDED.cost, "
+                            # Only consumed metadata changes invalidate existing accounting snapshots.
+                            "metadata_source_raw_record_id = CASE WHEN ("
+                            "SELECT COUNT(DISTINCT jsonb_build_array("
+                            "COALESCE(NULLIF(UPPER(BTRIM(metadata.source_payload->>'ibCommissionCurrency')), ''), "
+                            "UPPER(BTRIM(event_trade_fill.currency))), "
+                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
+                            "THEN 1::numeric ELSE REPLACE(BTRIM(metadata.source_payload->>'multiplier'), ',', '')::numeric END, "
+                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
+                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END"
+                            ")) > 1 FROM raw_record metadata WHERE metadata.raw_record_id IN ("
+                            "COALESCE(event_trade_fill.metadata_source_raw_record_id, event_trade_fill.source_raw_record_id), "
+                            "EXCLUDED.metadata_source_raw_record_id)) "
+                            "THEN EXCLUDED.metadata_source_raw_record_id ELSE event_trade_fill.metadata_source_raw_record_id END, "
                             "description = COALESCE(EXCLUDED.description, event_trade_fill.description)"
                         ),
                         normalized_trade_requests,
@@ -867,7 +876,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         """
 
         try:
-            with self._engine.connect() as connection:
+            with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(
                     text(query_template),
                     parameters,
@@ -915,8 +924,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 "request.source_raw_record_id",
             ),
             "ib_exec_id": self._db_canonical_validate_non_empty_text(request.ib_exec_id, "request.ib_exec_id"),
-            "description_source_raw_record_id": self._db_canonical_validate_optional_uuid_text(
-                request.description_source_raw_record_id,
+            "metadata_source_raw_record_id": self._db_canonical_validate_optional_uuid_text(
+                request.metadata_source_raw_record_id,
             ),
             "transaction_id": self._db_canonical_validate_optional_text(request.transaction_id),
             "trade_timestamp_utc": self._db_canonical_validate_non_empty_text(

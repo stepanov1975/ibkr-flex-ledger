@@ -265,7 +265,7 @@ class CanonicalTradeFillUpsertRequest:
         fx_rate_to_base: Optional FX rate decimal string.
         currency: Trade currency code.
         functional_currency: Functional/base currency code.
-        description_source_raw_record_id: Optional current description source when replay preserves an older origin.
+        metadata_source_raw_record_id: Optional current metadata source when replay preserves an older origin.
     """
 
     account_id: str
@@ -288,7 +288,7 @@ class CanonicalTradeFillUpsertRequest:
     fx_rate_to_base: str | None
     currency: str
     functional_currency: str
-    description_source_raw_record_id: str | None = None
+    metadata_source_raw_record_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -441,6 +441,9 @@ class CanonicalInstrumentRecord:
 class IngestionRunRepositoryPort(Protocol):
     """Port definition for ingestion run lifecycle persistence and reads."""
 
+    def db_ingestion_run_guard(self, account_id: str) -> ContextManager[None]:
+        """Own an atomic workflow and recover only abandoned started rows."""
+
     def db_ingestion_run_create_started(
         self,
         account_id: str,
@@ -529,6 +532,9 @@ class IngestionRunRepositoryPort(Protocol):
 
 class RawPersistenceRepositoryPort(Protocol):
     """Port definition for immutable raw artifact and raw row persistence."""
+
+    def db_raw_successful_broker_account_ids(self, account_id: str) -> frozenset[str]:
+        """Return broker account identities from successfully applied reports."""
 
     def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
         """Persist or reuse immutable raw artifact by dedupe identity key.
@@ -664,8 +670,11 @@ class RawRecordReadRepositoryPort(Protocol):
 class CanonicalPersistenceRepositoryPort(Protocol):
     """Port definition for canonical event and instrument UPSERT operations."""
 
-    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
-        """Return whether retained run history permits duplicate/incremental skips."""
+    def db_canonical_transaction(self) -> ContextManager[None]:
+        """Publish canonical events, projections and completion atomically."""
+
+    def db_canonical_validate_trade_fills(self, requests: list[CanonicalTradeFillUpsertRequest]) -> None:
+        """Reject identity or protected execution economics conflicting with stored history."""
 
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         """Record an attempt to project the semantic run's broker valuations."""

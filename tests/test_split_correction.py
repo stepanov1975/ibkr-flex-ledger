@@ -191,9 +191,10 @@ def test_stale_preview_and_active_ingestion_are_rejected(database, split_case):
     result = client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]})
     assert result.status_code == 409
     assert _state(database) == before
-    run = harness[6].db_ingestion_run_create_started("INTEGRITY", "manual", "2026-08-21", "test", None)
-    assert client.post(base + "/preview", json=_RATIO).status_code == 409
-    harness[6].db_ingestion_run_finalize(run.ingestion_run_id, "failed", "TEST", "Test complete", [])
+    with harness[6].db_ingestion_run_guard("INTEGRITY"):
+        run = harness[6].db_ingestion_run_create_started("INTEGRITY", "manual", "2026-08-21", "test", None)
+        assert client.post(base + "/preview", json=_RATIO).status_code == 409
+        harness[6].db_ingestion_run_finalize(run.ingestion_run_id, "failed", "TEST", "Test complete", [])
 
 
 def test_unsupported_and_missing_identity_cannot_be_applied(database, split_case):
@@ -359,7 +360,7 @@ def test_split_preserves_completed_pre_action_fifo_sale(database, split_case):
     assert Decimal(response.json()["lots_after"][0]["cost_basis_open"]) == 300
 
 
-def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database, split_case, monkeypatch):
+def test_failed_newer_activity_preserves_split_preview_and_snapshot_horizon(database, split_case, monkeypatch):
     harness, case, client = split_case
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()
@@ -374,18 +375,22 @@ def test_correction_rejects_canonical_activity_beyond_snapshot_horizon(database,
     )
 
     def fail_snapshot(self, requests):
-        raise RuntimeError("Failure after canonical trades commit, rolling back projection writes")
+        raise RuntimeError("Failure after lot reconciliation, rolling back canonical and projection writes")
 
-    monkeypatch.setattr(SQLAlchemyLedgerSnapshotService, "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
-    assert harness[0].job_execute("ingestion_run").status == "failed"
+    with monkeypatch.context() as patch:
+        patch.setattr(SQLAlchemyLedgerSnapshotService, "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
+        assert harness[0].job_execute("ingestion_run").status == "failed"
     with database.connect() as c:
         assert c.scalar(text("SELECT sum(remaining_quantity) FROM position_lot WHERE status='open'")) == original_quantity
+        assert c.scalar(text("SELECT count(*) FROM event_trade_fill WHERE ib_exec_id='NEWBUY'")) == 0
+        assert str(c.scalar(text("SELECT max(report_date_local) FROM pnl_snapshot_daily"))) == "2026-08-21"
     before = _state(database)
-    for endpoint, body in (("preview", _RATIO), ("apply", {**_RATIO, "preview_token": preview["preview_token"]})):
-        response = client.post(base + "/" + endpoint, json=body)
-        assert response.status_code == 409, response.text
-        assert "newer" in response.text.lower()
-        assert _state(database) == before
+    fresh = client.post(base + "/preview", json=_RATIO)
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["preview_token"] == preview["preview_token"]
+    assert _state(database) == before
+    response = client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]})
+    assert response.status_code == 200, response.text
 
 
 @pytest.mark.parametrize("split_case", ["reverse"], indirect=True)
@@ -555,7 +560,7 @@ def test_upgrade_reclassifies_only_incompatible_legacy_splits(database, split_ca
         assert c.scalar(text("SELECT requires_manual FROM event_corp_action")) is manual
         assert c.scalar(text("SELECT status FROM corporate_action_manual_case")) == ("open" if manual else None)
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is manual
-    harness[1].payload_bytes = _SEEDED_PAYLOAD.replace(
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(
         b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
     )
     assert harness[0].job_execute("ingestion_run").status == "success"
@@ -711,7 +716,7 @@ def test_older_period_replay_preserves_later_lot_history(database, split_case, m
 
 
 @pytest.mark.parametrize("split_case", ["flat"], indirect=True)
-def test_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(database, split_case, monkeypatch):
+def test_closed_round_trip_invalidates_preview_only_after_successful_ingestion(database, split_case, monkeypatch):
     harness, case, client = split_case
     base = f"/corporate-actions/cases/{case.case_id}/split"
     preview = client.post(base + "/preview", json=_RATIO).json()
@@ -729,6 +734,11 @@ def test_closed_round_trip_after_failed_same_date_ingestion_invalidates_preview(
     with monkeypatch.context() as patch:
         patch.setattr(SQLAlchemyLedgerSnapshotService, "db_pnl_snapshot_daily_upsert_many", fail_snapshot)
         assert harness[0].job_execute("ingestion_run").status == "failed"
+    with database.connect() as c:
+        assert c.scalar(text("SELECT count(*) FROM event_trade_fill WHERE ib_exec_id IN ('ROUNDBUY','ROUNDSELL')")) == 0
+    failed_preview = client.post(base + "/preview", json=_RATIO).json()
+    assert failed_preview["preview_token"] == preview["preview_token"]
+    assert harness[0].job_execute("ingestion_run").status == "success"
     before = _state(database)
     assert client.post(base + "/apply", json={**_RATIO, "preview_token": preview["preview_token"]}).status_code == 409
     assert _state(database) == before

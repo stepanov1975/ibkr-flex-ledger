@@ -38,6 +38,7 @@ def test_adapters_flex_http_timeout_reason_raises_timeout_error(monkeypatch: pyt
         raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr(flex_module.httpx.Client, "get", _raise_timeout)
+    monkeypatch.setattr(flex_module.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(FlexAdapterTimeoutError, match="timed out"):
         adapter.adapter_fetch_report(query_id="query-id")
@@ -83,6 +84,7 @@ def test_adapters_flex_transport_timeout_retries_then_succeeds(monkeypatch: pyte
         return poll_response
 
     monkeypatch.setattr(flex_module.httpx.Client, "get", _fake_get)
+    monkeypatch.setattr(flex_module.time, "sleep", lambda _seconds: None)
 
     adapter = FlexWebServiceAdapter(token="token", initial_wait_seconds=0, retry_attempts=1)
     result = adapter.adapter_fetch_report(query_id="query-id")

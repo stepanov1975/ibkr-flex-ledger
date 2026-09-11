@@ -350,6 +350,11 @@ class CanonicalMappingService:
 
         payload = raw_record.source_payload
         ib_exec_id = payload.get("ibExecID")
+        if isinstance(ib_exec_id, str) and ib_exec_id.strip() in {"-", "--", "N/A"}:
+            raise MappingContractViolationError(
+                "mapping contract violation: ibExecID must not be a null sentinel "
+                f"source_row_ref={raw_record.source_row_ref}"
+            )
         if isinstance(ib_exec_id, str) and ib_exec_id.strip():
             return ib_exec_id
         level_of_detail = self._mapping_optional_value(payload, "levelOfDetail")
