@@ -1357,3 +1357,28 @@ def test_cashflow_reassignment_migration_preserves_freshness_and_restores_previo
             "AND column_name='cashflow_reassigned_at_utc'"
         )) == 0
     command.upgrade(Config('alembic.ini'), 'head')
+
+
+def test_atomic_failed_import_preserves_published_history_freshness(history_database, monkeypatch):
+    """A current workflow failure leaves both the read model and executions unchanged."""
+    client, _, ids, engine = history_database
+    before = client.get(f"/reports/stock-history/{ids['101']}").json()
+    orchestrator, adapter, _, _, service, *_ = _harness(engine, account='HISTORY')
+    adapter.payload_bytes = _PAYLOAD.replace(
+        b'</Trades>',
+        b'<Trade ibExecID="ATOMIC-NEW" transactionID="ATOMIC-NEW" conid="101" '
+        b'symbol="TEST" assetCategory="STK" currency="USD" buySell="BUY" quantity="1" '
+        b'tradePrice="130" reportDate="20260821" dateTime="20260821;150000" /></Trades>',
+    )
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError('failure after mapping a new execution')
+
+    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
+    assert orchestrator.job_execute('ingestion_run').status == 'failed'
+    after = client.get(f"/reports/stock-history/{ids['101']}").json()
+    assert after['totals'] == before['totals']
+    assert after['stale'] == before['stale']
+    assert after['provisional'] == before['provisional']
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM event_trade_fill WHERE ib_exec_id='ATOMIC-NEW'")) == 0
