@@ -78,3 +78,26 @@
   abstract-class errors for `db_raw_successful_broker_account_ids` on
   `SQLAlchemyLedgerSnapshotService`; no error points to the owned precision
   change.
+
+## Final review fix: late optional transaction identity
+
+- Confirmed the canonical UPSERT intentionally preserves a null
+  `transaction_id`, so an accepted later `ibExecID`/`transactionID` relationship
+  must be recovered from immutable successful raw evidence.
+- Extended the existing batched identity lookup to include mapped
+  `Trades:Trade:*` raw rows whose row-owning run succeeded or whose artifact has
+  a successful completing run. Failed-only evidence and non-Trade row tags are
+  excluded.
+- Raw fallback identities follow mapping behavior for blank execution IDs, and
+  identical successful raw identity tuples are deduplicated before they are
+  returned to validation.
+- Raw evidence participates only in identity checks. Protected economics still
+  compare with canonical rows, and validation never updates or aliases the
+  canonical transaction ID.
+- TDD red: successful late identity evidence did not reject either a changed
+  transaction ID or a changed execution ID. Green: origin and completion
+  evidence reject both directions; failed evidence remains nonbinding; the
+  canonical transaction ID remains null.
+- Final focused verification: `71 passed` across trade consistency, live
+  ingestion consistency, mapping, and canonical pipeline tests. Ruff and MyPy
+  passed for the owned code.

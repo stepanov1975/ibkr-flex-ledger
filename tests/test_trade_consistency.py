@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+import json
 from uuid import uuid4
 
 import pytest
@@ -86,6 +87,88 @@ def _execution_trade(ib_exec_id: str) -> RawRecordForMapping:
             "dateTime": "2026-08-21T10:00:00+00:00",
         },
     )
+
+
+def _seed_raw_trade_identity(
+    database,
+    request: CanonicalTradeFillUpsertRequest,
+    transaction_id: str,
+    *,
+    successful_origin: bool,
+    successful_completion: bool = False,
+    row_tag: str = "Trade",
+) -> str:
+    owner_run_id = str(uuid4())
+    completion_run_id = str(uuid4()) if successful_completion else None
+    raw_artifact_id = str(uuid4())
+    raw_record_id = str(uuid4())
+    with database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ingestion_run ("
+                "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                "started_at_utc, ended_at_utc) VALUES ("
+                "CAST(:run_id AS uuid), :account_id, 'manual', :status, '2026-08', 'query', now(), now())"
+            ),
+            {
+                "run_id": owner_run_id,
+                "account_id": request.account_id,
+                "status": "success" if successful_origin else "failed",
+            },
+        )
+        if completion_run_id is not None:
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run ("
+                    "ingestion_run_id, account_id, run_type, status, period_key, flex_query_id, "
+                    "started_at_utc, ended_at_utc) VALUES ("
+                    "CAST(:run_id AS uuid), :account_id, 'reprocess', 'success', "
+                    "'2026-08', 'query', now(), now())"
+                ),
+                {"run_id": completion_run_id, "account_id": request.account_id},
+            )
+        connection.execute(
+            text(
+                "INSERT INTO raw_artifact ("
+                "raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
+                "payload_sha256, source_payload, completed_ingestion_run_id) VALUES ("
+                "CAST(:artifact_id AS uuid), CAST(:owner_run_id AS uuid), :account_id, "
+                "'2026-08', 'query', :payload_sha256, 'payload', CAST(:completion_run_id AS uuid))"
+            ),
+            {
+                "artifact_id": raw_artifact_id,
+                "owner_run_id": owner_run_id,
+                "account_id": request.account_id,
+                "payload_sha256": raw_artifact_id,
+                "completion_run_id": completion_run_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO raw_record ("
+                "raw_record_id, raw_artifact_id, ingestion_run_id, account_id, period_key, "
+                "flex_query_id, payload_sha256, section_name, source_row_ref, source_payload) VALUES ("
+                "CAST(:raw_record_id AS uuid), CAST(:artifact_id AS uuid), CAST(:owner_run_id AS uuid), "
+                ":account_id, '2026-08', 'query', :payload_sha256, 'Trades', :source_row_ref, "
+                "CAST(:source_payload AS jsonb))"
+            ),
+            {
+                "raw_record_id": raw_record_id,
+                "artifact_id": raw_artifact_id,
+                "owner_run_id": owner_run_id,
+                "account_id": request.account_id,
+                "payload_sha256": raw_artifact_id,
+                "source_row_ref": f"Trades:{row_tag}:transactionID={transaction_id}",
+                "source_payload": json.dumps(
+                    {
+                        "levelOfDetail": "EXECUTION",
+                        "ibExecID": request.ib_exec_id,
+                        "transactionID": transaction_id,
+                    }
+                ),
+            },
+        )
+    return raw_record_id
 
 
 @pytest.mark.parametrize("sentinel", ["-", "--", "N/A"])
@@ -237,4 +320,122 @@ def test_validator_compares_protected_numerics_at_postgresql_scale(database) -> 
         db_validate_trade_consistency(
             connection,
             [_incoming(extra_scale), equivalent_batch_row],
+        )
+
+
+@pytest.mark.parametrize(
+    "successful_completion", [False, True], ids=["origin", "completion"]
+)
+def test_validator_remembers_successful_late_transaction_identity(
+    database,
+    successful_completion: bool,
+) -> None:
+    seeded = _trade_request(database)
+    original = replace(
+        seeded,
+        ib_exec_id=f"EXEC-LATE-{successful_completion}",
+        transaction_id=None,
+    )
+    SQLAlchemyCanonicalPersistenceService(database).db_canonical_trade_fill_upsert(
+        original
+    )
+    late_transaction = _incoming(original, transaction_id="TX-LATE")
+
+    with database.begin() as connection:
+        db_validate_trade_consistency(connection, [late_transaction])
+
+    evidence_raw_record_id = _seed_raw_trade_identity(
+        database,
+        original,
+        "TX-LATE",
+        successful_origin=not successful_completion,
+        successful_completion=successful_completion,
+    )
+
+    with database.begin() as connection, pytest.raises(TradeConsistencyError) as caught:
+        db_validate_trade_consistency(
+            connection,
+            [_incoming(original, transaction_id="TX-CHANGED")],
+        )
+    assert caught.value.conflicting_fields == ("transaction_id",)
+    assert evidence_raw_record_id in caught.value.source_raw_record_ids
+
+    with database.begin() as connection, pytest.raises(TradeConsistencyError) as caught:
+        db_validate_trade_consistency(
+            connection,
+            [_incoming(original, ib_exec_id="EXEC-CHANGED", transaction_id="TX-LATE")],
+        )
+    assert caught.value.conflicting_fields == ("ib_exec_id",)
+
+    with database.connect() as connection:
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT transaction_id FROM event_trade_fill "
+                    "WHERE account_id=:account_id AND ib_exec_id=:ib_exec_id"
+                ),
+                {"account_id": original.account_id, "ib_exec_id": original.ib_exec_id},
+            )
+            is None
+        )
+
+
+def test_validator_does_not_bind_failed_late_transaction_evidence(database) -> None:
+    seeded = _trade_request(database)
+    original = replace(seeded, ib_exec_id="EXEC-FAILED-EVIDENCE", transaction_id=None)
+    SQLAlchemyCanonicalPersistenceService(database).db_canonical_trade_fill_upsert(
+        original
+    )
+    _seed_raw_trade_identity(
+        database,
+        original,
+        "TX-FAILED",
+        successful_origin=False,
+    )
+
+    with database.begin() as connection:
+        db_validate_trade_consistency(
+            connection,
+            [_incoming(original, transaction_id="TX-ACCEPTED")],
+        )
+        db_validate_trade_consistency(
+            connection,
+            [
+                _incoming(
+                    original,
+                    ib_exec_id="EXEC-OTHER",
+                    transaction_id="TX-FAILED",
+                )
+            ],
+        )
+
+
+def test_validator_ignores_successful_non_trade_raw_identity(database) -> None:
+    seeded = _trade_request(database)
+    original = replace(seeded, ib_exec_id="EXEC-ORDER-EVIDENCE", transaction_id=None)
+    SQLAlchemyCanonicalPersistenceService(database).db_canonical_trade_fill_upsert(
+        original
+    )
+    _seed_raw_trade_identity(
+        database,
+        original,
+        "TX-ORDER",
+        successful_origin=True,
+        row_tag="Order",
+    )
+
+    with database.begin() as connection:
+        db_validate_trade_consistency(
+            connection,
+            [_incoming(original, transaction_id="TX-OTHER")],
+        )
+        db_validate_trade_consistency(
+            connection,
+            [
+                _incoming(
+                    original,
+                    ib_exec_id="EXEC-OTHER",
+                    transaction_id="TX-ORDER",
+                )
+            ],
         )

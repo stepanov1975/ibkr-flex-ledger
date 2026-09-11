@@ -108,7 +108,7 @@ def db_validate_trade_consistency(
             ):
                 conflicting_fields.append("transaction_id")
 
-            if stored_ib_exec_id == ib_exec_id:
+            if stored_ib_exec_id == ib_exec_id and row["evidence_type"] == "canonical":
                 conflicting_fields.extend(_conflicting_protected_fields(row, request))
 
         if conflicting_fields:
@@ -178,7 +178,43 @@ def _db_trade_rows_for_incoming_identities(
             "SELECT account_id, ib_exec_id, transaction_id "
             "FROM jsonb_to_recordset(CAST(:identities_json AS jsonb)) "
             "AS identity(account_id text, ib_exec_id text, transaction_id text)"
-            ") SELECT DISTINCT trade.event_trade_fill_id, trade.account_id, "
+            "), successful_raw_trade AS ("
+            "SELECT raw.raw_record_id, raw.account_id, "
+            "BTRIM(COALESCE(raw.source_payload->>'ibExecID', '')) AS source_ib_exec_id, "
+            "CASE WHEN BTRIM(COALESCE(raw.source_payload->>'transactionID', '')) "
+            "IN ('', '-', '--', 'N/A') THEN NULL "
+            "ELSE BTRIM(raw.source_payload->>'transactionID') END AS transaction_id, "
+            "CASE WHEN BTRIM(COALESCE(raw.source_payload->>'tradeID', '')) "
+            "IN ('', '-', '--', 'N/A') THEN NULL "
+            "ELSE BTRIM(raw.source_payload->>'tradeID') END AS trade_id, "
+            "UPPER(BTRIM(COALESCE(raw.source_payload->>'levelOfDetail', ''))) AS level_of_detail "
+            "FROM raw_record raw JOIN raw_artifact artifact USING (raw_artifact_id) "
+            "JOIN ingestion_run owner ON owner.ingestion_run_id=raw.ingestion_run_id "
+            "LEFT JOIN ingestion_run completion "
+            "ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+            "WHERE raw.account_id IN (SELECT account_id FROM incoming) "
+            "AND raw.section_name='Trades' "
+            "AND raw.source_row_ref LIKE 'Trades:Trade:%' "
+            "AND (owner.status='success' OR completion.status='success')"
+            "), raw_identity_source AS ("
+            "SELECT raw_record_id, account_id, transaction_id, "
+            "CASE WHEN source_ib_exec_id IN ('-', '--', 'N/A') THEN NULL "
+            "WHEN source_ib_exec_id<>'' THEN source_ib_exec_id "
+            "WHEN level_of_detail='EXECUTION' AND transaction_id IS NOT NULL "
+            "THEN 'FLEX_TXN:' || transaction_id "
+            "WHEN level_of_detail='EXECUTION' AND trade_id IS NOT NULL "
+            "THEN 'FLEX_TRADE:' || trade_id END AS ib_exec_id "
+            "FROM successful_raw_trade"
+            "), raw_identity AS ("
+            "SELECT DISTINCT ON (raw.account_id, raw.ib_exec_id, raw.transaction_id) "
+            "raw.raw_record_id, raw.account_id, raw.ib_exec_id, raw.transaction_id "
+            "FROM raw_identity_source raw JOIN incoming "
+            "ON raw.account_id=incoming.account_id "
+            "AND (raw.ib_exec_id=incoming.ib_exec_id "
+            "OR (incoming.transaction_id IS NOT NULL AND raw.transaction_id=incoming.transaction_id)) "
+            "WHERE raw.ib_exec_id IS NOT NULL "
+            "ORDER BY raw.account_id, raw.ib_exec_id, raw.transaction_id NULLS FIRST, raw.raw_record_id"
+            ") SELECT DISTINCT 'canonical' AS evidence_type, trade.account_id, "
             "trade.instrument_id::text AS instrument_id, trade.source_raw_record_id, "
             "trade.ib_exec_id, trade.transaction_id, trade.trade_timestamp_utc, trade.side, "
             "trade.quantity, trade.price, trade.commission, trade.fees, trade.net_cash, trade.currency "
@@ -186,7 +222,13 @@ def _db_trade_rows_for_incoming_identities(
             "ON trade.account_id = incoming.account_id "
             "AND (trade.ib_exec_id = incoming.ib_exec_id "
             "OR (incoming.transaction_id IS NOT NULL AND trade.transaction_id = incoming.transaction_id)) "
-            "ORDER BY trade.account_id, trade.ib_exec_id, trade.event_trade_fill_id"
+            "UNION ALL SELECT DISTINCT 'raw' AS evidence_type, raw.account_id, "
+            "NULL::text AS instrument_id, raw.raw_record_id AS source_raw_record_id, "
+            "raw.ib_exec_id, raw.transaction_id, NULL::timestamptz AS trade_timestamp_utc, "
+            "NULL::text AS side, NULL::numeric AS quantity, NULL::numeric AS price, "
+            "NULL::numeric AS commission, NULL::numeric AS fees, NULL::numeric AS net_cash, "
+            "NULL::text AS currency FROM raw_identity raw "
+            "ORDER BY account_id, ib_exec_id, source_raw_record_id"
         ),
         {"identities_json": json.dumps(identities)},
     ).mappings()
