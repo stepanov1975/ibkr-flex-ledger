@@ -115,7 +115,23 @@ assert requested_statement_reference_codes == ["REF", "REF"]
 
 **Files:** `README.md`, `MVP_spec_freeze.md`, `docs/operations.md`, relevant tests and this plan.
 
-- [ ] Document strict live execution conflicts, allowed derived-field refreshes, required query metadata, automatic abandoned-run recovery, retained failed payloads, transport budgets, and the legacy recovery limitation. No live broker call, production repair, deploy or automatic acceptance of conflicting data.
-- [ ] Run the complete suite on temporary PostgreSQL, `.venv/bin/ruff check app tests`, and `.venv/bin/mypy`. Investigate failures without weakening assertions unrelated to the changed contracts.
-- [ ] Review the whole diff for scope, raw immutability, transaction/lock cleanup, replay compatibility and diagnostic usability. Fix confirmed issues and rerun affected checks.
-- [ ] Mark tasks complete with verification results; leave a reviewable feature branch without deployment.
+- [x] Document strict live execution conflicts, allowed derived-field refreshes, required query metadata, automatic abandoned-run recovery, retained failed payloads, transport budgets, and the legacy recovery limitation. No live broker call, production repair, deploy or automatic acceptance of conflicting data.
+- [x] Run the complete suite on temporary PostgreSQL, `.venv/bin/ruff check app tests`, and `.venv/bin/mypy`. Investigate failures without weakening assertions unrelated to the changed contracts.
+- [x] Review the whole diff for scope, raw immutability, transaction/lock cleanup, replay compatibility and diagnostic usability. Fix confirmed issues and rerun affected checks.
+- [x] Mark tasks complete with verification results; leave a reviewable feature branch without deployment.
+
+## Verification and review results
+
+Completed on `codex/ibkr-import-reliability` on 2026-09-11.
+
+- Final full suite: **731 passed** on an isolated PostgreSQL 17 instance (84.06s).
+- Full `ruff check app tests` passed; `mypy` passed for all 73 source files; diff whitespace checks passed.
+- Each task passed spec and quality review. Final branch review approved after its late optional transaction-ID finding was fixed; 18 focused tests independently verified that fix.
+- Review also found and resolved PostgreSQL numeric rounding false conflicts and loss of COMMIT acknowledgement incorrectly downgrading a durable success.
+- Successful raw identity evidence participates in validation without rewriting canonical execution identities. Failed reports do not establish trusted identities.
+- Existing legacy partial-write and historical-correction read-model tests use explicit legacy fixtures; current atomic behavior has separate live-ingestion regressions.
+- No live IBKR requests, production-data repairs, deployment, merge, or push occurred. The temporary PostgreSQL container was removed after verification.
+
+Before deploying, stop existing ingestion/replay workers, apply the Alembic migration,
+and restart the workers together. Legacy failed imports retain conservative skip
+behavior until their data has been investigated using verified sources.
