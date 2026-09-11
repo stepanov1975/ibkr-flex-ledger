@@ -207,3 +207,34 @@ def test_validator_accepts_normalized_economics_and_derived_refreshes(database) 
             connection,
             [_incoming(no_costs, commission="0.000", fees="0")],
         )
+
+
+def test_validator_compares_protected_numerics_at_postgresql_scale(database) -> None:
+    seeded = _trade_request(database)
+    extra_scale = replace(
+        seeded,
+        ib_exec_id="EXEC-EXTRA-SCALE",
+        transaction_id="TX-EXTRA-SCALE",
+        quantity="2.123456785",
+        price="100.123456789",
+        commission="1.123456785",
+        fees="0.123456785",
+        net_cash="-201.123456785",
+    )
+    SQLAlchemyCanonicalPersistenceService(database).db_canonical_trade_fill_upsert(
+        extra_scale
+    )
+    equivalent_batch_row = _incoming(
+        extra_scale,
+        quantity="2.123456786",
+        price="100.123456791",
+        commission="1.123456786",
+        fees="0.123456786",
+        net_cash="-201.123456786",
+    )
+
+    with database.begin() as connection:
+        db_validate_trade_consistency(
+            connection,
+            [_incoming(extra_scale), equivalent_batch_row],
+        )

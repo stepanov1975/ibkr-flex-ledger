@@ -55,3 +55,26 @@
 - Exporting the error from `app.db.__init__` is optional; current tests and the
   intended repository integration can import directly from
   `app.db.trade_consistency`.
+
+## Review fix: PostgreSQL numeric precision
+
+- Confirmed every protected numeric (`quantity`, `price`, `commission`, `fees`,
+  and `net_cash`) persists as `numeric(24,8)` in the actual migration history.
+- Added a real PostgreSQL regression that persists all five fields with nine
+  fractional digits, then validates both an identical retry and an incoming
+  batch row whose distinct source literals round to the same stored values.
+- The regression failed before the fix with conflicts for all five protected
+  fields. Protected numeric normalization now quantizes both stored and incoming
+  values to eight fractional places with `ROUND_HALF_UP`, matching PostgreSQL's
+  rounding for positive and negative values.
+- Focused verification passed: `tests/test_trade_consistency.py` reported
+  `9 passed`; the trade consistency, mapping, canonical pipeline, and live
+  ingestion selection reported `64 passed`; Ruff passed for the owned files.
+- The broader correction suite currently has 28 expected-contract failures in
+  `tests/test_import_corrections.py` because concurrent live-validation wiring
+  rejects protected corrections that those old tests still expect to succeed.
+  The root integration task owns those compatibility updates.
+- MyPy currently reaches concurrent interface work and reports three unrelated
+  abstract-class errors for `db_raw_successful_broker_account_ids` on
+  `SQLAlchemyLedgerSnapshotService`; no error points to the owned precision
+  change.

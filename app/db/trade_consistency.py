@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Iterable
 from uuid import UUID
 
@@ -26,6 +26,7 @@ _PROTECTED_FIELDS = (
 )
 _NUMERIC_FIELDS = frozenset({"quantity", "price", "commission", "fees", "net_cash"})
 _ZERO_WHEN_MISSING_FIELDS = frozenset({"commission", "fees"})
+_PROTECTED_NUMERIC_QUANTUM = Decimal("0.00000001")
 
 
 class TradeConsistencyError(ValueError):
@@ -227,7 +228,10 @@ def _normalized_field_value(field_name: str, value: Any) -> Any:
     if field_name in _NUMERIC_FIELDS:
         if value is None or (isinstance(value, str) and not value.strip()):
             return Decimal("0") if field_name in _ZERO_WHEN_MISSING_FIELDS else None
-        return Decimal(str(value).strip())
+        return Decimal(str(value).strip()).quantize(
+            _PROTECTED_NUMERIC_QUANTUM,
+            rounding=ROUND_HALF_UP,
+        )
     if field_name == "trade_timestamp_utc":
         parsed = (
             value
