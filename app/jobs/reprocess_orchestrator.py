@@ -218,6 +218,16 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         config: CanonicalReprocessOrchestratorConfig,
         allow_unsupported_snapshot_cleanup: bool,
     ) -> JobExecutionResult:
+        """Own the account for the full replay and its audit lifecycle."""
+        guard = getattr(self._ingestion_repository, "db_ingestion_run_guard", None)
+        with guard(config.account_id) if guard is not None else nullcontext():
+            return self._job_reprocess_execute_guarded(config, allow_unsupported_snapshot_cleanup)
+
+    def _job_reprocess_execute_guarded(
+        self,
+        config: CanonicalReprocessOrchestratorConfig,
+        allow_unsupported_snapshot_cleanup: bool,
+    ) -> JobExecutionResult:
         """Execute canonical reprocess using the provided replay scope config.
 
         Args:

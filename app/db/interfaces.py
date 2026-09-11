@@ -441,6 +441,9 @@ class CanonicalInstrumentRecord:
 class IngestionRunRepositoryPort(Protocol):
     """Port definition for ingestion run lifecycle persistence and reads."""
 
+    def db_ingestion_run_guard(self, account_id: str) -> ContextManager[None]:
+        """Own an atomic workflow and recover only abandoned started rows."""
+
     def db_ingestion_run_create_started(
         self,
         account_id: str,

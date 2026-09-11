@@ -120,9 +120,9 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         return db_transaction_scope(self._engine)
 
     def db_canonical_skip_is_safe(self, account_id: str) -> bool:
-        """Reject skip assumptions after any failed run for this account.
+        """Reject skip assumptions after legacy failed runs that may have partial writes.
 
-        Canonical commits precede snapshot completion. A successful partial report
+        Legacy canonical commits preceded snapshot completion. A successful partial report
         cannot certify that all failed writes were repaired. Run status is retained
         even after diagnostic retention, so this conservative guard stays durable.
         """
@@ -132,7 +132,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             with db_connection_scope(self._engine) as connection:
                 return not bool(connection.scalar(
                     text("SELECT EXISTS (SELECT 1 FROM ingestion_run "
-                         "WHERE account_id = :account_id AND status = 'failed')"),
+                         "WHERE account_id = :account_id AND status = 'failed' AND NOT semantic_atomic)"),
                     {"account_id": normalized_account_id},
                 ))
         except SQLAlchemyError as error:

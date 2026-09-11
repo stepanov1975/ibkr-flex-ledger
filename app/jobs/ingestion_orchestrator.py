@@ -156,6 +156,12 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         if normalized_job_name != self._INGESTION_JOB_NAME:
             raise ValueError(f"unsupported job_name={normalized_job_name}")
 
+        guard = getattr(self._ingestion_repository, "db_ingestion_run_guard", None)
+        with guard(self._config.account_id) if guard is not None else nullcontext():
+            return self._job_execute_guarded(normalized_job_name)
+
+    def _job_execute_guarded(self, normalized_job_name: str) -> JobExecutionResult:
+        """Execute while the database guard owns this account's run."""
         period_key = snapshot_resolve_report_date_local(datetime.now(timezone.utc).isoformat())
         timeline: list[dict[str, object]] = []
         timeline.append(domain_build_stage_event(stage="run", status="started"))

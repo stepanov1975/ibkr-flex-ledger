@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID
 
 from sqlalchemy import Connection, Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from .session import db_connection_scope
+from .session import db_connection_scope, db_workflow_connection_scope
 
 from .interfaces import (
     IngestionRunAlreadyActiveError,
@@ -20,6 +22,9 @@ from .interfaces import (
     IngestionRunRepositoryPort,
     IngestionRunState,
 )
+
+
+_active_run_guard: ContextVar[tuple[Engine, str] | None] = ContextVar("db_run_guard", default=None)
 
 
 class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
@@ -79,6 +84,47 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             raise ValueError("engine must not be None")
         self._engine = engine
 
+    @contextmanager
+    def db_ingestion_run_guard(self, account_id: str) -> Iterator[None]:
+        """Own an atomic workflow until exit; recover rows only without a live owner."""
+        account = self._validate_non_empty_text(account_id, "account_id")
+        key_1, key_2 = self._build_advisory_lock_keys(account)
+        keys = {"key_1": key_1, "key_2": key_2}
+        # Session ownership survives the short audit/semantic transactions, but
+        # PostgreSQL releases it if the worker's connection dies.
+        with self._engine.connect() as connection:
+            acquired = connection.scalar(text("SELECT pg_try_advisory_lock(:key_1, :key_2)"), keys)
+            connection.commit()
+            if not acquired:
+                raise IngestionRunAlreadyActiveError("run already active")
+            token = _active_run_guard.set((self._engine, account))
+            try:
+                connection.execute(text(
+                    "UPDATE ingestion_run SET status='failed', ended_at_utc=clock_timestamp(), "
+                    "duration_ms=GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp()-started_at_utc))*1000)::bigint, "
+                    "error_code='INGESTION_RUN_INTERRUPTED', "
+                    "error_message='Previous worker exited before finalizing this run.', "
+                    "diagnostics=COALESCE(diagnostics, '[]'::jsonb) || CAST(:diagnostic AS jsonb) "
+                    "WHERE account_id=:account_id AND status='started'"
+                ), {"account_id": account, "diagnostic": json.dumps([{
+                    "stage": "run", "status": "failed",
+                    "details": {"error_code": "INGESTION_RUN_INTERRUPTED",
+                                "error_message": "Recovered after acquiring ownership; no live worker holds the lock."},
+                }])})
+                connection.commit()
+                with db_workflow_connection_scope(self._engine, connection):
+                    yield
+            finally:
+                _active_run_guard.reset(token)
+                try:
+                    if not connection.invalidated and not connection.closed:
+                        connection.execute(text("SELECT pg_advisory_unlock(:key_1, :key_2)"), keys)
+                        connection.commit()
+                except SQLAlchemyError:
+                    # Never put an uncertain session-lock owner back in the pool.
+                    connection.invalidate()
+                    raise
+
     def db_ingestion_run_create_started(
         self,
         account_id: str,
@@ -114,12 +160,14 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
 
         try:
             with db_connection_scope(self._engine, write=True) as connection:
-                lock_row = connection.execute(
-                    text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2) AS lock_acquired"),
-                    {"key_1": advisory_key_1, "key_2": advisory_key_2},
-                ).mappings().one()
-                if not bool(lock_row["lock_acquired"]):
-                    raise IngestionRunAlreadyActiveError("run already active")
+                guarded = _active_run_guard.get() == (self._engine, normalized_account_id)
+                if not guarded:
+                    lock_row = connection.execute(
+                        text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2) AS lock_acquired"),
+                        {"key_1": advisory_key_1, "key_2": advisory_key_2},
+                    ).mappings().one()
+                    if not bool(lock_row["lock_acquired"]):
+                        raise IngestionRunAlreadyActiveError("run already active")
 
                 active_row = connection.execute(
                     text(
@@ -136,9 +184,9 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                 created_row = connection.execute(
                     text(
                         "INSERT INTO ingestion_run ("
-                        "account_id, run_type, status, period_key, flex_query_id, report_date_local, started_at_utc"
+                        "account_id, run_type, status, period_key, flex_query_id, report_date_local, started_at_utc, semantic_atomic"
                         ") VALUES ("
-                        ":account_id, :run_type, 'started', :period_key, :flex_query_id, :report_date_local, now()"
+                        ":account_id, :run_type, 'started', :period_key, :flex_query_id, :report_date_local, now(), :semantic_atomic"
                         ") "
                         "RETURNING ingestion_run_id"
                     ),
@@ -148,6 +196,7 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "period_key": normalized_period_key,
                         "flex_query_id": normalized_flex_query_id,
                         "report_date_local": report_date_local,
+                        "semantic_atomic": guarded,
                     },
                 ).mappings().one()
 
