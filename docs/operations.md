@@ -24,7 +24,11 @@ workers and manual split corrections remain excluded. No age-based takeover is u
 All publications are atomic, and failed runs do not disable duplicate-report skipping.
 Replay uses the same execution-consistency checks as ingestion. The repository guard
 and transaction interfaces are required; old implementations are not supported. Restart
-workers together when deploying this behavior. No additional schema migration is required.
+workers together when deploying this behavior. Apply migrations `20260911_16` and
+`20260911_17` before starting workers. They preserve original trade origins and raw
+payloads while adding a current trade-metadata source and broker-account metadata.
+The account backfill requires an online migration and reads successful artifacts one at a time; unreadable or ambiguous
+account identity stops the migration so the retained evidence can be investigated.
 
 Transient HTTP transport failures use at most three attempts per operation, inside the
 existing request/poll budgets. HTTP 429/502/503/504 honor bounded Retry-After; permanent

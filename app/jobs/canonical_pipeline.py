@@ -112,7 +112,7 @@ def job_canonical_map_and_persist(
                 net_cash_in_base=latest_trade_request.net_cash_in_base,
                 fx_rate_to_base=latest_trade_request.fx_rate_to_base,
                 cost=latest_trade_request.cost,
-                description_source_raw_record_id=latest_trade_request.source_raw_record_id,
+                metadata_source_raw_record_id=latest_trade_request.source_raw_record_id,
             )
         resolved_trade_requests.append(trade_request)
 

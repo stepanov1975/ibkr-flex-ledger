@@ -265,7 +265,7 @@ class CanonicalTradeFillUpsertRequest:
         fx_rate_to_base: Optional FX rate decimal string.
         currency: Trade currency code.
         functional_currency: Functional/base currency code.
-        description_source_raw_record_id: Optional current description source when replay preserves an older origin.
+        metadata_source_raw_record_id: Optional current metadata source when replay preserves an older origin.
     """
 
     account_id: str
@@ -288,7 +288,7 @@ class CanonicalTradeFillUpsertRequest:
     fx_rate_to_base: str | None
     currency: str
     functional_currency: str
-    description_source_raw_record_id: str | None = None
+    metadata_source_raw_record_id: str | None = None
 
 
 @dataclass(frozen=True)

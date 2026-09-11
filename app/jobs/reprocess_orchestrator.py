@@ -442,6 +442,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
         except Exception as error:
             error_code = "REPROCESS_UNEXPECTED_ERROR"
+            stable_error_code = getattr(error, "code", None)
             if isinstance(error, FlexRequestError):
                 error_code = "REPROCESS_REQUEST_ERROR"
             elif isinstance(error, FlexStatementError):
@@ -454,6 +455,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                 error_code = "REPROCESS_TIMEOUT_ERROR"
             elif isinstance(error, ConnectionError):
                 error_code = "REPROCESS_CONNECTION_ERROR"
+            elif isinstance(error, ValueError) and stable_error_code == "TRADE_CONSISTENCY_CONFLICT":
+                error_code = str(stable_error_code)
             elif isinstance(error, ValueError):
                 error_code = "REPROCESS_CONTRACT_ERROR"
 

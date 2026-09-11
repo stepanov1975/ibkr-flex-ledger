@@ -50,3 +50,18 @@ def test_failed_report_does_not_bind_account_and_header_only_success_does(databa
     root.find('.//FlexStatement').set('accountId', 'U_OTHER')
     adapter.payload_bytes = ET.tostring(root)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
+
+
+def test_header_only_successful_identity_lookup_does_not_reload_artifact_payload(database):
+    orchestrator, adapter, raw, *_ = _harness(database)
+    root = ET.fromstring(_SEEDED_PAYLOAD)
+    root.find('.//AccountInformation').attrib.pop('accountId')
+    root.find('.//FlexStatement').set('accountId', 'U_HEADER')
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute('ingestion_run').status == 'success'
+    assert raw.db_raw_successful_broker_account_ids('INTEGRITY') == frozenset({'U_HEADER'})
+
+    with database.begin() as connection:
+        connection.execute(text("UPDATE raw_artifact SET source_payload=CAST('unreadable' AS bytea)"))
+
+    assert raw.db_raw_successful_broker_account_ids('INTEGRITY') == frozenset({'U_HEADER'})

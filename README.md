@@ -332,8 +332,10 @@ use the same lock. A committed success remains successful if its acknowledgement
 
 All imports publish atomically, so failed runs do not disable duplicate-report skipping.
 The application requires the current repository guard and transaction interfaces.
-Restart ingestion/replay workers together when deploying this behavior. The reliability
-changes require no additional schema migration.
+Restart ingestion/replay workers together when deploying this behavior. Migrations
+`20260911_16` and `20260911_17` add a separate source for refreshed trade metadata and
+store broker account identity without repeatedly loading historical report bytes.
+Existing trade origins and raw payloads remain unchanged.
 
 API endpoints:
 

@@ -31,6 +31,7 @@ from app.db.interfaces import (
     RawArtifactReplayCandidate,
     RawRecordReadRepositoryPort,
 )
+from app.db.trade_consistency import TradeConsistencyError
 from app.jobs import reprocess_orchestrator as reprocess_module
 from app.jobs.reprocess_orchestrator import (
     CanonicalReprocessOrchestrator,
@@ -865,6 +866,32 @@ def test_jobs_reprocess_maps_typed_statement_error_to_deterministic_code(
 
     assert result.status == "failed"
     assert ingestion_repository.finalize_calls[0]["error_code"] == "REPROCESS_STATEMENT_ERROR"
+
+
+def test_jobs_reprocess_preserves_trade_consistency_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_trade_consistency_error(**_kwargs: object) -> NoReturn:
+        raise TradeConsistencyError(
+            identity="ib_exec_id=EXEC-conflict",
+            conflicting_fields=("price",),
+            source_raw_record_ids=(str(UUID(int=91)), str(UUID(int=92))),
+        )
+
+    monkeypatch.setattr(
+        reprocess_module,
+        "job_canonical_map_and_persist",
+        raise_trade_consistency_error,
+    )
+    harness = _build_reprocess_harness([])
+
+    result = harness.orchestrator.job_execute(job_name="reprocess_run")
+
+    assert result.status == "failed"
+    assert (
+        harness.ingestion_repository.finalize_calls[0]["error_code"]
+        == "TRADE_CONSISTENCY_CONFLICT"
+    )
 
 
 def test_reprocess_bootstrap_provides_snapshot_dependencies(

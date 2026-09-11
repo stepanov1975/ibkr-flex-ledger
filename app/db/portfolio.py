@@ -504,7 +504,8 @@ class SQLAlchemyPortfolioService:
             "UPPER(BTRIM(instrument.asset_category)) NOT IN ('CASH', 'FX') AS included_in_instrument_pnl, "
             "event.report_date_local AS activity_date FROM event_trade_fill event "
             "JOIN instrument ON instrument.instrument_id=event.instrument_id "
-            "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "JOIN raw_record raw ON raw.raw_record_id="
+            "COALESCE(event.metadata_source_raw_record_id, event.source_raw_record_id) "
             "WHERE event.account_id=:account_id AND COALESCE(event.commission, 0)<>0"
             "), cashflow_cost_events AS ("
             "SELECT CASE WHEN event.cash_action='Withholding Tax' THEN 'Dividend withholding tax' "
@@ -600,7 +601,8 @@ class SQLAlchemyPortfolioService:
             "AND event.fx_rate_to_base>0 THEN -event.commission*event.fx_rate_to_base ELSE NULL END "
             "AS commission_usd FROM event_trade_fill event "
             "JOIN instrument ON instrument.instrument_id=event.instrument_id "
-            "JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "JOIN raw_record raw ON raw.raw_record_id="
+            "COALESCE(event.metadata_source_raw_record_id, event.source_raw_record_id) "
             "WHERE event.account_id=:account_id AND COALESCE(event.commission, 0)<>0 "
             "AND UPPER(BTRIM(instrument.asset_category)) NOT IN ('CASH', 'FX')"
             "), grouped AS ("
@@ -950,7 +952,8 @@ class SQLAlchemyPortfolioService:
         unrealized = raw_numeric("fifoPnlUnrealized")
         # Canonical identities deduplicate overlapping reports; amounts remain broker-reported.
         trade_history = (
-            "FROM event_trade_fill event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "FROM event_trade_fill event JOIN raw_record raw ON raw.raw_record_id="
+            "COALESCE(event.metadata_source_raw_record_id, event.source_raw_record_id) "
             "WHERE event.account_id=s.account_id AND event.instrument_id=s.instrument_id "
             "AND event.report_date_local<=s.report_date_local "
         )

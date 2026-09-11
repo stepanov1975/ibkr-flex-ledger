@@ -49,38 +49,19 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
         try:
             with db_connection_scope(self._engine) as connection:
                 rows = connection.execute(text(
-                    "SELECT NULLIF(BTRIM(info.source_payload->>'accountId'), '') AS broker_account_id, "
-                    "CASE WHEN NULLIF(BTRIM(info.source_payload->>'accountId'), '') IS NULL "
-                    "THEN artifact.source_payload END AS header_payload "
+                    "SELECT DISTINCT artifact.broker_account_id "
                     "FROM raw_artifact artifact "
-                    "LEFT JOIN raw_record info ON info.raw_artifact_id=artifact.raw_artifact_id "
-                    "AND info.section_name='AccountInformation' "
                     "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
                     "LEFT JOIN ingestion_run completed "
                     "ON completed.ingestion_run_id=artifact.completed_ingestion_run_id "
-                    "WHERE artifact.account_id=:account_id AND "
+                    "WHERE artifact.account_id=:account_id AND artifact.broker_account_id IS NOT NULL AND "
                     "((artifact.completed_ingestion_run_id IS NOT NULL AND completed.status='success') "
                     "OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success'))"
                 ), {"account_id": account_id}).mappings().all()
         except SQLAlchemyError as error:
             raise RuntimeError("successful broker account lookup failed") from error
 
-        identities: set[str] = set()
-        for row in rows:
-            if row["broker_account_id"]:
-                identities.add(row["broker_account_id"])
-            else:
-                # Some reports identify the account only in the statement header.
-                # Read bytes only for that optional metadata shape.
-                try:
-                    root = ET.fromstring(bytes(row["header_payload"]))
-                except ET.ParseError as error:
-                    raise RuntimeError("successful report has unreadable account metadata") from error
-                identities.update(
-                    value for statement in root.iter("FlexStatement")
-                    if (value := statement.attrib.get("accountId", "").strip())
-                )
-        return frozenset(identities)
+        return frozenset(row["broker_account_id"] for row in rows)
 
     def db_raw_artifact_upsert(self, request: RawArtifactPersistRequest) -> RawArtifactPersistResult:
         """Persist or reuse immutable raw artifact by dedupe identity key.
@@ -99,17 +80,21 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
         normalized_reference = self._db_raw_validate_reference(request.reference)
         if not isinstance(request.source_payload, bytes):
             raise ValueError("request.source_payload must be bytes")
+        broker_account_id = self._db_raw_try_extract_broker_account_id(request.source_payload)
 
         try:
             with db_connection_scope(self._engine, write=True) as connection:
                 persisted_row = connection.execute(
                     text(
                         "INSERT INTO raw_artifact ("
-                        "ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, report_date_local, source_payload"
+                        "ingestion_run_id, account_id, period_key, flex_query_id, payload_sha256, report_date_local, "
+                        "broker_account_id, source_payload"
                         ") VALUES ("
-                        ":ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, :report_date_local, :source_payload"
+                        ":ingestion_run_id, :account_id, :period_key, :flex_query_id, :payload_sha256, :report_date_local, "
+                        ":broker_account_id, :source_payload"
                         ") "
                         "ON CONFLICT (account_id, period_key, flex_query_id, payload_sha256) DO UPDATE SET "
+                        "broker_account_id = COALESCE(raw_artifact.broker_account_id, EXCLUDED.broker_account_id), "
                         "created_at_utc = raw_artifact.created_at_utc "
                         "RETURNING raw_artifact_id, ingestion_run_id, account_id, period_key, flex_query_id, "
                         "payload_sha256, report_date_local, source_payload, created_at_utc, "
@@ -122,6 +107,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                         "flex_query_id": normalized_reference.flex_query_id,
                         "payload_sha256": normalized_reference.payload_sha256,
                         "report_date_local": normalized_reference.report_date_local,
+                        "broker_account_id": broker_account_id,
                         "source_payload": request.source_payload,
                     },
                 ).mappings().fetchone()
@@ -137,6 +123,25 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                 )
         except SQLAlchemyError as error:
             raise RuntimeError("raw artifact persistence failed") from error
+
+    def _db_raw_try_extract_broker_account_id(self, source_payload: bytes) -> str | None:
+        """Extract one consistent broker identity without rejecting retained failures."""
+        try:
+            root = ET.fromstring(source_payload)
+        except ET.ParseError:
+            return None
+
+        identities: set[str] = set()
+        for element in root.iter():
+            if "accountId" not in element.attrib:
+                continue
+            broker_account_id = element.attrib["accountId"].strip()
+            if not broker_account_id:
+                return None
+            identities.add(broker_account_id)
+        if len(identities) != 1:
+            return None
+        return next(iter(identities))
 
     def db_raw_record_insert_many(self, requests: list[RawRecordPersistRequest]) -> RawRecordPersistResult:
         """Insert raw rows with deterministic unique-key dedupe behavior.

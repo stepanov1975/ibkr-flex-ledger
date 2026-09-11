@@ -542,19 +542,22 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     connection.execute(
                         text(
                             "INSERT INTO event_trade_fill ("
-                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, ib_exec_id, transaction_id, "
+                            "account_id, instrument_id, ingestion_run_id, source_raw_record_id, metadata_source_raw_record_id, "
+                            "ib_exec_id, transaction_id, "
                             "trade_timestamp_utc, report_date_local, side, quantity, price, cost, commission, fees, "
                             "realized_pnl, net_cash, net_cash_in_base, fx_rate_to_base, currency, functional_currency, description"
                             ") VALUES ("
                             ":account_id, CAST(:instrument_id AS uuid), CAST(:ingestion_run_id AS uuid), "
-                            "CAST(:source_raw_record_id AS uuid), :ib_exec_id, :transaction_id, "
+                            "CAST(:source_raw_record_id AS uuid), "
+                            "COALESCE(CAST(:metadata_source_raw_record_id AS uuid), CAST(:source_raw_record_id AS uuid)), "
+                            ":ib_exec_id, :transaction_id, "
                             "CAST(:trade_timestamp_utc AS timestamptz), CAST(:report_date_local AS date), :side, "
                             "CAST(:quantity AS numeric), CAST(:price AS numeric), CAST(:cost AS numeric), "
                             "CAST(:commission AS numeric), CAST(:fees AS numeric), CAST(:realized_pnl AS numeric), "
                             "CAST(:net_cash AS numeric), CAST(:net_cash_in_base AS numeric), "
                             "CAST(:fx_rate_to_base AS numeric), :currency, :functional_currency, "
                             "(SELECT NULLIF(BTRIM(source_payload->>'description'), '') FROM raw_record "
-                            "WHERE raw_record_id=COALESCE(CAST(:description_source_raw_record_id AS uuid), "
+                            "WHERE raw_record_id=COALESCE(CAST(:metadata_source_raw_record_id AS uuid), "
                             "CAST(:source_raw_record_id AS uuid)))"
                             ") ON CONFLICT ON CONSTRAINT uq_event_trade_fill_account_exec DO UPDATE SET "
                             "price = EXCLUDED.price, "
@@ -564,6 +567,19 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "net_cash_in_base = EXCLUDED.net_cash_in_base, "
                             "fx_rate_to_base = EXCLUDED.fx_rate_to_base, "
                             "cost = EXCLUDED.cost, "
+                            # Only consumed metadata changes invalidate existing accounting snapshots.
+                            "metadata_source_raw_record_id = CASE WHEN ("
+                            "SELECT COUNT(DISTINCT jsonb_build_array("
+                            "COALESCE(NULLIF(UPPER(BTRIM(metadata.source_payload->>'ibCommissionCurrency')), ''), "
+                            "UPPER(BTRIM(event_trade_fill.currency))), "
+                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
+                            "THEN 1::numeric ELSE REPLACE(BTRIM(metadata.source_payload->>'multiplier'), ',', '')::numeric END, "
+                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
+                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END"
+                            ")) > 1 FROM raw_record metadata WHERE metadata.raw_record_id IN ("
+                            "COALESCE(event_trade_fill.metadata_source_raw_record_id, event_trade_fill.source_raw_record_id), "
+                            "EXCLUDED.metadata_source_raw_record_id)) "
+                            "THEN EXCLUDED.metadata_source_raw_record_id ELSE event_trade_fill.metadata_source_raw_record_id END, "
                             "description = COALESCE(EXCLUDED.description, event_trade_fill.description)"
                         ),
                         normalized_trade_requests,
@@ -908,8 +924,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 "request.source_raw_record_id",
             ),
             "ib_exec_id": self._db_canonical_validate_non_empty_text(request.ib_exec_id, "request.ib_exec_id"),
-            "description_source_raw_record_id": self._db_canonical_validate_optional_uuid_text(
-                request.description_source_raw_record_id,
+            "metadata_source_raw_record_id": self._db_canonical_validate_optional_uuid_text(
+                request.metadata_source_raw_record_id,
             ),
             "transaction_id": self._db_canonical_validate_optional_text(request.transaction_id),
             "trade_timestamp_utc": self._db_canonical_validate_non_empty_text(
