@@ -75,7 +75,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         "LIMIT 1"
         ") AS prior ON TRUE "
         "WHERE current.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
-        "AND (prior.raw_record_id IS NULL "
+        "AND ((current.section_name='CorporateActions' AND current.source_payload->>'type' IN ('IC','SO','SPINOFF')) "
+        "OR prior.raw_record_id IS NULL "
         "OR current.source_payload IS DISTINCT FROM prior.source_payload) "
         "ORDER BY current.created_at_utc ASC, current.raw_record_id ASC"
     )
@@ -738,7 +739,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "manual_case_id = COALESCE(EXCLUDED.manual_case_id, event_corp_action.manual_case_id) "
                             # Equivalent source copies must not count as an accounting
                             # mutation merely because their raw/run identifiers differ.
-                            "WHERE (event_corp_action.conid, event_corp_action.instrument_id, "
+                            "WHERE EXCLUDED.reorg_code IN ('IC','SPINOFF') OR (event_corp_action.conid, event_corp_action.instrument_id, "
                             "event_corp_action.transaction_id, event_corp_action.reorg_code, "
                             "event_corp_action.report_date_local, event_corp_action.description, "
                             "event_corp_action.requires_manual, event_corp_action.provisional, event_corp_action.manual_case_id, "
@@ -753,6 +754,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                         corp_action_requests_with_action_id,
                     )
 
+                from app.db.corporate_action_resolution import refresh_security_resolutions
+
+                affected_instrument_ids.update(refresh_security_resolutions(
+                    connection, self._engine, [row['source_raw_record_id'] for row in normalized_corp_action_requests],
+                    sorted({row['account_id'] for row in normalized_trade_requests + normalized_cashflow_requests + normalized_fx_requests + normalized_corp_action_requests}),
+                ))
                 if normalized_corp_action_requests:
                     correction_scope = {"source_ids": [row["source_raw_record_id"] for row in normalized_corp_action_requests]}
                     connection.execute(text(

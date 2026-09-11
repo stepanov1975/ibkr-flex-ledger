@@ -95,9 +95,9 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 ).isoformat(),
             ) if snapshots else []
             lots = [dict(row) for row in connection.execute(text(
-                "SELECT l.instrument_id, l.open_event_trade_fill_id, l.opened_at_utc, l.closed_at_utc, "
+                "SELECT l.instrument_id, l.open_event_trade_fill_id, l.open_event_corp_action_id, l.opened_at_utc, l.closed_at_utc, "
                 "l.open_quantity, l.remaining_quantity, l.cost_basis_remaining, l.realized_pnl_to_date, "
-                "l.status, t.side FROM position_lot l JOIN event_trade_fill t "
+                "l.status, COALESCE(t.side, 'BUY') AS side FROM position_lot l LEFT JOIN event_trade_fill t "
                 "ON t.event_trade_fill_id=l.open_event_trade_fill_id AND t.account_id=l.account_id "
                 "WHERE l.account_id=:account_id AND l.instrument_id=ANY(:instrument_ids) "
                 "ORDER BY l.opened_at_utc DESC, l.position_lot_id"

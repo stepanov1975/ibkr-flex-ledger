@@ -19,6 +19,7 @@ from .session import db_connection_scope
 from app.db.interfaces import (
     LedgerCashflowRecord,
     LedgerCorporateActionRecord,
+    LedgerSecurityMovementRecord,
     LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
@@ -653,6 +654,17 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             ))
         return actions
 
+    def db_ledger_security_movement_list_for_account(
+        self, account_id: str, through_report_date_local: str,
+    ) -> list[LedgerSecurityMovementRecord]:
+        """Read active source-bound resolutions before determining ledger scope."""
+        from .corporate_action_resolution import read_security_movements
+
+        normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
+        through_date = self._db_ledger_validate_date_text(through_report_date_local, "through_report_date_local")
+        with self._connection_scope() as connection:
+            return read_security_movements(connection, normalized_account_id, through_date)
+
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
 
@@ -679,11 +691,11 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 connection.execute(
                     text(
                         "INSERT INTO position_lot ("
-                        "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, closed_at_utc, "
+                        "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, open_event_corp_action_id, opened_at_utc, closed_at_utc, "
                         "open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, realized_pnl_to_date, status"
                         ") VALUES ("
                         "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
-                        "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
+                        "CAST(:open_event_trade_fill_id AS uuid), CAST(:open_event_corp_action_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                         "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
                         "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), "
                         "CAST(:realized_pnl_to_date AS numeric), :status"
@@ -754,6 +766,12 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     "SELECT instrument_id FROM event_trade_fill WHERE account_id=:account_id AND report_date_local>:through_date "
                     "UNION SELECT instrument_id FROM event_corp_action WHERE account_id=:account_id AND report_date_local>:through_date "
                     "AND NOT requires_manual AND reorg_code IN ('FORWARDSPLIT', 'REVERSESPLIT', 'STOCKDIV') "
+                    "UNION SELECT r.source_instrument_id FROM corporate_action_resolution r "
+                    "JOIN event_corp_action e USING(event_corp_action_id) "
+                    "WHERE e.account_id=:account_id AND r.active AND r.report_date_local>:through_date "
+                    "UNION SELECT r.destination_instrument_id FROM corporate_action_resolution r "
+                    "JOIN event_corp_action e USING(event_corp_action_id) "
+                    "WHERE e.account_id=:account_id AND r.active AND r.report_date_local>:through_date "
                     "UNION SELECT instrument_id FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local>:through_date"
                 ), {"account_id": normalized_account_id, "through_date": through_date}).mappings().all()
                 newer_ids = {str(row["instrument_id"]) for row in newer_rows if row["instrument_id"] is not None}
@@ -767,11 +785,11 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                     connection.execute(
                         text(
                             "INSERT INTO position_lot ("
-                            "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, opened_at_utc, "
+                            "position_lot_id, account_id, instrument_id, open_event_trade_fill_id, open_event_corp_action_id, opened_at_utc, "
                             "closed_at_utc, open_quantity, remaining_quantity, open_price, cost_basis_open, cost_basis_remaining, "
                             "realized_pnl_to_date, status) VALUES ("
                             "CAST(:position_lot_id AS uuid), :account_id, CAST(:instrument_id AS uuid), "
-                            "CAST(:open_event_trade_fill_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
+                            "CAST(:open_event_trade_fill_id AS uuid), CAST(:open_event_corp_action_id AS uuid), CAST(:opened_at_utc AS timestamptz), "
                             "CAST(:closed_at_utc AS timestamptz), CAST(:open_quantity AS numeric), "
                             "CAST(:remaining_quantity AS numeric), CAST(:open_price AS numeric), "
                             "CAST(:cost_basis_open AS numeric), CAST(:cost_basis_remaining AS numeric), CAST(:realized_pnl_to_date AS numeric), :status) "
@@ -1039,13 +1057,19 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         if status not in {"open", "closed"}:
             raise ValueError("request.status must be one of: open, closed")
 
+        if request.open_event_trade_fill_id is None and request.open_event_corp_action_id is None:
+            raise ValueError("position lot requires an opening trade or corporate action")
+
         return {
             "position_lot_id": self._db_ledger_validate_uuid_text(request.position_lot_id, "request.position_lot_id"),
             "account_id": self._db_ledger_validate_non_empty_text(request.account_id, "request.account_id"),
             "instrument_id": self._db_ledger_validate_uuid_text(request.instrument_id, "request.instrument_id"),
-            "open_event_trade_fill_id": self._db_ledger_validate_uuid_text(
+            "open_event_trade_fill_id": None if request.open_event_trade_fill_id is None else self._db_ledger_validate_uuid_text(
                 request.open_event_trade_fill_id,
                 "request.open_event_trade_fill_id",
+            ),
+            "open_event_corp_action_id": None if request.open_event_corp_action_id is None else self._db_ledger_validate_uuid_text(
+                request.open_event_corp_action_id, "request.open_event_corp_action_id",
             ),
             "opened_at_utc": request.opened_at_utc.isoformat(),
             "closed_at_utc": None if request.closed_at_utc is None else request.closed_at_utc.isoformat(),

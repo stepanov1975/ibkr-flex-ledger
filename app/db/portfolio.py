@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
@@ -11,6 +12,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .stock_history import db_stock_history
+from .corporate_action_evidence import action_evidence
 
 from .portfolio_interfaces import (
     CashBalanceReportRecord,
@@ -286,9 +288,11 @@ class SQLAlchemyPortfolioService:
                     ),
                     {"status": self._optional_text(status)},
                 ).mappings().all()
+                cases = [replace(self._manual_case(row), evidence=action_evidence(connection, row['event_corp_action_id']))
+                         for row in rows]
         except SQLAlchemyError as error:
             raise RuntimeError("manual case list failed") from error
-        return [self._manual_case(row) for row in rows]
+        return cases
 
     def db_manual_case_update(
         self,

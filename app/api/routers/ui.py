@@ -118,16 +118,21 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 </style></head><body><header><div><h1>IBKR Flex Ledger</h1><div class="muted">Auditable portfolio accounting</div></div><div><a href="/ui">Portfolio</a> · <a href="/docs">API docs</a> · <button onclick="loadAll()">Refresh</button></div></header>
 <main><div class="grid">
 <section class="card"><h2>Scheduled ingestion success</h2><div id="success" class="metric">—</div><div id="slo-note" class="muted">Loading SLO…</div></section>
-<section class="card"><h2>Actions needing attention</h2><div id="case-count" class="metric">—</div><div class="muted">Affected instruments are provisional</div></section>
+<section class="card"><h2>Actions needing attention</h2><div id="case-count" class="metric">—</div><div class="muted">Available decisions · <span id="unsupported-count">—</span> need accounting support</div></section>
 <section class="card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div class="muted">Functional currency snapshots</div></section>
 <section class="card wide"><h2>Daily P&amp;L by instrument</h2><div class="scroll"><table><thead><tr><th>Date</th><th>Symbol</th><th>Position</th><th>Realized</th><th>Unrealized</th><th>Total</th><th>State</th></tr></thead><tbody id="pnl"></tbody></table></div></section>
 <section class="card"><h2>Labels</h2><form id="label-form"><input id="label-name" required placeholder="New label"><input id="label-color" placeholder="#68d5b4"><button>Add</button></form><div id="labels"></div></section>
 <section class="card full"><h2>Corporate-action review queue</h2>
-<p class="muted">Supported actions with an explicit broker split ratio are processed automatically during ingestion. Missing ratios can be corrected below.</p>
-<p class="muted">Preview recalculates the affected snapshots and FIFO lots without saving. Apply correction saves the verified ratio and recalculated accounting together. Unsupported actions remain provisional until accounting support is added.</p>
+<p class="muted">Supported actions with an explicit broker split ratio are processed automatically during ingestion. Review missing split ratios, paired identifier changes and received security distributions below.</p>
+<p class="muted">Preview recalculates the affected snapshots and FIFO lots without saving. Apply saves the verified treatment and recalculated accounting together.</p>
 <label><input id="show-reviewed" type="checkbox"> Show handled actions</label>
 <p id="case-error" class="bad" role="alert"></p>
+<p id="empty-cases" hidden>No actions need a decision. Any unsupported accounting is listed separately below.</p>
 <div class="scroll"><table><thead><tr><th>Created</th><th>Symbol</th><th>Action / report date</th><th>Reason and required check</th><th>Accounting status</th><th>Owner / review note</th><th></th></tr></thead><tbody id="cases"></tbody></table></div></section>
+<section class="card full"><h2>Unsupported accounting</h2>
+<p class="muted">These actions remain provisional and need accounting support. They are excluded from the decision count.</p>
+<p id="empty-unsupported" hidden>No unsupported accounting actions.</p>
+<div class="scroll"><table><thead><tr><th>Created</th><th>Symbol</th><th>Action / report date</th><th>Reason and required check</th><th>Accounting status</th><th>Owner / review note</th><th></th></tr></thead><tbody id="unsupported-cases"></tbody></table></div></section>
 <section class="card full" id="split-editor" hidden><h2 id="split-title">Correct split ratio</h2>
 <p id="split-description" class="muted"></p>
 <p>Enter the share exchange from the broker notice: for a 3-for-2 split, enter 3 new shares and 2 old shares.</p>
@@ -139,6 +144,18 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <div class="scroll"><table><thead><tr><th>Date</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="split-snapshots"></tbody></table></div>
 <h3>Open FIFO lots</h3><p class="muted">Lot quantities and unit costs can change even when broker-reported positions stay the same.</p>
 <div class="scroll"><table><thead><tr><th>Comparison</th><th>Lot</th><th>Remaining units</th><th>Unit cost</th><th>Lot cost basis</th></tr></thead><tbody id="split-lots"></tbody></table></div>
+</section>
+<section class="card full" id="resolution-editor" hidden><h2 id="resolution-title">Review corporate action</h2>
+<p id="resolution-description"></p>
+<h3>Broker legs</h3><div class="scroll"><table><thead><tr><th>Symbol</th><th>Conid</th><th>Quantity</th><th>Currency</th><th>Reported cost basis</th><th>Report date</th><th>Description</th></tr></thead><tbody id="resolution-legs"></tbody></table></div>
+<div id="distribution-basis-fields" hidden><p><label><span id="distribution-basis-label">Total cost basis of credited units</span> <input id="distribution-basis" type="number" min="0" step="any" required></label></p>
+<p class="muted">This records the received security's cost basis. It does not reallocate cost basis from the parent security. Enter zero only when the broker evidence confirms zero basis.</p></div>
+<p><label>Broker evidence / note (required) <input id="resolution-note" maxlength="2000" required></label></p>
+<p id="resolution-error" class="bad" role="alert"></p>
+<p><button id="preview-resolution">Preview changes</button> <button id="apply-resolution" disabled>Apply treatment</button> <button id="cancel-resolution">Cancel</button></p>
+<p id="resolution-summary" aria-live="polite"></p>
+<div class="scroll"><table><thead><tr><th>Symbol</th><th>Date</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="resolution-snapshots"></tbody></table></div>
+<h3>FIFO lots</h3><div class="scroll"><table><thead><tr><th>Comparison</th><th>Symbol</th><th>Remaining units</th><th>Remaining cost basis</th><th>Acquired (UTC)</th></tr></thead><tbody id="resolution-lots"></tbody></table></div>
 </section>
 <section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div><p><a href="/ui/ingestion-runs">View all ingestion runs</a></p></section>
 </div></main><script>
@@ -153,20 +170,22 @@ async function json(url,options){const response=await fetch(url,options);const d
 async function loadSlo(){const x=await json('/operations/slo');el('success').textContent=x.success_rate===null?'No scheduled runs':(x.success_rate*100).toFixed(1)+'%';el('slo-note').textContent=x.alerting?'Attention required':'Within alert thresholds';el('slo-note').className=x.alerting?'bad':'muted'}
 async function loadPnl(){const x=await json('/reports/pnl/by-instrument');el('pnl').replaceChildren();let latest=null,total=0;for(const item of x.items){if(latest===null||item.report_date_local>latest){latest=item.report_date_local;total=0}if(item.report_date_local===latest)total+=Number(item.total_pnl);const tr=document.createElement('tr');[formatDate(item.report_date_local),item.symbol].forEach(v=>cell(tr,v));cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));cell(tr,item.provisional?'Provisional':'Final',item.provisional?'bad':'');el('pnl').append(tr)}el('total-pnl').textContent=latest===null?'No snapshots':total.toFixed(2)}
 async function loadLabels(){const x=await json('/labels');el('labels').replaceChildren();for(const item of x.items){const p=document.createElement('p');p.className='pill';p.textContent=item.name;el('labels').append(p)}}
+function reviewState(item){return item.review_state||(item.can_correct_split?'actionable':item.requires_manual?'unsupported':'handled')}
 async function loadCases(){
-const x=await json('/corporate-actions/cases');el('case-count').textContent=x.items.filter(item=>item.requires_manual).length;el('cases').replaceChildren();
+const x=await json('/corporate-actions/cases'),actionable=x.items.filter(item=>reviewState(item)==='actionable').length,unsupported=x.items.filter(item=>reviewState(item)==='unsupported').length;
+el('case-error').textContent='';el('case-count').textContent=actionable;el('unsupported-count').textContent=unsupported;el('empty-cases').hidden=actionable!==0;el('empty-unsupported').hidden=unsupported!==0;el('cases').replaceChildren();el('unsupported-cases').replaceChildren();
 for(const item of x.items){
-if(!item.requires_manual&&!el('show-reviewed').checked)continue;
+const state=reviewState(item);if(state==='handled'&&!el('show-reviewed').checked)continue;
 const tr=document.createElement('tr');cell(tr,formatDateTime(item.created_at_utc));cell(tr,item.symbol);
 cell(tr,item.action_type+' · '+formatDate(item.report_date_local)+' · '+(item.description||'No broker description'));
-cell(tr,item.review_reason+' '+item.required_check);
-cell(tr,item.requires_manual?(item.can_correct_split?'Split correction available · Provisional':'Accounting support required · Provisional'):'Handled');
+cell(tr,(item.review_reason||'')+' '+(item.required_check||''));
+cell(tr,state==='actionable'?'Decision available · Provisional':state==='unsupported'?'Accounting support required · Provisional':'Handled');
 cell(tr,(item.owner||'Unassigned')+(item.resolution_note?' · '+item.resolution_note:''));
-const td=document.createElement('td');if(item.can_correct_split){const button=document.createElement('button');button.textContent='Enter split ratio';button.onclick=()=>openSplit(item);td.append(button)}tr.append(td);el('cases').append(tr)
+const td=document.createElement('td');if(state==='actionable'){if(item.can_correct_split){const button=document.createElement('button');button.textContent='Enter split ratio';button.onclick=()=>openSplit(item);td.append(button)}for(const option of item.resolution_options||[]){if(!['security_transfer','distribution'].includes(option.type))continue;const button=document.createElement('button');button.textContent=option.type==='security_transfer'?'Preview transfer':'Enter distribution basis';button.onclick=()=>openResolution(item,option.type);td.append(button)}}tr.append(td);el(state==='unsupported'?'unsupported-cases':'cases').append(tr)
 }}
 let splitCase=null,splitPreview=null,splitDraft=null,splitVersion=0,splitBusy=false;
 function invalidateSplit(){splitVersion++;splitPreview=null;splitDraft=null;el('apply-split').disabled=true;el('split-summary').textContent='';el('split-snapshots').replaceChildren();el('split-lots').replaceChildren()}
-function openSplit(item){if(splitBusy)return;splitCase=item;invalidateSplit();el('case-error').textContent='';el('split-editor').hidden=false;el('split-title').textContent='Correct '+item.symbol+' split ratio';el('split-description').textContent=(item.description||'')+' · Effective report date: '+formatDate(item.report_date_local);for(const id of ['new-shares','old-shares','split-note'])el(id).value=''}
+function openSplit(item){if(splitBusy||resolutionBusy)return;cancelResolution();splitCase=item;invalidateSplit();el('case-error').textContent='';el('split-editor').hidden=false;el('split-title').textContent='Correct '+item.symbol+' split ratio';el('split-description').textContent=(item.description||'')+' · Effective report date: '+formatDate(item.report_date_local);for(const id of ['new-shares','old-shares','split-note'])el(id).value=''}
 function cancelSplit(){if(splitBusy)return;splitCase=null;invalidateSplit();el('split-editor').hidden=true}
 function formatSplitPosition(value){
 const raw=esc(value),match=/^(-?)([0-9]+)(?:[.]([0-9]*))?(?:e([+-]?[0-9]+))?$/i.exec(raw);if(!match)return raw;
@@ -189,8 +208,36 @@ try{const result=await json('/corporate-actions/cases/'+splitCase.case_id+'/spli
 }
 for(const id of ['new-shares','old-shares','split-note'])el(id).oninput=invalidateSplit;
 el('preview-split').onclick=()=>requestSplit(false);el('apply-split').onclick=()=>requestSplit(true);el('cancel-split').onclick=cancelSplit;
+let resolutionCase=null,resolutionTreatment=null,resolutionPreview=null,resolutionDraft=null,resolutionVersion=0,resolutionBusy=false;
+function invalidateResolution(){resolutionVersion++;resolutionPreview=null;resolutionDraft=null;el('apply-resolution').disabled=true;el('resolution-summary').textContent='';el('resolution-snapshots').replaceChildren();el('resolution-lots').replaceChildren()}
+function cancelResolution(){if(resolutionBusy)return;resolutionCase=null;invalidateResolution();el('resolution-editor').hidden=true}
+function openResolution(item,treatment){
+if(splitBusy||resolutionBusy)return;cancelSplit();resolutionCase=item;resolutionTreatment=treatment;invalidateResolution();el('resolution-error').textContent='';el('resolution-editor').hidden=false;
+el('resolution-title').textContent=(treatment==='security_transfer'?'Transfer existing position: ':'Record received security: ')+item.symbol;
+el('resolution-description').textContent=[item.description,item.review_reason,item.required_check].filter(Boolean).join(' · ');
+el('resolution-legs').replaceChildren();for(const leg of item.broker_legs){const tr=document.createElement('tr');[leg.symbol,leg.conid,formatSplitPosition(leg.quantity),leg.currency,leg.cost_basis===null?'N/A':formatCurrency(leg.cost_basis,leg.currency),formatDate(leg.report_date_local),leg.description].forEach(value=>cell(tr,value));el('resolution-legs').append(tr)}
+el('distribution-basis-fields').hidden=treatment!=='distribution';el('distribution-basis').value='';el('resolution-note').value='';
+if(treatment==='distribution'){const leg=item.broker_legs[0];el('distribution-basis-label').textContent='Total cost basis of all '+formatSplitPosition(leg.quantity)+' credited '+leg.symbol+' units ('+leg.currency+')'}
+}
+function renderResolutionPreview(result){
+el('resolution-summary').textContent='Preview only — no changes saved. '+result.summary+' Check snapshots and lots against the broker evidence before applying.';
+for(const item of result.snapshots){for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');[item.symbol,formatDate(item.report_date_local),side==='before'?'Before':'After',values.position_qty===null?'N/A':formatSplitPosition(values.position_qty)].forEach(value=>cell(tr,value));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional===null?'N/A':values.provisional?'Provisional':'Final');el('resolution-snapshots').append(tr)}}
+for(const side of ['before','after']){for(const lot of result['lots_'+side]){const tr=document.createElement('tr'),currency=lot.currency||result.snapshots.find(item=>item.symbol===lot.symbol)?.currency;[side==='before'?'Before':'After',lot.symbol,formatSplitPosition(lot.remaining_quantity),formatCurrency(lot.cost_basis_remaining,currency),lot.opened_at_utc].forEach(value=>cell(tr,value));el('resolution-lots').append(tr)}}
+}
+async function requestResolution(apply){
+if(!resolutionCase||resolutionBusy||(apply&&!resolutionPreview))return;
+el('resolution-error').textContent='';if(!apply)invalidateResolution();
+const draft=apply?resolutionDraft:{treatment:resolutionTreatment,note:el('resolution-note').value.trim()};
+if(!draft.note){el('resolution-error').textContent='Enter the broker evidence supporting this treatment.';return}
+if(!apply&&resolutionTreatment==='distribution'){const basis=el('distribution-basis').value.trim();if(!basis||!Number.isFinite(Number(basis))||Number(basis)<0){el('resolution-error').textContent='Enter the total cost basis of the credited units in the displayed currency. Zero must be explicit.';return}draft.cost_basis=basis}
+const version=resolutionVersion,body=apply?{...draft,preview_token:resolutionPreview.preview_token}:draft;
+resolutionBusy=true;for(const id of ['distribution-basis','resolution-note','preview-resolution','apply-resolution','cancel-resolution'])el(id).disabled=true;
+try{const result=await json('/corporate-actions/cases/'+resolutionCase.case_id+'/resolution/'+(apply?'apply':'preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(version!==resolutionVersion)return;if(apply){resolutionCase=null;invalidateResolution();el('resolution-editor').hidden=true;await loadAll()}else{resolutionDraft=draft;resolutionPreview=result;renderResolutionPreview(result)}}catch(error){invalidateResolution();el('resolution-error').textContent=error.message}finally{resolutionBusy=false;for(const id of ['distribution-basis','resolution-note','preview-resolution','cancel-resolution'])el(id).disabled=false;el('apply-resolution').disabled=!resolutionPreview}
+}
+for(const id of ['distribution-basis','resolution-note'])el(id).oninput=invalidateResolution;
+el('preview-resolution').onclick=()=>requestResolution(false);el('apply-resolution').onclick=()=>requestResolution(true);el('cancel-resolution').onclick=cancelResolution;
 el('show-reviewed').onchange=()=>loadCases().catch(error=>{el('case-error').textContent=error.message});
 async function loadRuns(){const x=await json('/ingestion/runs?limit=5&sort_by=started_at_utc&sort_dir=desc');el('runs').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDateTime(item.started_at_utc),item.run_type,item.status,item.duration_ms??'—',item.error_message??''].forEach(v=>cell(tr,v,item.status==='failed'?'bad':''));el('runs').append(tr)}}
 el('label-form').onsubmit=async event=>{event.preventDefault();await json('/labels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:el('label-name').value,color:el('label-color').value||null})});event.target.reset();await loadLabels()};
-async function loadAll(){for(const task of [loadSlo,loadPnl,loadLabels,loadCases,loadRuns]){try{await task()}catch(error){console.error(error)}}}loadAll();
+async function loadAll(){for(const task of [loadSlo,loadPnl,loadLabels,loadCases,loadRuns]){try{await task()}catch(error){if(task===loadCases)el('case-error').textContent=error.message;console.error(error)}}}loadAll();
 </script></body></html>"""

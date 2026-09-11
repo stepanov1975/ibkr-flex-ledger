@@ -1258,3 +1258,107 @@ def test_snapshot_converts_commission_currency_independently(
     assert snapshot.provisional is provisional
     assert repository.fx_currencies is not None and commission_currency in repository.fx_currencies
     assert ("FX_RATE_MISSING_ALL_SOURCES" in (snapshot.fx_source or "")) is provisional
+
+
+def test_snapshot_security_transfer_expands_scope_and_preserves_lot_origin():
+    from app.db import interfaces
+    old, new, unrelated = uuid4(), uuid4(), uuid4()
+    opening = replace(_trade(old, "BUY", "8", "10"), report_date_local=date(2026, 8, 19),
+                      trade_timestamp_utc=datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+    sale = replace(_trade(new, "SELL", "3", "30"), report_date_local=date(2026, 8, 21),
+                   trade_timestamp_utc=datetime(2026, 8, 21, 12, tzinfo=timezone.utc))
+    movement = interfaces.LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=old,
+        destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="8",
+        cost_basis=None, currency="USD",
+    )
+    repository = _RepositoryStub(trades=[opening, sale], valuations=[], scope_ids=[str(new)])
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [movement]
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", None, "2026-08-21", "USD", affected_conids=frozenset({"new"}),
+    )
+    assert set(repository.trade_instrument_ids) == {str(old), str(new)}
+    assert set(repository.reconciled_instrument_ids) == {str(old), str(new)}
+    snapshots = {row.instrument_id: row for row in repository.snapshot_requests.requests}
+    assert Decimal(snapshots[str(old)].position_qty) == 0
+    assert Decimal(snapshots[str(new)].position_qty) == 5
+    assert Decimal(snapshots[str(new)].realized_pnl) == 60
+    assert str(unrelated) not in snapshots
+    destination = next(lot for lot in repository.position_requests.requests if lot.instrument_id == str(new))
+    assert destination.open_event_trade_fill_id == str(opening.event_trade_fill_id)
+    assert destination.open_event_corp_action_id == str(movement.event_corp_action_id)
+    assert destination.opened_at_utc == opening.trade_timestamp_utc
+    assert Decimal(destination.cost_basis_remaining) == 50
+
+
+@pytest.mark.parametrize("basis", ["0", "80"])
+def test_snapshot_distribution_uses_action_currency_and_is_absent_before_action_date(basis):
+    from app.db import interfaces
+    instrument = uuid4()
+    movement = interfaces.LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=None,
+        destination_instrument_id=instrument, report_date_local=date(2026, 8, 20), quantity="4",
+        cost_basis=basis, currency="EUR",
+    )
+    rates = [LedgerFxRateRecord(currency="EUR", functional_currency="USD", fx_rate="2",
+                                fx_source="test", ingestion_run_id=uuid4(), source_raw_record_id=uuid4(),
+                                report_date_local=date(2026, 8, 20))]
+    repository = _RepositoryStub(trades=[], valuations=[], fx_rates=rates)
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [movement]
+    service = _snapshot_service(repository)
+    service.ledger_snapshot_build_and_persist("U_TEST", None, "2026-08-19", "USD")
+    assert repository.snapshot_requests.requests == []
+    service.ledger_snapshot_build_and_persist("U_TEST", None, "2026-08-20", "USD")
+    snapshot = repository.snapshot_requests.requests[0]
+    assert Decimal(snapshot.position_qty) == 4
+    assert Decimal(snapshot.cost_basis) == Decimal(basis) * 2
+    lot = repository.position_requests.requests[0]
+    assert lot.open_event_trade_fill_id is None
+    assert lot.open_event_corp_action_id == str(movement.event_corp_action_id)
+    assert snapshot.provisional is True
+
+
+def test_transferred_distribution_lots_keep_distinct_origins_after_round_trip():
+    from app.db.interfaces import LedgerSecurityMovementRecord
+    old, new = uuid4(), uuid4()
+    first, second, outbound, returned = uuid4(), uuid4(), uuid4(), uuid4()
+    movements = [LedgerSecurityMovementRecord(
+        event_corp_action_id=event, source_raw_record_id=uuid4(), source_instrument_id=source,
+        destination_instrument_id=destination, report_date_local=date(2026, 8, day),
+        quantity=quantity, cost_basis=basis, currency="USD",
+    ) for event, source, destination, day, quantity, basis in (
+        (first, None, old, 18, "2", "20"), (second, None, old, 19, "3", "60"),
+        (outbound, old, new, 20, "5", None), (returned, new, old, 21, "5", None),
+    )]
+    repository = _RepositoryStub(trades=[], valuations=[])
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: movements
+    _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", None, "2026-08-21", "USD")
+    lots = repository.position_requests.requests
+    assert len(lots) == 6
+    assert len({lot.position_lot_id for lot in lots}) == 6
+    open_lots = [lot for lot in lots if lot.status == "open"]
+    assert {lot.open_event_corp_action_id for lot in open_lots} == {str(first), str(second)}
+    assert all(lot.open_event_trade_fill_id is None and lot.instrument_id == str(old) for lot in open_lots)
+    assert sum(Decimal(lot.cost_basis_remaining) for lot in open_lots) == 80
+
+
+def test_snapshot_output_filter_preserves_all_connected_lot_processing():
+    from app.db.interfaces import LedgerSecurityMovementRecord
+    old, new = uuid4(), uuid4()
+    opening = replace(_trade(old, "BUY", "8", "10"), report_date_local=date(2026, 8, 19),
+                      trade_timestamp_utc=datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+    movement = LedgerSecurityMovementRecord(
+        event_corp_action_id=uuid4(), source_raw_record_id=uuid4(), source_instrument_id=old,
+        destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="8",
+        cost_basis=None, currency="USD",
+    )
+    repository = _RepositoryStub(trades=[opening], valuations=[], scope_ids=[str(new)])
+    repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [movement]
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", None, "2026-08-20", "USD", affected_conids=frozenset({"new"}),
+        snapshot_instrument_ids=frozenset({str(new)}),
+    )
+    assert result.snapshot_row_count == 1
+    assert [row.instrument_id for row in repository.snapshot_requests.requests] == [str(new)]
+    assert {row.instrument_id for row in repository.position_requests.requests} == {str(old), str(new)}
+    assert {row.status for row in repository.position_requests.requests} == {"open", "closed"}

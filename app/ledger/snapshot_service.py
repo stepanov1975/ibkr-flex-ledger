@@ -21,7 +21,10 @@ from app.db import (
 )
 
 from .snapshot_dates import snapshot_report_date_start_utc
-from .fifo_engine import FifoLedgerComputationRequest, FifoOpenLotResult, FifoSplitInput, FifoTradeFillInput, fifo_compute_instrument
+from .fifo_engine import (
+    FifoLedgerComputationRequest, FifoOpenLotResult, FifoSecurityMovementInput,
+    FifoSplitInput, FifoTradeFillInput, fifo_compute_portfolio,
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ class StockLedgerSnapshotService:
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
         reconcile_position_lots: bool = True,
+        snapshot_instrument_ids: frozenset[str] | None = None,
     ) -> SnapshotBuildResult:
         """Build and persist day-level snapshots for one account context.
 
@@ -90,6 +94,8 @@ class StockLedgerSnapshotService:
             functional_currency: Explicit functional/base currency code.
             reconcile_position_lots: Update the current lot projection; defer until
                 the final date when replaying historical snapshots in one transaction.
+            snapshot_instrument_ids: Persist only these snapshot rows while processing
+                all connected instruments needed for complete lot accounting.
 
         Returns:
             SnapshotBuildResult: Persistence summary for this snapshot build run.
@@ -129,6 +135,11 @@ class StockLedgerSnapshotService:
                 missing_solid_valuation_count=0,
             )
 
+        movement_reader = getattr(self._repository, "db_ledger_security_movement_list_for_account", None)
+        movement_rows = [row for row in (
+            movement_reader(account_id=normalized_account_id, through_report_date_local=normalized_report_date)
+            if movement_reader is not None else []
+        ) if row.report_date_local <= parsed_report_date]
         instrument_ids: tuple[str, ...] | None = None
         if not is_full_build:
             instrument_ids = tuple(
@@ -138,6 +149,19 @@ class StockLedgerSnapshotService:
                     currencies=tuple(sorted(affected_currencies or ())),
                 )
             )
+            connected_ids = set(instrument_ids)
+            while True:
+                previous_ids = set(connected_ids)
+                for movement in movement_rows:
+                    movement_ids = {str(movement.destination_instrument_id)}
+                    if movement.source_instrument_id is not None:
+                        movement_ids.add(str(movement.source_instrument_id))
+                    if connected_ids & movement_ids:
+                        connected_ids.update(movement_ids)
+                if previous_ids == connected_ids:
+                    break
+            instrument_ids = tuple(sorted(connected_ids))
+            movement_rows = [row for row in movement_rows if str(row.destination_instrument_id) in connected_ids]
             if not instrument_ids:
                 return SnapshotBuildResult(
                     report_date_local=normalized_report_date,
@@ -175,6 +199,7 @@ class StockLedgerSnapshotService:
             required_currencies.update(row.commission_currency for row in trade_rows if row.commission_currency)
             required_currencies.update(row.functional_currency for row in trade_rows)
             required_currencies.update(row.currency for row in cashflow_rows)
+            required_currencies.update(row.currency for row in movement_rows)
             required_currencies.update(row.functional_currency for row in cashflow_rows)
             required_currencies.update(row.currency for row in open_position_valuation_rows)
             fx_currencies = tuple(sorted(required_currencies))
@@ -209,6 +234,9 @@ class StockLedgerSnapshotService:
         broker_absent_nonzero_fifo_count = 0
 
         instrument_keys = set(trades_by_instrument) | set(cashflows_by_instrument) | set(open_position_valuation_map)
+        movement_instrument_ids = {str(row.destination_instrument_id) for row in movement_rows}
+        movement_instrument_ids.update(str(row.source_instrument_id) for row in movement_rows if row.source_instrument_id is not None)
+        instrument_keys.update(movement_instrument_ids)
         if ingestion_run_id is not None:
             instrument_keys.update(self._repository.db_ledger_prior_holding_ids(normalized_account_id, normalized_report_date))
         if instrument_ids is not None:
@@ -224,15 +252,10 @@ class StockLedgerSnapshotService:
                 f"instrument_ids={sorted(missing_metadata)}"
             )
 
+        fifo_requests: list[FifoLedgerComputationRequest] = []
+        trade_context: dict[str, tuple[list[FifoTradeFillInput], set[str], dict[tuple[str, str, date], str | None], bool]] = {}
         for instrument_id in sorted(instrument_keys):
             instrument_trades = trades_by_instrument.get(instrument_id, [])
-            instrument_cashflows = cashflows_by_instrument.get(instrument_id, [])
-            valuation_record = open_position_valuation_map.get(instrument_id)
-            has_canonical_history = bool(instrument_trades or instrument_cashflows)
-            broker_eligible = instrument_asset_categories[instrument_id].strip().upper() not in {
-                "CASH",
-                "FX",
-            }
             converted_trades: list[FifoTradeFillInput] = []
             actions = corporate_actions_by_instrument.get(instrument_id, [])
             splits = tuple(FifoSplitInput(action.report_date_local, Decimal(action.adjustment_factor)) for action in actions)
@@ -287,16 +310,50 @@ class StockLedgerSnapshotService:
                     )
                 )
 
-            fifo_result = fifo_compute_instrument(
-                FifoLedgerComputationRequest(
-                    account_id=normalized_account_id,
-                    instrument_id=instrument_id,
-                    functional_currency=normalized_functional_currency,
-                    mark_price=Decimal("0"),
-                    trades=converted_trades,
-                    splits=splits,
+            fifo_requests.append(FifoLedgerComputationRequest(
+                account_id=normalized_account_id, instrument_id=instrument_id,
+                functional_currency=normalized_functional_currency, mark_price=Decimal("0"),
+                trades=converted_trades, splits=splits,
+            ))
+            trade_context[instrument_id] = converted_trades, fx_sources, fx_dependencies, missing_fx
+
+        movements: list[FifoSecurityMovementInput] = []
+        for movement in sorted(movement_rows, key=lambda row: (row.report_date_local, str(row.event_corp_action_id))):
+            destination_id = str(movement.destination_instrument_id)
+            converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[destination_id]
+            basis = Decimal(movement.cost_basis) if movement.cost_basis is not None else None
+            if movement.source_instrument_id is None and basis is not None and basis != 0:
+                movement_fx, movement_fx_source = self._resolve_fx_rate(
+                    currency=movement.currency, functional_currency=normalized_functional_currency,
+                    report_date_local=movement.report_date_local, fx_rate_rows=fx_rate_rows,
+                    fx_dependencies=fx_dependencies,
                 )
-            )
+                fx_sources.add(movement_fx_source)
+                missing_fx |= movement_fx is None
+                basis *= movement_fx or Decimal("0")
+            if movement.source_instrument_id is not None:
+                _, source_fx, source_dependencies, source_missing = trade_context[str(movement.source_instrument_id)]
+                fx_sources.update(source_fx)
+                fx_dependencies.update(source_dependencies)
+                missing_fx |= source_missing
+            trade_context[destination_id] = converted_trades, fx_sources, fx_dependencies, missing_fx
+            movements.append(FifoSecurityMovementInput(
+                event_corp_action_id=str(movement.event_corp_action_id),
+                source_raw_record_id=str(movement.source_raw_record_id),
+                source_instrument_id=str(movement.source_instrument_id) if movement.source_instrument_id is not None else None,
+                destination_instrument_id=destination_id, report_date_local=movement.report_date_local,
+                quantity=Decimal(movement.quantity), cost_basis=basis,
+            ))
+        fifo_results = fifo_compute_portfolio(fifo_requests, tuple(movements))
+
+        for instrument_id in sorted(instrument_keys):
+            instrument_trades = trades_by_instrument.get(instrument_id, [])
+            instrument_cashflows = cashflows_by_instrument.get(instrument_id, [])
+            valuation_record = open_position_valuation_map.get(instrument_id)
+            has_canonical_history = bool(instrument_trades or instrument_cashflows or instrument_id in movement_instrument_ids)
+            broker_eligible = instrument_asset_categories[instrument_id].strip().upper() not in {"CASH", "FX"}
+            converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[instrument_id]
+            fifo_result = fifo_results[instrument_id]
             fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
 
             cashflow_amount_total = Decimal("0")
@@ -375,17 +432,9 @@ class StockLedgerSnapshotService:
                         missing_fx = True
                     else:
                         mark_price_base = local_mark_price * mark_fx_rate
-                marked_fifo_result = fifo_compute_instrument(
-                    FifoLedgerComputationRequest(
-                        account_id=normalized_account_id,
-                        instrument_id=instrument_id,
-                        functional_currency=normalized_functional_currency,
-                        mark_price=mark_price_base,
-                        trades=converted_trades,
-                        splits=splits,
-                    )
+                unrealized_pnl = mark_price_base * fifo_result.position_quantity - sum(
+                    (lot.cost_basis_remaining for lot in fifo_result.open_lots), Decimal("0"),
                 )
-                unrealized_pnl = marked_fifo_result.unrealized_pnl
             else:
                 broker_position_quantity = (
                     Decimal(valuation_record.position_qty) if valuation_record is not None else Decimal("0")
@@ -531,10 +580,13 @@ class StockLedgerSnapshotService:
                             account_id=normalized_account_id,
                             instrument_id=instrument_id,
                             open_event_trade_fill_id=open_lot.open_event_trade_fill_id,
+                            open_event_corp_action_id=open_lot.open_event_corp_action_id,
+                            transfer_event_corp_action_id=open_lot.transfer_event_corp_action_id,
                         ),
                         account_id=normalized_account_id,
                         instrument_id=instrument_id,
                         open_event_trade_fill_id=open_lot.open_event_trade_fill_id,
+                        open_event_corp_action_id=open_lot.open_event_corp_action_id,
                         opened_at_utc=datetime.fromisoformat(open_lot.opened_at_utc),
                         closed_at_utc=(
                             datetime.fromisoformat(open_lot.closed_at_utc) if open_lot.closed_at_utc is not None
@@ -563,6 +615,8 @@ class StockLedgerSnapshotService:
                 for request in snapshot_requests
                 if request.instrument_id in selected_instrument_ids
             ]
+        if snapshot_instrument_ids is not None:
+            snapshot_requests = [request for request in snapshot_requests if request.instrument_id in snapshot_instrument_ids]
         position_lot_row_count = 0
         with self._repository.db_ledger_projection_transaction() as repository:
             if reconcile_position_lots:
@@ -801,7 +855,11 @@ class StockLedgerSnapshotService:
         )
         return str(open_cost_basis)
 
-    def _build_position_lot_id(self, account_id: str, instrument_id: str, open_event_trade_fill_id: str) -> str:
+    def _build_position_lot_id(
+        self, account_id: str, instrument_id: str, open_event_trade_fill_id: str | None,
+        open_event_corp_action_id: str | None = None,
+        transfer_event_corp_action_id: str | None = None,
+    ) -> str:
         """Build deterministic position-lot identifier for idempotent upsert.
 
         Args:
@@ -817,6 +875,10 @@ class StockLedgerSnapshotService:
         """
 
         lot_identity = f"{account_id}:{instrument_id}:{open_event_trade_fill_id}"
+        if open_event_corp_action_id is not None:
+            lot_identity += f":corporate_action:{open_event_corp_action_id}"
+        if open_event_trade_fill_id is None and transfer_event_corp_action_id is not None:
+            lot_identity += f":transfer:{transfer_event_corp_action_id}"
         return str(uuid5(NAMESPACE_URL, lot_identity))
 
 

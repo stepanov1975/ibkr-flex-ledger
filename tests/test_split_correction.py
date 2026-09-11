@@ -919,6 +919,7 @@ def test_remaining_basis_migration_backfills_existing_long_short_and_closed_lots
     with database.connect() as c:
         after = c.scalar(text("SELECT to_jsonb(l) FROM position_lot l"))
         assert after.pop("cost_basis_remaining") == opening_basis * remaining / 10
+        assert after.pop("open_event_corp_action_id") is None
         assert after == before
 
 

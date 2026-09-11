@@ -160,7 +160,7 @@ class SQLAlchemySplitCorrectionService:
         return [dict(row) for row in connection.execute(text(
             "SELECT l.open_event_trade_fill_id, l.remaining_quantity, l.open_price, l.cost_basis_open, "
             "l.cost_basis_remaining / (l.remaining_quantity * CASE WHEN t.side='SELL' THEN -1 ELSE 1 END) AS unit_basis "
-            "FROM position_lot l JOIN event_trade_fill t ON t.event_trade_fill_id=l.open_event_trade_fill_id "
+            "FROM position_lot l LEFT JOIN event_trade_fill t ON t.event_trade_fill_id=l.open_event_trade_fill_id "
             "WHERE l.account_id=:account_id AND l.instrument_id=:instrument_id "
             "AND l.status='open' ORDER BY l.opened_at_utc, l.open_event_trade_fill_id"
         ), params).mappings()]

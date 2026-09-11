@@ -25,6 +25,7 @@ from app.jobs import (
 )
 from app.ledger import StockLedgerSnapshotService
 from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
+from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
 from app.ledger import snapshot_resolve_report_date_local
 from app.operations import (
     AlertEvaluationResult,
@@ -102,6 +103,7 @@ def bootstrap_create_application() -> FastAPI:
         snapshot_repository=snapshot_repository,
         portfolio_repository=portfolio_repository,
         split_correction_service=SQLAlchemySplitCorrectionService(engine, settings.account_id),
+        corporate_action_resolution_service=SQLAlchemyCorporateActionResolutionService(engine, settings.account_id),
     )
 
 

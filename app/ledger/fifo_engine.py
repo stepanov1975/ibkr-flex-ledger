@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+
+from .snapshot_dates import snapshot_report_date_start_utc
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,27 @@ class FifoSplitInput:
 
 
 @dataclass(frozen=True)
+class FifoSecurityMovementInput:
+    """Dated non-trade movement, with distribution basis in functional currency."""
+
+    event_corp_action_id: str
+    source_raw_record_id: str
+    source_instrument_id: str | None
+    destination_instrument_id: str
+    report_date_local: date
+    quantity: Decimal
+    cost_basis: Decimal | None
+
+
+class FifoSecurityMovementError(ValueError):
+    """A saved movement is incompatible with the historical position it moves."""
+
+    def __init__(self, event_corp_action_id: str, message: str) -> None:
+        super().__init__(message)
+        self.event_corp_action_id = event_corp_action_id
+
+
+@dataclass(frozen=True)
 class FifoLedgerComputationRequest:
     """Input contract for one instrument FIFO ledger computation.
 
@@ -73,7 +96,7 @@ class FifoLedgerComputationResult:
         realized_pnl: Realized PnL including trade fee/withholding impacts.
         unrealized_pnl: Unrealized PnL on open lots at mark price.
         open_lots: Open-lot details for persistence.
-        closed_lots: Lots fully closed by trades or split rounding, with their closing times.
+        closed_lots: Lots closed by trades, transfer, or split rounding, with closing times.
     """
 
     position_quantity: Decimal
@@ -88,7 +111,7 @@ class FifoOpenLotResult:
     """Lot details produced by FIFO computation for persistence layers.
 
     Attributes:
-        open_event_trade_fill_id: Opening trade-fill identifier.
+        open_event_trade_fill_id: Original opening trade-fill identifier, absent for distributions.
         source_raw_record_id: Opening raw row identifier.
         opened_at_utc: Opening timestamp in UTC ISO-8601 format.
         open_quantity: Original lot quantity.
@@ -97,11 +120,14 @@ class FifoOpenLotResult:
         cost_basis_open: Opening lot cost basis.
         cost_basis_remaining: Signed cost basis of the unconsumed shares.
         realized_pnl_to_date: Realized PnL posted to this lot.
-        closed_report_date_local: Action date if split rounding eliminated the remainder.
+        closed_report_date_local: Action date if a transfer or split rounding removed the remainder.
         closed_at_utc: Execution timestamp if a trade closed the remainder.
+        open_event_corp_action_id: Distribution or transfer that introduced this instrument's lot.
+        opening_transaction_id: Original broker fill identity for tied acquisition times.
+        transfer_event_corp_action_id: Latest transfer, distinguishing return visits to an instrument.
     """
 
-    open_event_trade_fill_id: str
+    open_event_trade_fill_id: str | None
     source_raw_record_id: str
     opened_at_utc: str
     open_quantity: Decimal
@@ -112,6 +138,9 @@ class FifoOpenLotResult:
     realized_pnl_to_date: Decimal
     closed_report_date_local: date | None = None
     closed_at_utc: str | None = None
+    open_event_corp_action_id: str | None = None
+    opening_transaction_id: str | None = None
+    transfer_event_corp_action_id: str | None = None
 
 
 @dataclass
@@ -119,7 +148,7 @@ class _OpenFifoLot:
     """Mutable internal lot state used during FIFO processing."""
 
     direction: str
-    open_event_trade_fill_id: str
+    open_event_trade_fill_id: str | None
     source_raw_record_id: str
     opened_at_utc: str
     open_quantity: Decimal
@@ -129,9 +158,20 @@ class _OpenFifoLot:
     unit_basis: Decimal
     unit_execution_price: Decimal
     realized_pnl_to_date: Decimal
+    open_event_corp_action_id: str | None = None
+    opening_transaction_id: str | None = None
+    transfer_event_corp_action_id: str | None = None
 
 
 def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedgerComputationResult:
+    """Compute one instrument from its canonical trade and split history."""
+    return _fifo_compute_instrument(request)
+
+
+def _fifo_compute_instrument(
+    request: FifoLedgerComputationRequest,
+    initial: FifoLedgerComputationResult | None = None,
+) -> FifoLedgerComputationResult:
     """Compute FIFO realized and unrealized PnL for one instrument.
 
     Args:
@@ -179,10 +219,23 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
         ),
     )
 
-    open_lots: list[_OpenFifoLot] = []
-    realized_pnl = Decimal("0")
+    open_lots = [
+        _OpenFifoLot(
+            direction="long" if lot.remaining_quantity > 0 else "short",
+            open_event_trade_fill_id=lot.open_event_trade_fill_id,
+            source_raw_record_id=lot.source_raw_record_id, opened_at_utc=lot.opened_at_utc,
+            open_quantity=abs(lot.open_quantity), open_price=lot.open_price,
+            cost_basis_open=lot.cost_basis_open, remaining_quantity=abs(lot.remaining_quantity),
+            unit_basis=lot.cost_basis_remaining / lot.remaining_quantity,
+            unit_execution_price=lot.open_price, realized_pnl_to_date=lot.realized_pnl_to_date,
+            open_event_corp_action_id=lot.open_event_corp_action_id,
+            opening_transaction_id=lot.opening_transaction_id,
+            transfer_event_corp_action_id=lot.transfer_event_corp_action_id,
+        ) for lot in (initial.open_lots if initial else ())
+    ]
+    realized_pnl = initial.realized_pnl if initial else Decimal("0")
     split_index = 0
-    closed_lots: list[FifoOpenLotResult] = []
+    closed_lots = list(initial.closed_lots) if initial else []
 
     for trade in sorted_trades:
         while split_index < len(splits) and splits[split_index].report_date_local <= (trade.report_date_local or date.min):
@@ -256,6 +309,7 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
                     unit_basis=unit_basis,
                     unit_execution_price=trade.price,
                     realized_pnl_to_date=Decimal("0"),
+                    opening_transaction_id=trade.transaction_id,
                 )
             )
 
@@ -287,6 +341,9 @@ def fifo_compute_instrument(request: FifoLedgerComputationRequest) -> FifoLedger
 def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None, closed_at: str | None = None) -> FifoOpenLotResult:
     return FifoOpenLotResult(
         open_event_trade_fill_id=lot.open_event_trade_fill_id,
+        open_event_corp_action_id=lot.open_event_corp_action_id,
+        opening_transaction_id=lot.opening_transaction_id,
+        transfer_event_corp_action_id=lot.transfer_event_corp_action_id,
         source_raw_record_id=lot.source_raw_record_id,
         opened_at_utc=lot.opened_at_utc,
         open_quantity=lot.open_quantity if lot.direction == "long" else -lot.open_quantity,
@@ -297,6 +354,104 @@ def _fifo_lot_result(lot: _OpenFifoLot, closed_date: date | None = None, closed_
         realized_pnl_to_date=lot.realized_pnl_to_date,
         closed_report_date_local=closed_date,
         closed_at_utc=closed_at,
+    )
+
+
+def fifo_compute_portfolio(
+    requests: list[FifoLedgerComputationRequest], movements: tuple[FifoSecurityMovementInput, ...],
+) -> dict[str, FifoLedgerComputationResult]:
+    """Replay linked instruments across movement dates, carrying their lot state."""
+    if not movements:
+        return {request.instrument_id: fifo_compute_instrument(request) for request in requests}
+    if any(trade.report_date_local is None for request in requests for trade in request.trades):
+        raise ValueError("security movements require a broker report date for each trade")
+    results: dict[str, FifoLedgerComputationResult] = {}
+    previous_dates: dict[str, date | None] = {}
+    movement_dates = sorted({movement.report_date_local for movement in movements})
+    for boundary in [*movement_dates, None]:
+        for request in requests:
+            if boundary is not None and not any(
+                row.report_date_local == boundary
+                and request.instrument_id in {row.source_instrument_id, row.destination_instrument_id}
+                for row in movements
+            ):
+                continue
+            previous_date = previous_dates.get(request.instrument_id)
+            interval = replace(
+                request,
+                trades=[trade for trade in request.trades
+                        if (previous_date is None or (trade.report_date_local or date.min) >= previous_date)
+                        and (boundary is None or (trade.report_date_local or date.min) < boundary)],
+                splits=tuple(split for split in request.splits
+                             if (previous_date is None or split.report_date_local > previous_date)
+                             and (boundary is None or split.report_date_local <= boundary)),
+            )
+            results[request.instrument_id] = _fifo_compute_instrument(interval, results.get(request.instrument_id))
+            previous_dates[request.instrument_id] = boundary
+        if boundary is None:
+            break
+        for movement in sorted((row for row in movements if row.report_date_local == boundary),
+                               key=lambda row: row.event_corp_action_id):
+            try:
+                _fifo_apply_security_movement(results, movement)
+            except ValueError as error:
+                raise FifoSecurityMovementError(movement.event_corp_action_id, str(error)) from error
+    return results
+
+
+def _fifo_apply_security_movement(
+    results: dict[str, FifoLedgerComputationResult], movement: FifoSecurityMovementInput,
+) -> None:
+    if not movement.quantity.is_finite() or movement.quantity <= 0:
+        raise ValueError("security movement quantity must be positive and finite")
+    if movement.source_instrument_id == movement.destination_instrument_id:
+        raise ValueError("security transfer requires distinct instruments")
+    if movement.source_instrument_id is not None and movement.cost_basis is not None:
+        raise ValueError("security transfers carry existing basis; entered basis is unsupported")
+    destination = results[movement.destination_instrument_id]
+    if destination.position_quantity < 0:
+        raise ValueError("security movement cannot close a destination short position")
+    incoming: tuple[FifoOpenLotResult, ...]
+    if movement.source_instrument_id is None:
+        basis = movement.cost_basis
+        if basis is None or not basis.is_finite() or basis < 0:
+            raise ValueError("distribution requires explicit nonnegative finite total cost basis")
+        incoming = (FifoOpenLotResult(
+            open_event_trade_fill_id=None, open_event_corp_action_id=movement.event_corp_action_id,
+            source_raw_record_id=movement.source_raw_record_id,
+            opened_at_utc=snapshot_report_date_start_utc(movement.report_date_local).isoformat(),
+            open_quantity=movement.quantity, remaining_quantity=movement.quantity,
+            open_price=basis / movement.quantity, cost_basis_open=basis, cost_basis_remaining=basis,
+            realized_pnl_to_date=Decimal("0"),
+        ),)
+    else:
+        source = results[movement.source_instrument_id]
+        if source.position_quantity != movement.quantity or any(lot.remaining_quantity <= 0 for lot in source.open_lots):
+            raise ValueError("security transfer must match the full long position on its action date")
+        incoming = tuple(replace(
+            lot, open_event_corp_action_id=(
+                lot.open_event_corp_action_id if lot.open_event_trade_fill_id is None else movement.event_corp_action_id
+            ),
+            transfer_event_corp_action_id=movement.event_corp_action_id,
+            open_quantity=lot.remaining_quantity, cost_basis_open=lot.cost_basis_remaining,
+            realized_pnl_to_date=Decimal("0"),
+        ) for lot in source.open_lots)
+        closed = tuple(replace(lot, remaining_quantity=Decimal("0"), cost_basis_remaining=Decimal("0"),
+                               closed_report_date_local=movement.report_date_local) for lot in source.open_lots)
+        results[movement.source_instrument_id] = replace(
+            source, position_quantity=Decimal("0"), unrealized_pnl=Decimal("0"),
+            open_lots=(), closed_lots=(*source.closed_lots, *closed),
+        )
+    results[movement.destination_instrument_id] = replace(
+        destination, position_quantity=destination.position_quantity + movement.quantity,
+        open_lots=tuple(sorted((*destination.open_lots, *incoming), key=lambda lot: (
+            _fifo_parse_timestamp_utc(lot.opened_at_utc),
+            (Decimal(lot.opening_transaction_id)
+             if lot.opening_transaction_id is not None and lot.opening_transaction_id.isascii()
+             and lot.opening_transaction_id.isdigit() else Decimal("-1")),
+            lot.opening_transaction_id or "", lot.source_raw_record_id,
+            lot.open_event_trade_fill_id or "", lot.open_event_corp_action_id or "",
+        ))),
     )
 
 

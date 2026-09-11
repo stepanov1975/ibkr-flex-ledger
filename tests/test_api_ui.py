@@ -431,9 +431,10 @@ def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
     """)
     while context.execute_pending_job():
         pass
-    assert context.eval("nodes['case-count'].textContent") == 2
-    assert context.eval("nodes.cases.children[1].children.at(-1).children.length") == 0
-    assert "Accounting support required" in context.eval("nodes.cases.children[1].children.map(x=>x.textContent).join(' ')")
+    assert context.eval("nodes['case-count'].textContent") == 1
+    assert context.eval("nodes['unsupported-count'].textContent") == 1
+    assert context.eval("nodes['unsupported-cases'].children[0].children.at(-1).children.length") == 0
+    assert "Accounting support required" in context.eval("nodes['unsupported-cases'].children[0].children.map(x=>x.textContent).join(' ')")
     context.eval("nodes.cases.children[0].children.at(-1).children[0].onclick()")
     assert context.eval("nodes['split-editor'].hidden") is False
     assert context.eval("nodes['apply-split'].disabled") is True
@@ -474,5 +475,216 @@ def test_split_editor_preview_apply_cancel_and_unsupported_cases() -> None:
         pass
     assert context.eval("requests.at(-1).body.preview_token") == "token"
     assert context.eval("requests.at(-1).body.new_shares") == "3"
-    assert context.eval("nodes['case-count'].textContent") == 1
+    assert context.eval("nodes['case-count'].textContent") == 0
+    assert context.eval("nodes['empty-cases'].hidden") is False
     assert context.eval("nodes['split-editor'].hidden") is True
+
+
+def _resolution_ui_context() -> quickjs.Context:
+    """Run the shipped operations UI with only browser/network boundaries replaced."""
+    application = FastAPI()
+    application.include_router(api_create_ui_router())
+    script = TestClient(application).get("/ui/operations").text.split("<script>", 1)[1].split("</script>", 1)[0]
+    context = quickjs.Context()
+    context.eval("""
+        function node(){return {children:[],_text:'',value:'',checked:false,disabled:false,hidden:false,
+          get textContent(){return this._text+this.children.map(child=>child.textContent).join(' ')},
+          set textContent(value){this._text=String(value);this.children=[]},
+          append(...items){this.children.push(...items)},replaceChildren(){this._text='';this.children=[]}}}
+        const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
+        const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}},
+          NumberFormat:function(locale,options){return {format:value=>options.currency+' '+value}}};
+        const console={error:()=>{}};
+        let requests=[],failure=null,refreshFailure=false,hold=false,release;
+        const common={status:'open',owner:null,created_at_utc:'2026-08-21T09:00:00Z',
+          report_date_local:'2026-08-21',requires_manual:true,can_correct_split:false};
+        let items=[
+          {...common,case_id:'transfer',symbol:'NEW',action_type:'IC',review_state:'actionable',
+           description:'Identifier change',review_reason:'Paired broker legs',required_check:'Confirm unchanged ownership',
+           resolution_options:[{type:'security_transfer',label:'Transfer existing position'}],broker_legs:[
+             {symbol:'OLD',conid:'100',quantity:'-10',currency:'USD',cost_basis:null,report_date_local:'2026-08-21',description:'Debit old identifier'},
+             {symbol:'NEW',conid:'200',quantity:'10',currency:'USD',cost_basis:'120',report_date_local:'2026-08-21',description:'Credit new identifier'}]},
+          {...common,case_id:'distribution',symbol:'SPIN',action_type:'SO',review_state:'actionable',
+           description:'Security distribution',review_reason:'Missing received security basis',required_check:'Confirm total basis from the broker',
+           resolution_options:[{type:'distribution',label:'Record received security'}],broker_legs:[
+             {symbol:'SPIN',conid:'300',quantity:'2',currency:'EUR',cost_basis:null,report_date_local:'2026-08-21',description:'Credited security'}]},
+          {...common,case_id:'unsupported',symbol:'MERGED',action_type:'MERGER',review_state:'unsupported',
+           review_reason:'Complex cash election',required_check:'Accounting support required',resolution_options:[],broker_legs:[]},
+          {...common,case_id:'handled',symbol:'DONE',action_type:'IC',review_state:'handled',requires_manual:false,
+           resolution_note:'Confirmed by statement',review_reason:'Already handled',required_check:'',resolution_options:[],broker_legs:[]}];
+        const preview={case_id:'transfer',treatment:'security_transfer',summary:'Carry 10 units and USD 120 basis from OLD to NEW.',
+          preview_token:'verified-inputs',applied:false,snapshots:[{symbol:'NEW',report_date_local:'2026-08-21',currency:'USD',
+            before:{position_qty:'0',cost_basis:'0',realized_pnl:'0',unrealized_pnl:null,total_pnl:null,provisional:true},
+            after:{position_qty:'10',cost_basis:'120',realized_pnl:'0',unrealized_pnl:'30',total_pnl:'30',provisional:false}}],
+          lots_before:[{symbol:'OLD',remaining_quantity:'10',cost_basis_remaining:'120',currency:'USD',opened_at_utc:'2025-01-02T10:00:00Z'}],
+          lots_after:[{symbol:'NEW',remaining_quantity:'10',cost_basis_remaining:'120',currency:'USD',opened_at_utc:'2025-01-02T10:00:00Z'}]};
+        fetch=async(url,options)=>{
+          if(!options){if(refreshFailure)throw new Error('Queue refresh failed');return {ok:true,status:200,json:async()=>({items})}}
+          requests.push({url,body:JSON.parse(options.body)});
+          if(hold)await new Promise(resolve=>{release=resolve});
+          if(failure)return {ok:false,status:409,json:async()=>({message:failure})};
+          if(url.endsWith('/apply')){const item=items.find(item=>url.includes('/'+item.case_id+'/'));
+            item.review_state='handled';item.requires_manual=false;item.resolution_options=[]}
+          return {ok:true,status:200,json:async()=>({...preview,applied:url.endsWith('/apply')})};
+        };
+    """)
+    context.eval(script.rsplit("loadAll();", 1)[0])
+    context.eval("loadSlo=async()=>{};loadPnl=async()=>{};loadLabels=async()=>{};loadRuns=async()=>{};loadCases()")
+    _drain_ui_jobs(context)
+    return context
+
+
+def _drain_ui_jobs(context: quickjs.Context) -> None:
+    while context.execute_pending_job():
+        pass
+
+
+def test_review_queue_separates_unsupported_and_preserves_handled_toggle() -> None:
+    context = _resolution_ui_context()
+    assert context.eval("nodes['case-count'].textContent") == '2'
+    assert context.eval("nodes['unsupported-count'].textContent") == '1'
+    assert context.eval("nodes.cases.children.length") == 2
+    assert context.eval("nodes['unsupported-cases'].children.length") == 1
+    assert context.eval("nodes['unsupported-cases'].children[0].children.at(-1).children.length") == 0
+    assert context.eval("nodes['empty-cases'].hidden") is True
+    context.eval("nodes['show-reviewed'].checked=true;nodes['show-reviewed'].onchange()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes.cases.children.length") == 3
+    assert 'Confirmed by statement' in context.eval("nodes.cases.children[2].textContent")
+    assert context.eval("nodes.cases.children[2].children.at(-1).children.length") == 0
+    context.eval("items=items.filter(item=>item.review_state!=='actionable');loadCases()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['case-count'].textContent") == '0'
+    assert context.eval("nodes['empty-cases'].hidden") is False
+    assert context.eval("nodes['unsupported-count'].textContent") == '1'
+
+
+def test_transfer_preview_uses_broker_legs_and_applies_once() -> None:
+    context = _resolution_ui_context()
+    assert context.eval("nodes.cases.children[0].children.at(-1).children[0].textContent") == 'Preview transfer'
+    context.eval("nodes.cases.children[0].children.at(-1).children[0].onclick()")
+    assert context.eval("nodes['resolution-editor'].hidden") is False
+    assert context.eval("nodes['distribution-basis-fields'].hidden") is True
+    assert 'Confirm unchanged ownership' in context.eval("nodes['resolution-description'].textContent")
+    broker_text = context.eval("nodes['resolution-legs'].textContent")
+    for value in ('OLD', 'NEW', '100', '200', '-10', 'USD', 'Debit old identifier', 'N/A'):
+        assert value in broker_text
+    context.eval("nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.length") == 0
+    assert 'evidence' in context.eval("nodes['resolution-error'].textContent")
+    context.eval("nodes['resolution-note'].value='Broker notice confirms unchanged ownership';hold=true;nodes['preview-resolution'].onclick();nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.length") == 1
+    assert context.eval("nodes['preview-resolution'].disabled") is True
+    assert context.eval("nodes['cancel-resolution'].disabled") is True
+    context.eval("release();hold=false")
+    _drain_ui_jobs(context)
+    assert context.eval("requests[0].url") == '/corporate-actions/cases/transfer/resolution/preview'
+    assert json.loads(context.eval("JSON.stringify(requests[0].body)")) == {
+        'treatment': 'security_transfer', 'note': 'Broker notice confirms unchanged ownership',
+    }
+    assert context.eval("nodes['apply-resolution'].disabled") is False
+    assert 'NEW' in context.eval("nodes['resolution-snapshots'].textContent")
+    assert 'USD 120' in context.eval("nodes['resolution-snapshots'].textContent")
+    assert 'N/A' in context.eval("nodes['resolution-snapshots'].textContent")
+    assert context.eval("nodes['resolution-lots'].children[0].children[1].textContent") == 'OLD'
+    assert context.eval("nodes['resolution-lots'].children[1].children[1].textContent") == 'NEW'
+    assert '2025-01-02' in context.eval("nodes['resolution-lots'].textContent")
+    context.eval("hold=true;nodes['apply-resolution'].onclick();nodes['apply-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.length") == 2
+    assert context.eval("requests[1].body.preview_token") == 'verified-inputs'
+    context.eval("release();hold=false")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-editor'].hidden") is True
+    assert context.eval("nodes['case-count'].textContent") == '1'
+
+
+def test_distribution_requires_explicit_basis_and_invalidates_changed_preview() -> None:
+    context = _resolution_ui_context()
+    assert context.eval("nodes.cases.children[1].children.at(-1).children[0].textContent") == 'Enter distribution basis'
+    context.eval("nodes.cases.children[1].children.at(-1).children[0].onclick()")
+    assert context.eval("nodes['distribution-basis-fields'].hidden") is False
+    assert 'EUR' in context.eval("nodes['distribution-basis-label'].textContent")
+    assert '2' in context.eval("nodes['distribution-basis-label'].textContent")
+    assert context.eval("nodes['distribution-basis'].value") == ''
+    context.eval("nodes['resolution-note'].value='Verified total basis';nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.length") == 0
+    assert 'total cost basis' in context.eval("nodes['resolution-error'].textContent")
+    for basis in ('-1', 'Infinity', 'abc'):
+        context.eval("nodes['distribution-basis'].value=" + json.dumps(basis) + ";nodes['preview-resolution'].onclick()")
+        _drain_ui_jobs(context)
+        assert context.eval("requests.length") == 0
+    context.eval("nodes['distribution-basis'].value='0';nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.at(-1).body.cost_basis") == '0'
+    assert context.eval("requests.at(-1).body.treatment") == 'distribution'
+    assert context.eval("nodes['apply-resolution'].disabled") is False
+    context.eval("nodes['distribution-basis'].value='25.50';nodes['distribution-basis'].oninput();nodes['apply-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.length") == 1
+    assert context.eval("nodes['apply-resolution'].disabled") is True
+    assert context.eval("nodes['resolution-snapshots'].children.length") == 0
+    context.eval("hold=true;nodes['preview-resolution'].onclick();nodes['resolution-note'].oninput();release();hold=false")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['apply-resolution'].disabled") is True
+    context.eval("nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    context.eval("failure='Preview is stale';nodes['apply-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-error'].textContent") == 'Preview is stale'
+    assert context.eval("nodes['apply-resolution'].disabled") is True
+    assert context.eval("nodes['preview-resolution'].disabled") is False
+    context.eval("failure=null;nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    context.eval("refreshFailure=true;nodes['apply-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.at(-1).body.cost_basis") == '25.50'
+    assert context.eval("nodes['resolution-editor'].hidden") is True
+    assert 'Queue refresh failed' in context.eval("nodes['case-error'].textContent")
+    context.eval("refreshFailure=false;loadAll()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['case-count'].textContent") == '1'
+    assert context.eval("nodes['case-error'].textContent") == ''
+    context.eval("nodes.cases.children[0].children.at(-1).children[0].onclick();nodes['cancel-resolution'].onclick()")
+    assert context.eval("nodes['resolution-editor'].hidden") is True
+
+
+def test_resolution_lot_basis_uses_functional_currency_for_foreign_security() -> None:
+    context = _resolution_ui_context()
+    context.eval("""
+        for(const leg of items[0].broker_legs)leg.currency='EUR';
+        nodes.cases.children[0].children.at(-1).children[0].onclick();
+        nodes['resolution-note'].value='Verified foreign security transfer';
+        nodes['preview-resolution'].onclick();
+    """)
+    _drain_ui_jobs(context)
+    assert 'EUR' in context.eval("nodes['resolution-legs'].textContent")
+    assert context.eval("nodes['resolution-lots'].children[0].children[3].textContent") == 'USD 120'
+    assert context.eval("nodes['resolution-lots'].children[1].children[3].textContent") == 'USD 120'
+    context.eval("delete preview.lots_after[0].currency;nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-lots'].children[1].children[3].textContent") == 'USD 120'
+
+
+def test_resolution_preview_distinguishes_absent_snapshot_from_zero_position() -> None:
+    context = _resolution_ui_context()
+    context.eval("""
+        preview.snapshots[0].before={position_qty:null,cost_basis:null,realized_pnl:null,
+          unrealized_pnl:null,total_pnl:null,provisional:null};
+        preview.lots_after.push({symbol:'OLD',remaining_quantity:'0',cost_basis_remaining:'0',
+          currency:'USD',opened_at_utc:'2025-01-02T10:00:00Z'});
+        nodes.cases.children[0].children.at(-1).children[0].onclick();
+        nodes['resolution-note'].value='Verified opening of destination and closure of source';
+        nodes['preview-resolution'].onclick();
+    """)
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-snapshots'].children[0].children[3].textContent") == 'N/A'
+    assert context.eval("nodes['resolution-snapshots'].children[0].children[8].textContent") == 'N/A'
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[3].textContent") == '10'
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[8].textContent") == 'Final'
+    assert context.eval("nodes['resolution-lots'].children[2].children[1].textContent") == 'OLD'
+    assert context.eval("nodes['resolution-lots'].children[2].children[2].textContent") == '0'
+    assert context.eval("nodes['resolution-lots'].children[2].children[3].textContent") == 'USD 0'
