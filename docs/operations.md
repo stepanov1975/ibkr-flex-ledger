@@ -2,6 +2,8 @@
 
 The application exposes ingestion reliability measurements at `GET /operations/slo` and the operations dashboard at `/ui/operations`. The portfolio overview remains at `/ui`. The API reports the frozen 30-day success-rate target, p95 duration target, breach thresholds, and consecutive-failure signal.
 
+Operations shows the five latest ingestion runs and links to `/ui/ingestion-runs`, where all runs are listed newest first with 25 runs per page and Previous/Next navigation.
+
 ## Scheduled operations
 
 The production Docker Compose host uses the checked-in systemd services and timers in
