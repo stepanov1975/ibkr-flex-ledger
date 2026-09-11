@@ -281,9 +281,8 @@ def _completed_details(run: Mapping[str, object], stage: str) -> dict[str, objec
     return cast(dict[str, object], details)
 
 
-@pytest.mark.usefixtures("legacy_trade_corrections")
-def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is_incremental() -> None:
-    """Prove duplicate and corrected Flex payloads retain auditable incremental results."""
+def test_seeded_ingestion_duplicate_skips_semantic_work_and_fx_refresh_is_incremental() -> None:
+    """Prove duplicate and FX-refreshed Flex payloads retain auditable incremental results."""
 
     base_url = _reachable_database_url()
     database_name = f"test_seeded_e2e_{uuid.uuid4().hex[:10]}"
@@ -302,7 +301,11 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
         canonical_repository = SQLAlchemyCanonicalPersistenceService(engine)
         snapshot_repository = SQLAlchemyLedgerSnapshotService(engine)
         portfolio_repository = SQLAlchemyPortfolioService(engine)
-        seeded_adapter = _SeededAdapter()
+        original = _SEEDED_PAYLOAD.replace(
+            b'currency="USD" reportDate="20260821" dateTime="20260821;120000"',
+            b'currency="EUR" reportDate="20260821" dateTime="20260821;120000"',
+        )
+        seeded_adapter = _SeededAdapter(original)
         orchestrator = IngestionJobOrchestrator(
             ingestion_repository=ingestion_repository,
             raw_persistence_repository=raw_repository,
@@ -322,7 +325,7 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
             initial_trade = dict(
                 connection.execute(
                     text(
-                        "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price "
+                        "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price, fx_rate_to_base "
                         "FROM event_trade_fill WHERE account_id='SEEDED_ACCOUNT' "
                         "AND ib_exec_id='SEED-EXEC-1'"
                     )
@@ -354,8 +357,10 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
                 {"position_lot_id": initial_lot["position_lot_id"]},
             )
         duplicate_result = orchestrator.job_execute("ingestion_run")
-        seeded_adapter.payload_bytes = _SEEDED_PAYLOAD.replace(
-            b'tradePrice="100"', b'tradePrice="111"'
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT open_quantity FROM position_lot")) == Decimal("999")
+        seeded_adapter.payload_bytes = original.replace(
+            b'fifoPnlRealized="0" fxRateToBase="1"', b'fifoPnlRealized="0" fxRateToBase="1.1"'
         )
         corrected_result = orchestrator.job_execute("ingestion_run")
         assert [first_result.status, duplicate_result.status, corrected_result.status] == [
@@ -446,7 +451,7 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
             assert raw_counts[2] == raw_counts[0]
             corrected_trade = connection.execute(
                 text(
-                    "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price "
+                    "SELECT event_trade_fill_id, ingestion_run_id, source_raw_record_id, price, fx_rate_to_base "
                     "FROM event_trade_fill "
                     "WHERE account_id='SEEDED_ACCOUNT' AND ib_exec_id='SEED-EXEC-1'"
                 )
@@ -465,17 +470,18 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
                     "WHERE account_id='SEEDED_ACCOUNT' AND status='open'"
                 )
             ).mappings().one()
-            assert corrected_trade["price"] == Decimal("111")
+            assert corrected_trade["price"] == initial_trade["price"] == Decimal("100")
+            assert corrected_trade["fx_rate_to_base"] == Decimal("1.1")
             assert corrected_trade["event_trade_fill_id"] == initial_trade["event_trade_fill_id"]
             assert corrected_trade["ingestion_run_id"] == initial_trade["ingestion_run_id"]
             assert corrected_trade["source_raw_record_id"] == initial_trade["source_raw_record_id"]
             assert dict(corrected_snapshot) == {
                 "position_qty": Decimal("2"),
-                "cost_basis": Decimal("223"),
+                "cost_basis": Decimal("221.1"),
                 "realized_pnl": Decimal("0"),
                 "unrealized_pnl": Decimal("0"),
                 "total_pnl": Decimal("0"),
-                "fees": Decimal("1"),
+                "fees": Decimal("1.1"),
                 "provisional": True,
                 "valuation_source": "EOD_MARK_MISSING_ALL_SOURCES",
             }
@@ -487,8 +493,8 @@ def test_legacy_seeded_ingestion_duplicate_skips_semantic_work_and_correction_is
             )
             assert corrected_lot["open_quantity"] == Decimal("2")
             assert corrected_lot["remaining_quantity"] == Decimal("2")
-            assert corrected_lot["open_price"] == Decimal("111")
-            assert corrected_lot["cost_basis_open"] == Decimal("223")
+            assert corrected_lot["open_price"] == Decimal("110")
+            assert corrected_lot["cost_basis_open"] == Decimal("221.1")
             assert (
                 _completed_details(runs[1], "canonical_mapping")["canonical_skip_reason"]
                 == "exact_duplicate_artifact"
