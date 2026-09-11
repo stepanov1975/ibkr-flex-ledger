@@ -151,6 +151,7 @@ Service endpoints:
 - Portfolio dashboard: `http://127.0.0.1:8000/ui`
 - Costs dashboard: `http://127.0.0.1:8000/ui/costs`
 - Operations dashboard: `http://127.0.0.1:8000/ui/operations`
+- Ingestion run history: `http://127.0.0.1:8000/ui/ingestion-runs`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
 
 The published application port accepts direct LAN access at

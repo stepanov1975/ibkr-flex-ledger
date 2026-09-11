@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from .ingestion_runs_ui import INGESTION_RUNS_HTML
 from .stock_history_ui import STOCK_HISTORY_HTML
 
 
@@ -28,6 +29,10 @@ def api_create_ui_router() -> APIRouter:
     @router.get("/ui/operations", response_class=HTMLResponse)
     def operations_dashboard() -> HTMLResponse:
         return HTMLResponse(_OPERATIONS_DASHBOARD_HTML)
+
+    @router.get("/ui/ingestion-runs", response_class=HTMLResponse)
+    def ingestion_runs_dashboard() -> HTMLResponse:
+        return HTMLResponse(INGESTION_RUNS_HTML)
 
     return router
 
@@ -135,7 +140,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <h3>Open FIFO lots</h3><p class="muted">Lot quantities and unit costs can change even when broker-reported positions stay the same.</p>
 <div class="scroll"><table><thead><tr><th>Comparison</th><th>Lot</th><th>Remaining units</th><th>Unit cost</th><th>Lot cost basis</th></tr></thead><tbody id="split-lots"></tbody></table></div>
 </section>
-<section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div></section>
+<section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div><p><a href="/ui/ingestion-runs">View all ingestion runs</a></p></section>
 </div></main><script>
 const el=id=>document.getElementById(id); const esc=value=>String(value??'');
 function cell(row,value,cls=''){const td=document.createElement('td');td.textContent=esc(value);if(cls)td.className=cls;row.append(td)}
@@ -185,7 +190,7 @@ try{const result=await json('/corporate-actions/cases/'+splitCase.case_id+'/spli
 for(const id of ['new-shares','old-shares','split-note'])el(id).oninput=invalidateSplit;
 el('preview-split').onclick=()=>requestSplit(false);el('apply-split').onclick=()=>requestSplit(true);el('cancel-split').onclick=cancelSplit;
 el('show-reviewed').onchange=()=>loadCases().catch(error=>{el('case-error').textContent=error.message});
-async function loadRuns(){const x=await json('/ingestion/runs?limit=20');el('runs').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDateTime(item.started_at_utc),item.run_type,item.status,item.duration_ms??'—',item.error_message??''].forEach(v=>cell(tr,v,item.status==='failed'?'bad':''));el('runs').append(tr)}}
+async function loadRuns(){const x=await json('/ingestion/runs?limit=5&sort_by=started_at_utc&sort_dir=desc');el('runs').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDateTime(item.started_at_utc),item.run_type,item.status,item.duration_ms??'—',item.error_message??''].forEach(v=>cell(tr,v,item.status==='failed'?'bad':''));el('runs').append(tr)}}
 el('label-form').onsubmit=async event=>{event.preventDefault();await json('/labels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:el('label-name').value,color:el('label-color').value||null})});event.target.reset();await loadLabels()};
 async function loadAll(){for(const task of [loadSlo,loadPnl,loadLabels,loadCases,loadRuns]){try{await task()}catch(error){console.error(error)}}}loadAll();
 </script></body></html>"""
