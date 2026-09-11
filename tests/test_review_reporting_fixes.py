@@ -57,6 +57,58 @@ def _snapshot(connection, instrument, run, quantity=0):
         "source": "openpositions_mark_price" if quantity else "broker_position_absent"})
 
 
+@pytest.mark.parametrize("marker_payload,tax_amount,expected", [
+    ({}, None, "0"),
+    ({}, "-8.012972", "8.012972"),
+    ({"currency": "USD"}, "-8.012972", "8.012972"),
+])
+def test_portfolio_costs_ignore_transaction_tax_section_markers(
+    portfolio_db, marker_payload, tax_amount, expected,
+):
+    engine, repository = portfolio_db
+    with engine.begin() as connection:
+        if tax_amount is not None:
+            run, artifact = _artifact(connection)
+            _raw(connection, run, artifact, "TransactionTaxes", "TransactionTaxes:TransactionTax:tradeId=1", {
+                "tradeId": "1", "taxDescription": "Italian Transaction Tax",
+                "currency": "USD", "taxAmount": tax_amount,
+            })
+        run, artifact = _artifact(connection)
+        _raw(connection, run, artifact, "TransactionTaxes", "TransactionTaxes:section:1", marker_payload)
+
+    summary = repository.db_report_portfolio_summary("REVIEW")
+
+    assert summary.total_costs_usd is not None
+    assert Decimal(summary.total_costs_usd) == Decimal(expected)
+    assert summary.costs_outside_instrument_pnl_usd is not None
+    assert Decimal(summary.costs_outside_instrument_pnl_usd) == Decimal(expected)
+    assert [row.category for row in summary.cost_summary] == (
+        [] if tax_amount is None else ["Italian Transaction Tax"]
+    )
+    if tax_amount is None:
+        assert summary.activity_date_from is None
+        assert summary.activity_date_to is None
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"currency": "USD", "taxAmount": "invalid"},
+    {"currency": "EUR", "taxAmount": "-2"},
+])
+def test_portfolio_costs_keep_incomplete_transaction_taxes_unavailable(portfolio_db, payload):
+    engine, repository = portfolio_db
+    with engine.begin() as connection:
+        run, artifact = _artifact(connection)
+        _raw(connection, run, artifact, "TransactionTaxes", "TransactionTaxes:TransactionTax:1", payload)
+
+    summary = repository.db_report_portfolio_summary("REVIEW")
+
+    assert summary.total_costs_usd is None
+    assert summary.costs_outside_instrument_pnl_usd is None
+    assert len(summary.cost_summary) == 1
+    assert summary.cost_summary[0].net_cost_usd is None
+
+
 @pytest.mark.parametrize("currency,base,tax_credit,supplemental,expected_net,expected_tax,expected_fees", [
     ("USD", False, "0", False, "83", "15", "2"),
     ("USD", False, "5", False, "88", "10", "2"),

@@ -538,6 +538,7 @@ class SQLAlchemyPortfolioService:
             "(raw.source_payload-'reportDate')::text) ORDER BY raw.source_row_ref, raw.raw_record_id) "
             "AS event_occurrence FROM eligible_artifacts artifact JOIN raw_record raw "
             "ON raw.raw_artifact_id=artifact.raw_artifact_id WHERE raw.section_name='TransactionTaxes'"
+            " AND raw.source_row_ref NOT LIKE 'TransactionTaxes:section:%'"
             "), ranked_transaction_taxes AS ("
             "SELECT DISTINCT ON (event_identity, event_occurrence) source_payload, report_date_local, "
             "created_at_utc, raw_record_id FROM transaction_tax_candidates "
