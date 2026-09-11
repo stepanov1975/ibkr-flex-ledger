@@ -22,8 +22,9 @@ from test_jobs_ingestion_orchestrator import _RawPersistenceStub, _RepositoryStu
 
 @pytest.mark.parametrize('phase', ['request', 'download'])
 @pytest.mark.parametrize('failure', ['http_status', 'timeout', 'connection'])
-def test_transport_credentials_never_reach_persisted_diagnostics(phase, failure):
+def test_transport_credentials_never_reach_persisted_diagnostics(phase, failure, monkeypatch):
     secret = 'synthetic-private-flex-token'
+    monkeypatch.setattr('app.adapters.flex_web_service.time.sleep', lambda _seconds: None)
 
     def respond(request):
         if phase == 'download' and request.url.path.endswith('/SendRequest'):
