@@ -219,8 +219,11 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         allow_unsupported_snapshot_cleanup: bool,
     ) -> JobExecutionResult:
         """Own the account for the full replay and its audit lifecycle."""
-        guard = getattr(self._ingestion_repository, "db_ingestion_run_guard", None)
-        with guard(config.account_id) if guard is not None else nullcontext():
+        guard = (
+            self._ingestion_repository.db_ingestion_run_guard(config.account_id)
+            if self._ingestion_repository is not None else nullcontext()
+        )
+        with guard:
             return self._job_reprocess_execute_guarded(config, allow_unsupported_snapshot_cleanup)
 
     def _job_reprocess_execute_guarded(
@@ -254,8 +257,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             )
 
         try:
-            transaction = getattr(self._canonical_persistence_repository, "db_canonical_transaction", nullcontext)
-            with transaction():
+            with self._canonical_persistence_repository.db_canonical_transaction():
                 timeline.append(domain_build_stage_event(stage="raw_read", status="started"))
                 candidates = self._raw_read_repository.db_raw_artifact_replay_candidate_list(
                     account_id=config.account_id,

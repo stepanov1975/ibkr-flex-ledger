@@ -196,7 +196,8 @@ def _db_trade_rows_for_incoming_identities(
             "AND raw.section_name='Trades' "
             "AND raw.source_row_ref LIKE 'Trades:Trade:%' "
             "AND (owner.status='success' OR completion.status='success')"
-            "), raw_identity_source AS ("
+            # Normalize JSON identities once, before matching the incoming batch.
+            "), raw_identity_source AS MATERIALIZED ("
             "SELECT raw_record_id, account_id, transaction_id, "
             "CASE WHEN source_ib_exec_id IN ('-', '--', 'N/A') THEN NULL "
             "WHEN source_ib_exec_id<>'' THEN source_ib_exec_id "

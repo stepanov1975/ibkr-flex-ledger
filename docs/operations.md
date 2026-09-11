@@ -21,10 +21,10 @@ alter the prior ledger. A lost commit acknowledgement is resolved from durable r
 The next ingestion/replay automatically recovers unfinished run rows after obtaining the
 account's session advisory lock, recording `INGESTION_RUN_INTERRUPTED`. Overlapping live
 workers and manual split corrections remain excluded. No age-based takeover is used.
-Stop ingestion/replay workers before applying Alembic migrations, then restart them
-together; older workers only hold the start lock briefly. Existing non-atomic failed runs retain conservative
-skip behavior; recovery of their possible partial writes requires verified successful raw
-history and operator investigation. This change performs no historical data repair.
+All publications are atomic, and failed runs do not disable duplicate-report skipping.
+Replay uses the same execution-consistency checks as ingestion. The repository guard
+and transaction interfaces are required; old implementations are not supported. Restart
+workers together when deploying this behavior. No additional schema migration is required.
 
 Transient HTTP transport failures use at most three attempts per operation, inside the
 existing request/poll budgets. HTTP 429/502/503/504 honor bounded Retry-After; permanent

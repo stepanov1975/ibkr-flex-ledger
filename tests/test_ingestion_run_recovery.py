@@ -47,7 +47,7 @@ def test_process_interruption_can_be_recovered_by_a_new_worker(database, monkeyp
 
 
 def test_new_atomic_failures_do_not_disable_duplicate_skip(database, monkeypatch):
-    orchestrator, adapter, _, canonical, *_ = _harness(database)
+    orchestrator, adapter, *_ = _harness(database)
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     fetch = adapter.adapter_fetch_report
 
@@ -57,18 +57,18 @@ def test_new_atomic_failures_do_not_disable_duplicate_skip(database, monkeypatch
     monkeypatch.setattr(adapter, 'adapter_fetch_report', failure)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
     monkeypatch.setattr(adapter, 'adapter_fetch_report', fetch)
-    assert canonical.db_canonical_skip_is_safe('INTEGRITY')
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     with database.connect() as connection:
         diagnostics = connection.scalar(text('SELECT diagnostics FROM ingestion_run ORDER BY started_at_utc DESC LIMIT 1'))
     assert any(item.get('details', {}).get('canonical_skip_reason') == 'exact_duplicate_artifact' for item in diagnostics)
 
 
-def test_legacy_failed_run_still_disables_incremental_skip(database):
-    _, _, _, canonical, _, _, runs = _harness(database)
-    legacy = runs.db_ingestion_run_create_started('INTEGRITY', 'manual', '2026-08-21', 'query', date(2026, 8, 21))
-    runs.db_ingestion_run_finalize(legacy.ingestion_run_id, 'failed', 'OLD_FAILURE', 'legacy partial write', [])
-    assert not canonical.db_canonical_skip_is_safe('INTEGRITY')
+def test_starting_a_run_requires_account_ownership(database):
+    runs = SQLAlchemyIngestionRunService(database)
+    with pytest.raises(RuntimeError, match="requires account guard"):
+        runs.db_ingestion_run_create_started('INTEGRITY', 'manual', '2026-08-21', 'query', date(2026, 8, 21))
+    with database.connect() as connection:
+        assert connection.scalar(text('SELECT count(*) FROM ingestion_run')) == 0
 
 
 def test_lost_lock_connection_cannot_publish_semantics(database):

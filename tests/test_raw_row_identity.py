@@ -105,10 +105,12 @@ def test_persistence_keeps_all_lots_and_dividend_accruals_and_deduplicates_reimp
         '<ChangeInDividendAccrual actionID="200" code="Re" grossAmount="-12" />'
         '</ChangeInDividendAccruals>'
     )
-    run = SQLAlchemyIngestionRunService(database).db_ingestion_run_create_started(
-        account_id="U_TEST", run_type="manual", period_key="2026-08-21",
-        flex_query_id="raw-identity", report_date_local=date(2026, 8, 21),
-    )
+    runs = SQLAlchemyIngestionRunService(database)
+    with runs.db_ingestion_run_guard("U_TEST"):
+        run = runs.db_ingestion_run_create_started(
+            account_id="U_TEST", run_type="manual", period_key="2026-08-21",
+            flex_query_id="raw-identity", report_date_local=date(2026, 8, 21),
+        )
     repository = SQLAlchemyRawPersistenceService(database)
     reference = RawArtifactReference(
         account_id="U_TEST", period_key="2026-08-21", flex_query_id="raw-identity",

@@ -22,8 +22,8 @@ Rules:
 - Ingestion overlap policy: single active run lock; reject overlapping triggers with `409` and message `run already active`.
 - Live report context: exactly one broker account, consistent header/row account IDs, and AccountInformation USD base currency. Bind to successful broker history, not the internal account label.
 - Publication is atomic across canonical events, projections, artifact completion and success audit. Persist downloaded evidence before validation. Session ownership covers the whole ingestion/replay run; recover abandoned started rows only after acquiring ownership.
-- Live execution conflicts fail with `TRADE_CONSISTENCY_CONFLICT`: identity, instrument, side, quantity, timestamp, currency, price, commission, fees and net cash are protected. Derived broker valuation/FX/description fields may refresh. Replay retains historically accepted successful versions.
-- New atomic failures do not invalidate duplicate skips. Legacy failed non-atomic history remains conservative and is not repaired automatically.
+- Live execution conflicts fail with `TRADE_CONSISTENCY_CONFLICT`: identity, instrument, side, quantity, timestamp, currency, price, commission, fees and net cash are protected. Derived broker valuation/FX/description fields may refresh. Replay applies the same execution-consistency checks before restoring source provenance.
+- Failed atomic publications do not invalidate duplicate skips; no per-version run marker is maintained.
 - Authentication hardening for proxy headers/trust assumptions: out of MVP scope (post-MVP).
 - Reverse-proxy identity header contract validation in application code: out of MVP scope (post-MVP).
 
@@ -43,7 +43,7 @@ Goal: define exact UPSERT natural keys for deterministic replay and deduplicatio
 
 | Event Type | Natural Key Fields (ordered) | Uniqueness Constraint Name | Collision Handling Rule | Notes |
 |---|---|---|---|---|
-| `trade_fill` | `account_id`, `ib_exec_id` | `uq_event_trade_fill_account_exec` | Live ingestion rejects conflicting execution identity/economics and refreshes derived figures only. Historical replay may UPSERT previously accepted numeric versions (`price`, `commission`, `realized_pnl`, `net_cash`, `net_cash_in_base`, `fx_rate_to_base`, `cost`), keeping earliest successful origin. | Mirrors execution-level identity in references (`fill_execution_id`/`ibExecID`). |
+| `trade_fill` | `account_id`, `ib_exec_id` | `uq_event_trade_fill_account_exec` | Ingestion and replay reject conflicting execution identity/economics, refresh validated derived figures, and retain earliest successful origin. | Mirrors execution-level identity in references (`fill_execution_id`/`ibExecID`). |
 | `cashflow` | `account_id`, `transaction_id`, `cash_action`, `currency` | `uq_event_cashflow_account_txn_action_ccy` | If duplicate key with same amount/date, ignore; if amount/date differs, mark as correction and keep latest `report_date`. | `transactionID` is present across IB Flex sections and is the primary anchor. |
 | `fx` | `account_id`, `transaction_id`, `currency`, `functional_currency` | `uq_event_fx_account_txn_ccy_pair` | If duplicate key reappears, UPSERT computed fields and preserve first-seen source row pointer. | Uses transaction identity first, then currency pair for deterministic uniqueness. |
 | `corp_action` | `account_id`, `action_id` | `uq_event_corp_action_account_action` | If `action_id` is null, fallback key is (`account_id`, `transaction_id`, `conid`, `report_date`, `reorg_code`); conflicts create mandatory manual case. | `actionID`/`transactionID` appear in ibflex corporate-action types. |

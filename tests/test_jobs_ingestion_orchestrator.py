@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
@@ -87,6 +89,9 @@ def test_cli_bootstrap_uses_scheduled_ingestion_defaults(monkeypatch: pytest.Mon
 
 class _RepositoryStub:
     """Repository stub that captures finalize payloads for assertions."""
+
+    def db_ingestion_run_guard(self, account_id: str):
+        return nullcontext()
 
     def __init__(self, run_count: int = 1, artifact_owner_status: str = "success") -> None:
         """Initialize repository stub state.
@@ -856,6 +861,9 @@ def _raw_row(
 class _CanonicalRepositoryStub:
     """Canonical repository stub implementing read and upsert behaviors."""
 
+    def db_canonical_transaction(self):
+        return nullcontext()
+
     def db_canonical_validate_trade_fills(self, requests) -> None:
         pass
 
@@ -906,9 +914,6 @@ class _CanonicalRepositoryStub:
         self.all_read_run_ids: list[UUID] = []
         self.artifact_read_ids: list[UUID] = []
         self.bulk_upsert_calls = 0
-
-    def db_canonical_skip_is_safe(self, account_id: str) -> bool:
-        return True
 
     def db_raw_record_list_changed_for_run(
         self,

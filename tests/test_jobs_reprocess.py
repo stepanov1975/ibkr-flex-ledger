@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
@@ -167,6 +169,12 @@ class _ArtifactRawRepository:
 class _CanonicalPersistRepositoryStub:
     """Capture upserted canonical identifiers to assert determinism."""
 
+    def db_canonical_transaction(self):
+        return nullcontext()
+
+    def db_canonical_validate_trade_fills(self, requests):
+        pass
+
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         pass
 
@@ -319,6 +327,9 @@ class _FinalizeCall(TypedDict):
 
 class _IngestionRepositoryStub:
     """Capture reprocess run finalize diagnostics for assertions."""
+
+    def db_ingestion_run_guard(self, account_id: str):
+        return nullcontext()
 
     def __init__(self) -> None:
         """Initialize deterministic run record and capture buffer.

@@ -1,5 +1,7 @@
 # IBKR Import Reliability Implementation Plan
 
+> Historical design record: backward-compatibility decisions below were superseded by [the single-installation cleanup](../plans/2026-09-11-remove-ibkr-backward-compatibility.md). The run version marker, legacy test fixtures, old-interface fallbacks and replay validation bypass have been removed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make IBKR imports atomic, explicit about inconsistent source data, and recoverable after realistic configuration, process and transport failures.

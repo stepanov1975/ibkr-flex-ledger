@@ -71,7 +71,7 @@ class SQLAlchemyRawPersistenceService(RawPersistenceRepositoryPort):
                 identities.add(row["broker_account_id"])
             else:
                 # Some reports identify the account only in the statement header.
-                # Read bytes only for that legacy/optional metadata shape.
+                # Read bytes only for that optional metadata shape.
                 try:
                     root = ET.fromstring(bytes(row["header_payload"]))
                 except ET.ParseError as error:

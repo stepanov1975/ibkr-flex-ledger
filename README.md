@@ -314,7 +314,7 @@ Downloaded bytes are retained even when XML, required-section, or account valida
 fails. Canonical events, lots, snapshots, artifact completion and successful run status
 publish in one transaction. A failed publication leaves the previous ledger intact.
 
-Live execution identity and financial fields are checked before publication. A changed
+Ingestion and replay check execution identity and financial fields before publication. A changed
 execution/transaction identity, instrument, side, quantity, timestamp, currency, price,
 commission, fees or net cash fails with `TRADE_CONSISTENCY_CONFLICT`; retained raw IDs
 and conflicting fields identify the evidence. Optional IDs learned from successful raw
@@ -330,10 +330,10 @@ next trigger records its unfinished run as `INGESTION_RUN_INTERRUPTED` and proce
 A live lock owner is never displaced based on elapsed time. Manual split corrections
 use the same lock. A committed success remains successful if its acknowledgement is lost.
 
-Stop ingestion/replay workers, apply the schema migration, then restart all workers;
-an older worker does not hold the new whole-run lock. Legacy failed runs can contain partial canonical writes:
-they still disable incremental skipping and need source-backed investigation/replay.
-This upgrade does not automatically repair old data or accept conflicting executions.
+All imports publish atomically, so failed runs do not disable duplicate-report skipping.
+The application requires the current repository guard and transaction interfaces.
+Restart ingestion/replay workers together when deploying this behavior. The reliability
+changes require no additional schema migration.
 
 API endpoints:
 
@@ -494,12 +494,11 @@ chronologically, and rebuilds canonical events and snapshots without requesting 
 IBKR Flex statement. Replayed events use their latest successful application across
 the account's periods and queries, while broker valuation retains the selected artifact.
 This rebuilds corrected history without rolling canonical values back to an older
-report. Failed imports cannot supersede successful source versions. Replay preserves
-execution corrections already accepted by older versions; new live reports must pass
-the execution consistency checks above. Derived base cash and FX rates can refresh.
+report. Failed imports cannot supersede successful source versions. Replay validates
+original and current execution values before restoring source provenance; conflicting
+values fail the replay. Derived base cash and FX rates can refresh.
 Missing trades retain immutable fields from the earliest recorded successful application
-and overlay supported corrections from the latest one. Deleted origins from failed
-writes cannot be reconstructed without additional history.
+and retain validated report-derived values from the latest one.
 Valid split approvals remain in place during replay; equivalent corporate-action
 copies retain their existing source links without making later snapshots stale.
 The ordinary HTTP endpoint, including explicit HTTP scopes, never

@@ -22,7 +22,6 @@ def job_canonical_map_and_persist(
     canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
     mapping_service: CanonicalMappingService | None = None,
     source_origins: dict[str, RawRecordForCanonicalMapping] | None = None,
-    validate_trade_consistency: bool = False,
 ) -> dict[str, int]:
     """Map raw rows into canonical contracts and persist with deterministic UPSERT logic.
 
@@ -33,7 +32,6 @@ def job_canonical_map_and_persist(
         canonical_persistence_repository: Canonical persistence repository.
         mapping_service: Optional mapping service override.
         source_origins: Optional replay origins keyed by the current raw row identifier.
-        validate_trade_consistency: Enforce live execution consistency; historical replay retains accepted history.
 
     Returns:
         dict[str, int]: Persisted canonical row counters by event type.
@@ -46,8 +44,7 @@ def job_canonical_map_and_persist(
 
     service = mapping_service or CanonicalMappingService()
     origins = source_origins or {}
-    # Map trade origins as well as current rows so rebuilding a missing event
-    # uses the same immutable fields that an existing event's UPSERT retains.
+    # Validate original and current report values before restoring source provenance.
     selected_raw_ids = {str(row.raw_record_id) for row in raw_records}
     mapping_rows = [
         row for row in origins.values()
@@ -75,27 +72,8 @@ def job_canonical_map_and_persist(
         canonical_persistence_repository=canonical_persistence_repository,
     )
     conid_by_raw_record_id = _job_canonical_build_conid_index(raw_records=mapping_rows)
-    trades_by_source_id = {request.source_raw_record_id: request for request in mapped_batch.trade_fill_requests}
-
-    resolved_trade_requests: list[CanonicalTradeFillUpsertRequest] = []
-    for latest_trade_request in mapped_batch.trade_fill_requests:
-        if latest_trade_request.source_raw_record_id not in selected_raw_ids:
-            continue
-        trade_request = latest_trade_request
-        origin = origins.get(latest_trade_request.source_raw_record_id)
-        if origin is not None:
-            # This overlay matches the trade conflict clause in canonical persistence.
-            trade_request = replace(
-                trades_by_source_id[str(origin.raw_record_id)],
-                price=latest_trade_request.price,
-                commission=latest_trade_request.commission,
-                realized_pnl=latest_trade_request.realized_pnl,
-                net_cash=latest_trade_request.net_cash,
-                net_cash_in_base=latest_trade_request.net_cash_in_base,
-                fx_rate_to_base=latest_trade_request.fx_rate_to_base,
-                cost=latest_trade_request.cost,
-                description_source_raw_record_id=latest_trade_request.source_raw_record_id,
-            )
+    trades_by_source_id: dict[str, CanonicalTradeFillUpsertRequest] = {}
+    for trade_request in mapped_batch.trade_fill_requests:
         conid = conid_by_raw_record_id.get(trade_request.source_raw_record_id)
         if conid is None:
             raise MappingContractViolationError(
@@ -114,7 +92,29 @@ def job_canonical_map_and_persist(
             trade_request,
             instrument_id=str(instrument_record.instrument_id),
         )
-        resolved_trade_requests.append(resolved_trade_request)
+        trades_by_source_id[trade_request.source_raw_record_id] = resolved_trade_request
+
+    canonical_persistence_repository.db_canonical_validate_trade_fills(list(trades_by_source_id.values()))
+    resolved_trade_requests: list[CanonicalTradeFillUpsertRequest] = []
+    for latest_trade_request in trades_by_source_id.values():
+        if latest_trade_request.source_raw_record_id not in selected_raw_ids:
+            continue
+        trade_request = latest_trade_request
+        origin = origins.get(latest_trade_request.source_raw_record_id)
+        if origin is not None:
+            # Restore origin fields only after both versions have passed consistency checks.
+            trade_request = replace(
+                trades_by_source_id[str(origin.raw_record_id)],
+                price=latest_trade_request.price,
+                commission=latest_trade_request.commission,
+                realized_pnl=latest_trade_request.realized_pnl,
+                net_cash=latest_trade_request.net_cash,
+                net_cash_in_base=latest_trade_request.net_cash_in_base,
+                fx_rate_to_base=latest_trade_request.fx_rate_to_base,
+                cost=latest_trade_request.cost,
+                description_source_raw_record_id=latest_trade_request.source_raw_record_id,
+            )
+        resolved_trade_requests.append(trade_request)
 
     resolved_cashflow_requests = []
     for cashflow_request in mapped_batch.cashflow_requests:
@@ -145,9 +145,6 @@ def job_canonical_map_and_persist(
                 source_raw_record_id=str(origin.raw_record_id),
             )
         resolved_fx_requests.append(fx_request)
-
-    if validate_trade_consistency:
-        canonical_persistence_repository.db_canonical_validate_trade_fills(resolved_trade_requests)
 
     canonical_persistence_repository.db_canonical_bulk_upsert(
         trade_requests=resolved_trade_requests,

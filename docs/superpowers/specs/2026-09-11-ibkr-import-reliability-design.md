@@ -1,5 +1,7 @@
 # IBKR import reliability: reevaluation and design
 
+> Historical design record: backward-compatibility decisions below were superseded by [the single-installation cleanup](../plans/2026-09-11-remove-ibkr-backward-compatibility.md). The run version marker, legacy test fixtures, old-interface fallbacks and replay validation bypass have been removed.
+
 The user requested reevaluation of every review finding, a plan before implementation, and conservative treatment of changed transaction data. This design supersedes automatic live trade correction behavior where stated below. Previously successful history remains replayable; this work does not repair production data or add a correction-approval UI.
 
 ## Reevaluation

@@ -156,19 +156,11 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
         normalized_period_key = self._validate_non_empty_text(period_key, "period_key")
         normalized_flex_query_id = self._validate_non_empty_text(flex_query_id, "flex_query_id")
 
-        advisory_key_1, advisory_key_2 = self._build_advisory_lock_keys(normalized_account_id)
+        if _active_run_guard.get() != (self._engine, normalized_account_id):
+            raise RuntimeError("ingestion run creation requires account guard")
 
         try:
             with db_connection_scope(self._engine, write=True) as connection:
-                guarded = _active_run_guard.get() == (self._engine, normalized_account_id)
-                if not guarded:
-                    lock_row = connection.execute(
-                        text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2) AS lock_acquired"),
-                        {"key_1": advisory_key_1, "key_2": advisory_key_2},
-                    ).mappings().one()
-                    if not bool(lock_row["lock_acquired"]):
-                        raise IngestionRunAlreadyActiveError("run already active")
-
                 active_row = connection.execute(
                     text(
                         "SELECT ingestion_run_id "
@@ -184,9 +176,9 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                 created_row = connection.execute(
                     text(
                         "INSERT INTO ingestion_run ("
-                        "account_id, run_type, status, period_key, flex_query_id, report_date_local, started_at_utc, semantic_atomic"
+                        "account_id, run_type, status, period_key, flex_query_id, report_date_local, started_at_utc"
                         ") VALUES ("
-                        ":account_id, :run_type, 'started', :period_key, :flex_query_id, :report_date_local, now(), :semantic_atomic"
+                        ":account_id, :run_type, 'started', :period_key, :flex_query_id, :report_date_local, now()"
                         ") "
                         "RETURNING ingestion_run_id"
                     ),
@@ -196,7 +188,6 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                         "period_key": normalized_period_key,
                         "flex_query_id": normalized_flex_query_id,
                         "report_date_local": report_date_local,
-                        "semantic_atomic": guarded,
                     },
                 ).mappings().one()
 
