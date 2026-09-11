@@ -191,10 +191,16 @@ def _accounting_inputs(connection: Connection, account_id: str) -> dict[str, Any
     for table in ('corporate_action_manual_case', 'corporate_action_resolution'):
         result[table] = connection.execute(text(f'SELECT to_jsonb(t)::text FROM {table} t JOIN event_corp_action e USING(event_corp_action_id) '
                                                 'WHERE e.account_id=:account_id ORDER BY 1'), {'account_id': account_id}).scalars().all()
+    # Failed imports retain raw rows but cannot change the committed accounting preview.
     result['sources'] = connection.execute(text(
-        "SELECT raw_record_id,source_payload::text FROM raw_record WHERE account_id=:account_id AND "
-        "(section_name IN ('OpenPositions','ConversionRates','CorporateActions') OR raw_record_id IN "
-        "(SELECT source_raw_record_id FROM event_trade_fill WHERE account_id=:account_id)) ORDER BY raw_record_id"
+        "SELECT r.raw_record_id,r.source_payload::text FROM raw_record r WHERE r.account_id=:account_id AND ("
+        "(r.section_name='OpenPositions' AND r.ingestion_run_id IN "
+        "(SELECT ingestion_run_id FROM pnl_snapshot_daily WHERE account_id=:account_id)) OR r.raw_record_id IN "
+        "(SELECT source_raw_record_id FROM event_trade_fill WHERE account_id=:account_id UNION "
+        "SELECT source_raw_record_id FROM event_fx WHERE account_id=:account_id) OR "
+        "(r.section_name='CorporateActions' AND r.raw_artifact_id IN "
+        "(SELECT source.raw_artifact_id FROM event_corp_action e JOIN raw_record source "
+        "ON source.raw_record_id=e.source_raw_record_id WHERE e.account_id=:account_id))) ORDER BY r.raw_record_id"
     ), {'account_id': account_id}).all()
     return result
 

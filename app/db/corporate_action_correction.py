@@ -27,6 +27,8 @@ class SQLAlchemySplitCorrectionService:
         note: str, preview_token: str | None = None,
     ) -> dict[str, Any]:
         """Rebuild in one transaction; commit only an unchanged, accepted preview."""
+        from app.db.corporate_action_resolution import _accounting_inputs, refresh_security_resolutions
+
         if not all(value.is_finite() and value > 0 for value in (new_shares, old_shares)):
             raise ValueError("New and old share quantities must be positive finite numbers.")
         if not note.strip():
@@ -77,6 +79,7 @@ class SQLAlchemySplitCorrectionService:
                     **params, "last_date": before[-1]["report_date_local"], "conid": case["conid"],
                     "run_ids": [str(snapshot["ingestion_run_id"]) for snapshot in before if snapshot["ingestion_run_id"] is not None],
                 })
+                accounting_inputs["security_resolutions"] = _accounting_inputs(connection, self._account_id)
                 lots_before = self._lots(connection, params)
                 connection.execute(text(
                     "UPDATE corporate_action_manual_case SET split_factor=:factor, "
@@ -87,9 +90,10 @@ class SQLAlchemySplitCorrectionService:
                     "UPDATE event_corp_action SET requires_manual=false, provisional=false "
                     "WHERE event_corp_action_id=:event_id"
                 ), {"event_id": case["event_corp_action_id"]})
+                refreshed_instrument_ids = refresh_security_resolutions(connection, self._engine, [], [self._account_id])
                 ledger = StockLedgerSnapshotService(SQLAlchemyLedgerSnapshotService(self._engine, connection=connection))
                 for snapshot in before:
-                    if snapshot["report_date_local"] < case["report_date_local"]:
+                    if str(case["instrument_id"]) in refreshed_instrument_ids or snapshot["report_date_local"] < case["report_date_local"]:
                         continue
                     ledger.ledger_snapshot_build_and_persist(
                         account_id=self._account_id,

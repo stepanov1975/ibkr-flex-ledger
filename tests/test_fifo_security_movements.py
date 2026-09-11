@@ -106,6 +106,85 @@ def test_multiple_transfers_preserve_source_history_and_preexisting_destination_
     assert results["third"].open_lots[0].open_event_trade_fill_id == "buy-new"
 
 
+@pytest.mark.parametrize("reverse_input", [False, True])
+def test_same_day_transfer_chain_uses_dependencies_before_event_uuid(reverse_input):
+    old = replace(_request("old", [_trade(10, "BUY", "4", "20", "buy")]),
+                  splits=(fifo.FifoSplitInput(date(2026, 8, 20), Decimal(2)),))
+    first = _movement(event="ffffffff-ffff-ffff-ffff-ffffffffffff")
+    second = replace(_movement("new", event="00000000-0000-0000-0000-000000000001"),
+                     destination_instrument_id="third")
+    movements = (second, first) if reverse_input else (first, second)
+    results = fifo.fifo_compute_portfolio(
+        [old, _request("new", []), _request("third", [_trade(20, "SELL", "3", "30", "sale")])],
+        movements,
+    )
+    assert results["old"].position_quantity == results["new"].position_quantity == 0
+    assert results["new"].closed_lots[0].closed_report_date_local == date(2026, 8, 20)
+    destination = results["third"]
+    assert destination.position_quantity == 5
+    assert destination.realized_pnl == 60
+    lot = destination.open_lots[0]
+    assert lot.cost_basis_remaining == 50
+    assert lot.opened_at_utc == old.trades[0].trade_timestamp_utc
+    assert lot.open_event_trade_fill_id == "buy"
+    assert lot.open_event_corp_action_id == second.event_corp_action_id
+    assert lot.transfer_event_corp_action_id == second.event_corp_action_id
+
+
+def test_same_day_distribution_precedes_its_transfer_and_preserves_distribution_lineage():
+    distribution = replace(_movement(None, "8", "80", event="z-distribution"),
+                           destination_instrument_id="old")
+    transfer = _movement(event="a-transfer")
+    results = fifo.fifo_compute_portfolio(
+        [_request("old", []), _request("new", [_trade(21, "SELL", "3", "30", "sale")])],
+        (transfer, distribution),
+    )
+    assert results["old"].position_quantity == 0
+    assert results["new"].position_quantity == 5
+    assert results["new"].realized_pnl == 60
+    lot = results["new"].open_lots[0]
+    assert lot.cost_basis_remaining == 50
+    assert lot.open_event_trade_fill_id is None
+    assert lot.open_event_corp_action_id == "z-distribution"
+    assert lot.transfer_event_corp_action_id == "a-transfer"
+
+
+@pytest.mark.parametrize("reverse_input", [False, True])
+def test_same_day_independent_transfers_keep_separate_cost_basis(reverse_input):
+    requests = [_request("old", [_trade(10, "BUY", "8", "10", "buy-old")]),
+                _request("new", []),
+                _request("other", [_trade(11, "BUY", "4", "30", "buy-other")]),
+                _request("fourth", [])]
+    first = _movement(event="z-transfer")
+    second = replace(_movement("other", "4", event="a-transfer"), destination_instrument_id="fourth")
+    movements = (second, first) if reverse_input else (first, second)
+    results = fifo.fifo_compute_portfolio(requests, movements)
+    assert results["old"].position_quantity == results["other"].position_quantity == 0
+    assert results["new"].position_quantity == 8
+    assert results["fourth"].position_quantity == 4
+    assert results["new"].open_lots[0].cost_basis_remaining == 80
+    assert results["fourth"].open_lots[0].cost_basis_remaining == 120
+
+
+def test_same_day_transfer_cycle_is_rejected_with_action_identity():
+    first = _movement(event="first")
+    second = replace(_movement("new", event="second"), destination_instrument_id="old")
+    requests = [_request("old", [_trade(10, "BUY", "8", "10", "buy")]), _request("new", [])]
+    with pytest.raises(fifo.FifoSecurityMovementError, match="cyclic") as error:
+        fifo.fifo_compute_portfolio(requests, (second, first))
+    assert error.value.event_corp_action_id in {"first", "second"}
+
+
+def test_same_day_competing_transfers_are_rejected_as_ambiguous():
+    first = _movement(event="first")
+    second = replace(_movement(event="second"), destination_instrument_id="third")
+    requests = [_request("old", [_trade(10, "BUY", "8", "10", "buy")]),
+                _request("new", []), _request("third", [])]
+    with pytest.raises(fifo.FifoSecurityMovementError, match="ambiguous") as error:
+        fifo.fifo_compute_portfolio(requests, (second, first))
+    assert error.value.event_corp_action_id in {"first", "second"}
+
+
 def test_empty_movements_preserve_existing_fifo_results():
     request = _request("old", [_trade(10, "BUY", "8", "10", "buy")])
     assert fifo.fifo_compute_portfolio([request], ()) == {"old": fifo.fifo_compute_instrument(request)}

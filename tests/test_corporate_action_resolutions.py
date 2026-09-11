@@ -82,10 +82,12 @@ def test_incomplete_identifier_change_is_explained_as_unsupported(database):
 
 
 def _resolution_client(database):
+    from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
     from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
     app = FastAPI()
     app.include_router(api_create_corporate_action_router(
         SQLAlchemyPortfolioService(database),
+        correction_service=SQLAlchemySplitCorrectionService(database, 'INTEGRITY'),
         resolution_service=SQLAlchemyCorporateActionResolutionService(database, 'INTEGRITY'),
     ))
     return TestClient(app)
@@ -294,3 +296,77 @@ def test_new_upstream_split_reopens_ineligible_transfer_without_blocking_import(
     with database.connect() as connection:
         assert connection.scalar(text('SELECT active FROM corporate_action_resolution')) is False
         assert connection.scalar(text("SELECT requires_manual FROM event_corp_action WHERE action_id='MOVE'")) is True
+
+
+@pytest.mark.parametrize('metadata', [b'assetCategory="OPT" currency="USD"', b'assetCategory="STK" currency="EUR"'])
+def test_instrument_only_import_rechecks_and_restores_saved_resolution(database, metadata):
+    harness, _, case = _case(database)
+    client = _resolution_client(database)
+    base = f"/corporate-actions/cases/{case['case_id']}/resolution"
+    body = {'treatment': 'security_transfer', 'note': 'Verified'}
+    preview = client.post(base + '/preview', json=body).json()
+    assert client.post(base + '/apply', json={**body, 'preview_token': preview['preview_token']}).status_code == 200
+    import re
+    metadata_report = re.sub(rb'<CorporateActions>.*?</CorporateActions>', b'<CorporateActions />', _payload())
+    harness[1].payload_bytes = metadata_report.replace(
+        b'<OpenPosition conid="900002" symbol="NEXT" assetCategory="STK" currency="USD"',
+        b'<OpenPosition conid="900002" symbol="NEXT" ' + metadata,
+    )
+    result = harness[0].job_execute('ingestion_run')
+    with database.connect() as connection:
+        errors = connection.execute(text("SELECT error_message FROM ingestion_run WHERE status='failed'")).scalars().all()
+    assert result.status == 'success', errors
+    with database.connect() as connection:
+        assert connection.scalar(text('SELECT active FROM corporate_action_resolution')) is False
+        assert connection.scalar(text("SELECT requires_manual FROM event_corp_action WHERE action_id='MOVE'")) is True
+    assert client.get('/corporate-actions/cases').json()['items'][0]['review_state'] == 'unsupported'
+    harness[1].payload_bytes = metadata_report
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.connect() as connection:
+        assert connection.scalar(text('SELECT active FROM corporate_action_resolution')) is True
+        assert connection.scalar(text("SELECT l.cost_basis_remaining FROM position_lot l JOIN instrument i USING(instrument_id) "
+                                      "WHERE i.symbol='NEXT' AND l.status='open'")) == 201
+
+
+@pytest.mark.parametrize('reactivate', [False, True])
+def test_manual_split_correction_rechecks_downstream_transfer_atomically(database, reactivate):
+    harness, _, case = _case(database)
+    client = _resolution_client(database)
+    base = f"/corporate-actions/cases/{case['case_id']}/resolution"
+    body = {'treatment': 'security_transfer', 'note': 'Verified'}
+    preview = client.post(base + '/preview', json=body).json()
+    assert client.post(base + '/apply', json={**body, 'preview_token': preview['preview_token']}).status_code == 200
+    split = (b'<CorporateAction actionID="MANUAL" transactionID="MANUAL" conid="900001" symbol="SEED" '
+             b'assetCategory="STK" type="FS" currency="USD" reportDate="20260821" />')
+    if reactivate:
+        split = split.replace(b'type="FS"', b'type="RS"') + split.replace(
+            b'actionID="MANUAL" transactionID="MANUAL"', b'actionID="AUTO" transactionID="AUTO" ratio="2"',
+        )
+    import re
+    harness[1].payload_bytes = re.sub(rb'<CorporateActions>.*?</CorporateActions>',
+                                     b'<CorporateActions>' + split + b'</CorporateActions>', _payload())
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    cases = client.get('/corporate-actions/cases').json()['items']
+    split_case = next(item for item in cases if item['can_correct_split'])
+    split_base = f"/corporate-actions/cases/{split_case['case_id']}/split"
+    ratio = {'new_shares': '1' if reactivate else '2', 'old_shares': '2' if reactivate else '1', 'note': 'Verified split notice'}
+    before = _state(database)
+    response = client.post(split_base + '/preview', json=ratio)
+    assert response.status_code == 200, response.text
+    assert _state(database) == before
+    response = client.post(split_base + '/apply', json={**ratio, 'preview_token': response.json()['preview_token']})
+    assert response.status_code == 200, response.text
+    with database.connect() as connection:
+        assert connection.scalar(text('SELECT active FROM corporate_action_resolution')) is reactivate
+        assert connection.scalar(text("SELECT requires_manual FROM event_corp_action WHERE action_id='MOVE'")) is not reactivate
+        assert connection.scalar(text("SELECT status FROM corporate_action_manual_case c JOIN event_corp_action e USING(event_corp_action_id) "
+                                      "WHERE e.action_id='MANUAL'")) == 'resolved'
+        positions = dict(connection.execute(text("SELECT i.symbol,p.position_qty FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) "
+                                                "WHERE p.report_date_local='2026-08-21'")).all())
+        # Broker-reported quantities remain authoritative; mismatched FIFO stays provisional.
+        assert positions == {'SEED': 0, 'NEXT': 2}
+        lots = dict(connection.execute(text("SELECT i.symbol,sum(l.remaining_quantity) FROM position_lot l JOIN instrument i USING(instrument_id) "
+                                           "WHERE l.status='open' GROUP BY i.symbol")).all())
+        assert lots == ({'NEXT': 2} if reactivate else {'SEED': 4})
+        assert connection.scalar(text("SELECT p.provisional FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) "
+                                      "WHERE i.symbol='NEXT' AND p.report_date_local='2026-08-21'")) is not reactivate

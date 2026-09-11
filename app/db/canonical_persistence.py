@@ -323,7 +323,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         self,
         requests: list[CanonicalInstrumentUpsertRequest],
     ) -> list[CanonicalInstrumentRecord]:
-        """Persist canonical instruments by conid-first identity in one statement.
+        """Batch instrument writes and recheck resolutions in the same transaction.
 
         Args:
             requests: Instrument upsert requests.
@@ -391,6 +391,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     ),
                     {"requests_json": requests_json},
                 ).mappings().all()
+                from app.db.corporate_action_resolution import refresh_security_resolutions
+
+                # Instrument metadata is part of the evidence even without new events.
+                refresh_security_resolutions(
+                    connection, self._engine, [], sorted({request.account_id for request in normalized_requests}),
+                )
         except SQLAlchemyError as error:
             raise RuntimeError("canonical instrument batch upsert failed") from error
 

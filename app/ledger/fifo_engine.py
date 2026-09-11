@@ -6,6 +6,7 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+from graphlib import CycleError, TopologicalSorter
 
 from .snapshot_dates import snapshot_report_date_start_utc
 
@@ -390,13 +391,41 @@ def fifo_compute_portfolio(
             previous_dates[request.instrument_id] = boundary
         if boundary is None:
             break
-        for movement in sorted((row for row in movements if row.report_date_local == boundary),
-                               key=lambda row: row.event_corp_action_id):
+        for movement in fifo_order_security_movements(
+            [row for row in movements if row.report_date_local == boundary],
+        ):
             try:
                 _fifo_apply_security_movement(results, movement)
             except ValueError as error:
                 raise FifoSecurityMovementError(movement.event_corp_action_id, str(error)) from error
     return results
+
+
+def fifo_order_security_movements(
+    movements: list[FifoSecurityMovementInput],
+) -> tuple[FifoSecurityMovementInput, ...]:
+    """Apply same-day incoming holdings before outgoing full-position transfers."""
+    by_id = {row.event_corp_action_id: row for row in sorted(movements, key=lambda row: row.event_corp_action_id)}
+    sources: set[str] = set()
+    for movement in by_id.values():
+        if movement.source_instrument_id is not None:
+            if movement.source_instrument_id in sources:
+                raise FifoSecurityMovementError(
+                    movement.event_corp_action_id,
+                    "same-day security transfers from the same source are ambiguous",
+                )
+            sources.add(movement.source_instrument_id)
+    dependencies = {
+        identifier: [other_id for other_id, other in by_id.items()
+                     if other_id != identifier and other.destination_instrument_id == movement.source_instrument_id]
+        for identifier, movement in by_id.items()
+    }
+    try:
+        return tuple(by_id[identifier] for identifier in TopologicalSorter(dependencies).static_order())
+    except CycleError as error:
+        raise FifoSecurityMovementError(
+            error.args[1][0], "same-day security movement dependencies are cyclic",
+        ) from error
 
 
 def _fifo_apply_security_movement(

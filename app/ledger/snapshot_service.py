@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -23,7 +23,7 @@ from app.db import (
 from .snapshot_dates import snapshot_report_date_start_utc
 from .fifo_engine import (
     FifoLedgerComputationRequest, FifoOpenLotResult, FifoSecurityMovementInput,
-    FifoSplitInput, FifoTradeFillInput, fifo_compute_portfolio,
+    FifoSplitInput, FifoTradeFillInput, fifo_compute_portfolio, fifo_order_security_movements,
 )
 
 
@@ -317,14 +317,27 @@ class StockLedgerSnapshotService:
             ))
             trade_context[instrument_id] = converted_trades, fx_sources, fx_dependencies, missing_fx
 
+        movement_inputs = [FifoSecurityMovementInput(
+            event_corp_action_id=str(movement.event_corp_action_id),
+            source_raw_record_id=str(movement.source_raw_record_id),
+            source_instrument_id=str(movement.source_instrument_id) if movement.source_instrument_id is not None else None,
+            destination_instrument_id=str(movement.destination_instrument_id), report_date_local=movement.report_date_local,
+            quantity=Decimal(movement.quantity),
+            cost_basis=Decimal(movement.cost_basis) if movement.cost_basis is not None else None,
+        ) for movement in movement_rows]
+        movement_currencies = {str(movement.event_corp_action_id): movement.currency for movement in movement_rows}
+        ordered_movements = (
+            movement for day in sorted({row.report_date_local for row in movement_inputs})
+            for movement in fifo_order_security_movements([row for row in movement_inputs if row.report_date_local == day])
+        )
         movements: list[FifoSecurityMovementInput] = []
-        for movement in sorted(movement_rows, key=lambda row: (row.report_date_local, str(row.event_corp_action_id))):
-            destination_id = str(movement.destination_instrument_id)
+        for movement in ordered_movements:
+            destination_id = movement.destination_instrument_id
             converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[destination_id]
-            basis = Decimal(movement.cost_basis) if movement.cost_basis is not None else None
+            basis = movement.cost_basis
             if movement.source_instrument_id is None and basis is not None and basis != 0:
                 movement_fx, movement_fx_source = self._resolve_fx_rate(
-                    currency=movement.currency, functional_currency=normalized_functional_currency,
+                    currency=movement_currencies[movement.event_corp_action_id], functional_currency=normalized_functional_currency,
                     report_date_local=movement.report_date_local, fx_rate_rows=fx_rate_rows,
                     fx_dependencies=fx_dependencies,
                 )
@@ -332,18 +345,12 @@ class StockLedgerSnapshotService:
                 missing_fx |= movement_fx is None
                 basis *= movement_fx or Decimal("0")
             if movement.source_instrument_id is not None:
-                _, source_fx, source_dependencies, source_missing = trade_context[str(movement.source_instrument_id)]
+                _, source_fx, source_dependencies, source_missing = trade_context[movement.source_instrument_id]
                 fx_sources.update(source_fx)
                 fx_dependencies.update(source_dependencies)
                 missing_fx |= source_missing
             trade_context[destination_id] = converted_trades, fx_sources, fx_dependencies, missing_fx
-            movements.append(FifoSecurityMovementInput(
-                event_corp_action_id=str(movement.event_corp_action_id),
-                source_raw_record_id=str(movement.source_raw_record_id),
-                source_instrument_id=str(movement.source_instrument_id) if movement.source_instrument_id is not None else None,
-                destination_instrument_id=destination_id, report_date_local=movement.report_date_local,
-                quantity=Decimal(movement.quantity), cost_basis=basis,
-            ))
+            movements.append(replace(movement, cost_basis=basis))
         fifo_results = fifo_compute_portfolio(fifo_requests, tuple(movements))
 
         for instrument_id in sorted(instrument_keys):
