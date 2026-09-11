@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import traceback
@@ -84,7 +83,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         snapshot_service: StockLedgerSnapshotService,
         snapshot_repository: LedgerSnapshotRepositoryPort,
         config: CanonicalReprocessOrchestratorConfig,
-        ingestion_repository: IngestionRunRepositoryPort | None = None,
+        ingestion_repository: IngestionRunRepositoryPort,
     ):
         """Initialize canonical reprocess dependencies.
 
@@ -94,7 +93,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             snapshot_service: Ledger snapshot build service.
             snapshot_repository: Ledger snapshot cleanup repository.
             config: Reprocess configuration values.
-            ingestion_repository: Optional ingestion run repository for timeline persistence.
+            ingestion_repository: Ingestion run repository for account ownership and timeline persistence.
 
         Returns:
             None: Initializer does not return values.
@@ -111,6 +110,8 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
             raise ValueError("snapshot_service must not be None")
         if snapshot_repository is None:
             raise ValueError("snapshot_repository must not be None")
+        if ingestion_repository is None:
+            raise ValueError("ingestion_repository must not be None")
         if not config.account_id.strip():
             raise ValueError("config.account_id must not be blank")
         if not config.period_key.strip():
@@ -219,11 +220,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         allow_unsupported_snapshot_cleanup: bool,
     ) -> JobExecutionResult:
         """Own the account for the full replay and its audit lifecycle."""
-        guard = (
-            self._ingestion_repository.db_ingestion_run_guard(config.account_id)
-            if self._ingestion_repository is not None else nullcontext()
-        )
-        with guard:
+        with self._ingestion_repository.db_ingestion_run_guard(config.account_id):
             return self._job_reprocess_execute_guarded(config, allow_unsupported_snapshot_cleanup)
 
     def _job_reprocess_execute_guarded(
@@ -245,16 +242,13 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
         """
 
         timeline: list[dict[str, object]] = [domain_build_stage_event(stage="run", status="started")]
-        run_record = None
-
-        if self._ingestion_repository is not None:
-            run_record = self._ingestion_repository.db_ingestion_run_create_started(
-                account_id=config.account_id,
-                run_type="reprocess",
-                period_key=config.period_key,
-                flex_query_id=config.flex_query_id,
-                report_date_local=None,
-            )
+        run_record = self._ingestion_repository.db_ingestion_run_create_started(
+            account_id=config.account_id,
+            run_type="reprocess",
+            period_key=config.period_key,
+            flex_query_id=config.flex_query_id,
+            report_date_local=None,
+        )
 
         try:
             with self._canonical_persistence_repository.db_canonical_transaction():
@@ -438,15 +432,13 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                         )
 
                 timeline.append(domain_build_stage_event(stage="run", status="success"))
-                ingestion_repository = self._ingestion_repository
-                if run_record is not None and ingestion_repository is not None:
-                    ingestion_repository.db_ingestion_run_finalize(
-                        ingestion_run_id=run_record.ingestion_run_id,
-                        status="success",
-                        error_code=None,
-                        error_message=None,
-                        diagnostics=timeline,
-                    )
+                self._ingestion_repository.db_ingestion_run_finalize(
+                    ingestion_run_id=run_record.ingestion_run_id,
+                    status="success",
+                    error_code=None,
+                    error_message=None,
+                    diagnostics=timeline,
+                )
                 return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="success")
         except Exception as error:
             error_code = "REPROCESS_UNEXPECTED_ERROR"
@@ -477,17 +469,14 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                     },
                 )
             )
-            ingestion_repository = self._ingestion_repository
-            if run_record is not None and ingestion_repository is not None:
-                finalized = ingestion_repository.db_ingestion_run_finalize(
-                    ingestion_run_id=run_record.ingestion_run_id,
-                    status="failed",
-                    error_code=error_code,
-                    error_message=str(error),
-                    diagnostics=timeline,
-                )
-                return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status=finalized.state.status)
-            return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status="failed")
+            finalized = self._ingestion_repository.db_ingestion_run_finalize(
+                ingestion_run_id=run_record.ingestion_run_id,
+                status="failed",
+                error_code=error_code,
+                error_message=str(error),
+                diagnostics=timeline,
+            )
+            return JobExecutionResult(job_name=self._REPROCESS_JOB_NAME, status=finalized.state.status)
 
     def _job_reprocess_validate_period_key(self, period_key: str) -> str:
         """Validate explicit replay period key format.

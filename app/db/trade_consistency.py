@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Iterable
@@ -65,25 +66,16 @@ def db_validate_trade_consistency(
     if not requests:
         return
 
-    _db_validate_incoming_trade_consistency(requests)
-    stored_rows = _db_trade_rows_for_incoming_identities(connection, requests)
-    stored_by_execution: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    stored_by_transaction: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in stored_rows:
-        account_id = _normalized_text(row["account_id"])
-        stored_by_execution.setdefault(
-            (account_id, _normalized_text(row["ib_exec_id"])), []
-        ).append(row)
-        transaction_id = _normalized_optional_text(row["transaction_id"])
-        if transaction_id is not None:
-            stored_by_transaction.setdefault((account_id, transaction_id), []).append(
-                row
-            )
+    incoming_rows = [_normalized_trade(asdict(request)) for request in requests]
+    _db_validate_incoming_trade_consistency(incoming_rows)
+    stored_rows = _db_trade_rows_for_incoming_identities(connection, incoming_rows)
+    stored_by_execution = _index_trades(stored_rows, "ib_exec_id")
+    stored_by_transaction = _index_trades(stored_rows, "transaction_id")
 
-    for request in requests:
-        account_id = _normalized_text(request.account_id)
-        ib_exec_id = _normalized_text(request.ib_exec_id)
-        transaction_id = _normalized_optional_text(request.transaction_id)
+    for request in incoming_rows:
+        account_id = request["account_id"]
+        ib_exec_id = request["ib_exec_id"]
+        transaction_id = request["transaction_id"]
         matching_rows = list(stored_by_execution.get((account_id, ib_exec_id), ()))
         if transaction_id is not None:
             for row in stored_by_transaction.get((account_id, transaction_id), ()):
@@ -91,15 +83,15 @@ def db_validate_trade_consistency(
                     matching_rows.append(row)
 
         conflicting_fields: list[str] = []
-        source_raw_record_ids = [request.source_raw_record_id]
+        source_raw_record_ids = [request["source_raw_record_id"]]
         for row in matching_rows:
-            source_raw_record_ids.append(str(row["source_raw_record_id"]))
-            stored_ib_exec_id = _normalized_text(row["ib_exec_id"])
+            source_raw_record_ids.append(row["source_raw_record_id"])
+            stored_ib_exec_id = row["ib_exec_id"]
             if transaction_id is not None and stored_ib_exec_id != ib_exec_id:
                 conflicting_fields.append("ib_exec_id")
                 continue
 
-            stored_transaction_id = _normalized_optional_text(row["transaction_id"])
+            stored_transaction_id = row["transaction_id"]
             if (
                 stored_ib_exec_id == ib_exec_id
                 and transaction_id is not None
@@ -120,32 +112,17 @@ def db_validate_trade_consistency(
 
 
 def _db_validate_incoming_trade_consistency(
-    requests: list[CanonicalTradeFillUpsertRequest],
+    requests: list[dict[str, Any]],
 ) -> None:
-    by_execution: dict[tuple[str, str], list[CanonicalTradeFillUpsertRequest]] = {}
-    by_transaction: dict[tuple[str, str], list[CanonicalTradeFillUpsertRequest]] = {}
-    for request in requests:
-        account_id = _normalized_text(request.account_id)
-        by_execution.setdefault(
-            (account_id, _normalized_text(request.ib_exec_id)), []
-        ).append(request)
-        transaction_id = _normalized_optional_text(request.transaction_id)
-        if transaction_id is not None:
-            by_transaction.setdefault((account_id, transaction_id), []).append(request)
-
-    for grouped_requests in by_transaction.values():
-        if (
-            len({_normalized_text(request.ib_exec_id) for request in grouped_requests})
-            > 1
-        ):
+    for grouped_requests in _index_trades(requests, "transaction_id").values():
+        if len({request["ib_exec_id"] for request in grouped_requests}) > 1:
             _raise_incoming_conflict(grouped_requests, ("ib_exec_id",))
 
-    for grouped_requests in by_execution.values():
+    for grouped_requests in _index_trades(requests, "ib_exec_id").values():
         nonempty_transaction_ids = {
-            transaction_id
+            request["transaction_id"]
             for request in grouped_requests
-            if (transaction_id := _normalized_optional_text(request.transaction_id))
-            is not None
+            if request["transaction_id"] is not None
         }
         if len(nonempty_transaction_ids) > 1:
             _raise_incoming_conflict(grouped_requests, ("transaction_id",))
@@ -162,14 +139,10 @@ def _db_validate_incoming_trade_consistency(
 
 def _db_trade_rows_for_incoming_identities(
     connection: Connection,
-    requests: list[CanonicalTradeFillUpsertRequest],
+    requests: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     identities = [
-        {
-            "account_id": _normalized_text(request.account_id),
-            "ib_exec_id": _normalized_text(request.ib_exec_id),
-            "transaction_id": _normalized_optional_text(request.transaction_id),
-        }
+        {field: request[field] for field in ("account_id", "ib_exec_id", "transaction_id")}
         for request in requests
     ]
     rows = connection.execute(
@@ -233,38 +206,52 @@ def _db_trade_rows_for_incoming_identities(
         ),
         {"identities_json": json.dumps(identities)},
     ).mappings()
-    return [dict(row) for row in rows]
+    return [_normalized_trade(dict(row)) for row in rows]
+
+
+def _normalized_trade(row: dict[str, Any]) -> dict[str, Any]:
+    """Use the same identity and economics representation for requests and stored evidence."""
+    return {
+        **row,
+        "account_id": _normalized_text(row["account_id"]),
+        "ib_exec_id": _normalized_text(row["ib_exec_id"]),
+        "transaction_id": _normalized_optional_text(row["transaction_id"]),
+        "source_raw_record_id": str(row["source_raw_record_id"]),
+        **({field: _normalized_field_value(field, row[field]) for field in _PROTECTED_FIELDS}
+           if row.get("evidence_type") != "raw" else {}),
+    }
+
+
+def _index_trades(
+    rows: list[dict[str, Any]], field: str,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row[field] is not None:
+            index.setdefault((row["account_id"], row[field]), []).append(row)
+    return index
 
 
 def _raise_incoming_conflict(
-    requests: list[CanonicalTradeFillUpsertRequest],
+    requests: list[dict[str, Any]],
     conflicting_fields: Iterable[str],
 ) -> None:
     raise TradeConsistencyError(
         identity=_trade_identity(requests[0]),
         conflicting_fields=conflicting_fields,
-        source_raw_record_ids=(request.source_raw_record_id for request in requests),
+        source_raw_record_ids=(request["source_raw_record_id"] for request in requests),
     )
 
 
 def _conflicting_protected_fields(
-    first: CanonicalTradeFillUpsertRequest | dict[str, Any],
-    second: CanonicalTradeFillUpsertRequest | dict[str, Any],
+    first: dict[str, Any],
+    second: dict[str, Any],
 ) -> list[str]:
     return [
         field_name
         for field_name in _PROTECTED_FIELDS
-        if _normalized_field_value(field_name, _field_value(first, field_name))
-        != _normalized_field_value(field_name, _field_value(second, field_name))
+        if first[field_name] != second[field_name]
     ]
-
-
-def _field_value(
-    value: CanonicalTradeFillUpsertRequest | dict[str, Any], field_name: str
-) -> Any:
-    if isinstance(value, dict):
-        return value[field_name]
-    return getattr(value, field_name)
 
 
 def _normalized_field_value(field_name: str, value: Any) -> Any:
@@ -308,11 +295,11 @@ def _ordered_fields(fields: Iterable[str]) -> tuple[str, ...]:
     )
 
 
-def _trade_identity(request: CanonicalTradeFillUpsertRequest) -> str:
+def _trade_identity(request: dict[str, Any]) -> str:
     return (
-        f"account_id={_normalized_text(request.account_id)} "
-        f"ib_exec_id={_normalized_text(request.ib_exec_id)} "
-        f"transaction_id={_normalized_optional_text(request.transaction_id)}"
+        f"account_id={request['account_id']} "
+        f"ib_exec_id={request['ib_exec_id']} "
+        f"transaction_id={request['transaction_id']}"
     )
 
 

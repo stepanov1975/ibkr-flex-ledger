@@ -108,3 +108,25 @@ def test_import_guard_and_manual_split_lock_exclude_each_other(database):
         with pytest.raises(IngestionRunAlreadyActiveError):
             with runs.db_ingestion_run_guard('LOCKED'):
                 pytest.fail('import started during a manual split correction')
+
+
+def test_replay_respects_manual_split_lock_and_records_success_after_release(database):
+    from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
+    from test_ingestion_integrity_regressions import _replay
+
+    harness = _harness(database)
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.connect() as connection:
+        period = connection.scalar(text('SELECT period_key FROM raw_artifact LIMIT 1'))
+    correction = SQLAlchemySplitCorrectionService(database, 'INTEGRITY')
+    with database.begin() as connection:
+        correction._lock_account(connection)
+        with pytest.raises(IngestionRunAlreadyActiveError):
+            _replay(harness, period)
+        assert connection.scalar(text('SELECT count(*) FROM ingestion_run')) == 1
+
+    assert _replay(harness, period).status == 'success'
+    with database.connect() as connection:
+        assert connection.execute(text('SELECT run_type, status FROM ingestion_run ORDER BY started_at_utc')).all() == [
+            ('manual', 'success'), ('reprocess', 'success'),
+        ]

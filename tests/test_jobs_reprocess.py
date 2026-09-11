@@ -87,6 +87,20 @@ def test_reprocess_selection_is_empty_without_candidates() -> None:
     assert job_select_replay_artifacts([]) == ()
 
 
+@pytest.mark.parametrize("run_repository", [{}, {"ingestion_repository": None}])
+def test_reprocess_requires_run_repository(run_repository: dict[str, Any]) -> None:
+    operation_log: list[tuple[object, ...]] = []
+    with pytest.raises((TypeError, ValueError), match="ingestion_repository"):
+        CanonicalReprocessOrchestrator(
+            raw_read_repository=cast(RawRecordReadRepositoryPort, _ArtifactRawRepository([], {}, operation_log)),
+            canonical_persistence_repository=cast(CanonicalPersistenceRepositoryPort, _CanonicalPersistRepositoryStub()),
+            snapshot_service=cast(StockLedgerSnapshotService, _SnapshotServiceStub(operation_log)),
+            snapshot_repository=cast(LedgerSnapshotRepositoryPort, _CleanupRepositoryStub(operation_log)),
+            config=CanonicalReprocessOrchestratorConfig("U_TEST", "2026-02-20", "query", "USD"),
+            **run_repository,
+        )
+
+
 def test_reprocess_empty_selection_finalizes_failed() -> None:
     """Reject an explicit replay scope that resolves to no artifacts."""
 
@@ -539,11 +553,7 @@ def _reprocess_orchestrator(
             snapshot_repository,
         ),
         config=config,
-        ingestion_repository=(
-            cast(IngestionRunRepositoryPort, ingestion_repository)
-            if ingestion_repository is not None
-            else None
-        ),
+        ingestion_repository=cast(IngestionRunRepositoryPort, ingestion_repository or _IngestionRepositoryStub()),
     )
 
 

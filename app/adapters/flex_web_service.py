@@ -453,10 +453,6 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                 response = self._http_client.get(url, params=query_parameters)
                 response.raise_for_status()
                 return bytes(response.content)
-            except httpx.TimeoutException:
-                if transport_retry_index + 1 == self._TRANSPORT_TIMEOUT_RETRY_ATTEMPTS:
-                    raise FlexAdapterTimeoutError("Flex transport request timed out") from None
-                self._adapter_wait_before_transport_retry(transport_retry_index=transport_retry_index)
             except httpx.HTTPStatusError as error:
                 # HTTPX exception text includes the request URL and its Flex token.
                 status_code = error.response.status_code
@@ -479,7 +475,9 @@ class FlexWebServiceAdapter(FlexAdapterPort):
                     retry_after_seconds=retry_after_seconds,
                 )
             except httpx.RequestError as error:
-                timed_out = isinstance(error.__cause__, (TimeoutError, socket.timeout))
+                timed_out = isinstance(error, httpx.TimeoutException) or isinstance(
+                    error.__cause__, (TimeoutError, socket.timeout),
+                )
                 transient_error = timed_out or isinstance(
                     error,
                     (httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError),
