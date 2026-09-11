@@ -21,8 +21,8 @@ alter the prior ledger. A lost commit acknowledgement is resolved from durable r
 The next ingestion/replay automatically recovers unfinished run rows after obtaining the
 account's session advisory lock, recording `INGESTION_RUN_INTERRUPTED`. Overlapping live
 workers and manual split corrections remain excluded. No age-based takeover is used.
-Apply Alembic migrations and restart all workers together during the upgrade, since older
-workers only hold the start lock briefly. Existing non-atomic failed runs retain conservative
+Stop ingestion/replay workers before applying Alembic migrations, then restart them
+together; older workers only hold the start lock briefly. Existing non-atomic failed runs retain conservative
 skip behavior; recovery of their possible partial writes requires verified successful raw
 history and operator investigation. This change performs no historical data repair.
 

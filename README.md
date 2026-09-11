@@ -317,7 +317,9 @@ publish in one transaction. A failed publication leaves the previous ledger inta
 Live execution identity and financial fields are checked before publication. A changed
 execution/transaction identity, instrument, side, quantity, timestamp, currency, price,
 commission, fees or net cash fails with `TRADE_CONSISTENCY_CONFLICT`; retained raw IDs
-and conflicting fields identify the evidence. No automatic merging or correction occurs.
+and conflicting fields identify the evidence. Optional IDs learned from successful raw
+reports remain part of later consistency checks without rewriting the canonical origin.
+No automatic merging or correction occurs.
 Report-derived close prices, FIFO/tax figures, descriptions and base FX values may refresh.
 Explicit placeholder execution IDs (`-`, `--`, `N/A`) are rejected; genuinely blank
 execution IDs retain the existing BookTrade fallback.
@@ -328,8 +330,8 @@ next trigger records its unfinished run as `INGESTION_RUN_INTERRUPTED` and proce
 A live lock owner is never displaced based on elapsed time. Manual split corrections
 use the same lock. A committed success remains successful if its acknowledgement is lost.
 
-Deploy the schema migration and restart all workers together; an older worker does not
-hold the new whole-run lock. Legacy failed runs can contain partial canonical writes:
+Stop ingestion/replay workers, apply the schema migration, then restart all workers;
+an older worker does not hold the new whole-run lock. Legacy failed runs can contain partial canonical writes:
 they still disable incremental skipping and need source-backed investigation/replay.
 This upgrade does not automatically repair old data or accept conflicting executions.
 
