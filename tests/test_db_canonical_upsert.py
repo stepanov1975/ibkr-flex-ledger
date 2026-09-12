@@ -298,8 +298,8 @@ def test_batch_instrument_upsert_preserves_optional_metadata_when_later_request_
         engine.dispose()
 
 
-def test_batch_instrument_upsert_executes_one_statement_for_many_requests() -> None:
-    """Use one transaction and statement for every non-empty instrument batch."""
+def test_batch_instrument_upsert_batches_writes_and_resolution_refresh() -> None:
+    """Use one instrument write and one resolution lookup per non-empty batch."""
 
     connection = _InstrumentBatchConnectionSpy()
     engine = _InstrumentBatchEngineSpy(connection)
@@ -312,7 +312,10 @@ def test_batch_instrument_upsert_executes_one_statement_for_many_requests() -> N
 
     assert records == []
     assert engine.begin_calls == 1
-    assert len(connection.executions) == 1
+    assert len(connection.executions) == 2
+    assert "INSERT INTO instrument" in str(connection.executions[0][0])
+    assert "corporate_action_resolution" in str(connection.executions[1][0])
+    assert connection.executions[1][1] == {"ids": [], "accounts": ["U_SPY"]}
 
 
 def test_batch_instrument_upsert_skips_transaction_for_empty_requests() -> None:

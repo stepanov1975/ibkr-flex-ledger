@@ -918,6 +918,20 @@ class LedgerCorporateActionRecord:
 
 
 @dataclass(frozen=True)
+class LedgerSecurityMovementRecord:
+    """Approved dated transfer or independent distribution in action currency."""
+
+    event_corp_action_id: UUID
+    source_raw_record_id: UUID
+    source_instrument_id: UUID | None
+    destination_instrument_id: UUID
+    report_date_local: date
+    quantity: str
+    cost_basis: str | None
+    currency: str
+
+
+@dataclass(frozen=True)
 class PositionLotUpsertRequest:
     """Input contract for deterministic position-lot persistence.
 
@@ -925,7 +939,8 @@ class PositionLotUpsertRequest:
         position_lot_id: Deterministic lot identifier.
         account_id: Internal account context identifier.
         instrument_id: Canonical instrument identifier.
-        open_event_trade_fill_id: Opening trade-fill identifier.
+        open_event_trade_fill_id: Original opening trade-fill identifier, absent for distributions.
+        open_event_corp_action_id: Distribution or transfer introducing the lot on this instrument.
         opened_at_utc: Lot-open timestamp in UTC.
         closed_at_utc: Optional lot-close timestamp in UTC.
         open_quantity: Original lot open quantity.
@@ -940,7 +955,7 @@ class PositionLotUpsertRequest:
     position_lot_id: str
     account_id: str
     instrument_id: str
-    open_event_trade_fill_id: str
+    open_event_trade_fill_id: str | None
     opened_at_utc: datetime
     closed_at_utc: datetime | None
     open_quantity: str
@@ -950,6 +965,7 @@ class PositionLotUpsertRequest:
     cost_basis_remaining: str
     realized_pnl_to_date: str
     status: str
+    open_event_corp_action_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1149,6 +1165,11 @@ class LedgerSnapshotRepositoryPort(Protocol):
         instrument_ids: tuple[str, ...] | None = None,
     ) -> list[LedgerCorporateActionRecord]:
         """List deterministic auto-handled quantity adjustments."""
+
+    def db_ledger_security_movement_list_for_account(
+        self, account_id: str, through_report_date_local: str,
+    ) -> list[LedgerSecurityMovementRecord]:
+        """List active security resolutions globally so connected scopes can expand."""
 
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.

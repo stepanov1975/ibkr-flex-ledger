@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import CorporateActionManualCaseRecord, PortfolioRepositoryPort
 from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService, SplitCorrectionConflict
+from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
 
 
 class ManualCaseUpdatePayload(BaseModel):
@@ -28,13 +29,46 @@ class SplitApplyPayload(SplitRatioPayload):
     preview_token: str = Field(min_length=64, max_length=64)
 
 
+class ResolutionPayload(BaseModel):
+    treatment: str
+    note: str = Field(min_length=1, max_length=2000)
+    cost_basis: Decimal | None = Field(default=None, ge=0, max_digits=24, decimal_places=8, allow_inf_nan=False)
+
+
+class ResolutionApplyPayload(ResolutionPayload):
+    preview_token: str = Field(min_length=64, max_length=64)
+
+
 def api_create_corporate_action_router(
     repository: PortfolioRepositoryPort,
     correction_service: SQLAlchemySplitCorrectionService | None = None,
+    resolution_service: SQLAlchemyCorporateActionResolutionService | None = None,
 ) -> APIRouter:
     """Create manual case list and resolution endpoints."""
 
     router = APIRouter(prefix="/corporate-actions", tags=["corporate-actions"])
+
+    def resolve(case_id: UUID, payload: ResolutionPayload, token: str | None = None) -> JSONResponse:
+        if resolution_service is None:
+            return JSONResponse({'message': 'Corporate-action resolutions are not configured.'}, status_code=503)
+        try:
+            return JSONResponse(resolution_service.preview_or_apply(case_id, payload.treatment, payload.note, payload.cost_basis, token))
+        except LookupError as error:
+            return JSONResponse({'message': str(error)}, status_code=404)
+        except SplitCorrectionConflict as error:
+            return JSONResponse({'message': str(error)}, status_code=409)
+        except (ValueError, ArithmeticError) as error:
+            return JSONResponse({'message': str(error)}, status_code=400)
+        except (RuntimeError, SQLAlchemyError):
+            return JSONResponse({'message': 'Resolution failed; no changes were saved.'}, status_code=500)
+
+    @router.post('/cases/{case_id}/resolution/preview')
+    def resolution_preview(case_id: UUID, payload: ResolutionPayload) -> JSONResponse:
+        return resolve(case_id, payload)
+
+    @router.post('/cases/{case_id}/resolution/apply')
+    def resolution_apply(case_id: UUID, payload: ResolutionApplyPayload) -> JSONResponse:
+        return resolve(case_id, payload, payload.preview_token)
 
     def correct_split(case_id: UUID, payload: SplitRatioPayload, token: str | None = None) -> JSONResponse:
         if correction_service is None:
@@ -91,6 +125,11 @@ def api_create_corporate_action_router(
 
 
 def _case(row: CorporateActionManualCaseRecord) -> dict[str, object]:
+    evidence = row.evidence or {}
+    options = evidence.get('resolution_options', []) if row.requires_manual else []
+    can_correct_split = row.requires_manual and bool(row.action_id) and row.correction_identity_valid and row.action_type in {
+        "FORWARDSPLIT", "REVERSESPLIT", "STOCKDIV",
+    }
     if not row.requires_manual:
         reason = "This action has been handled by automatic processing or an applied correction."
         required_check = "Check current holdings against the broker statement; this case is retained for its review history."
@@ -107,6 +146,9 @@ def _case(row: CorporateActionManualCaseRecord) -> dict[str, object]:
     else:
         reason = "This action cannot be accounted for automatically."
         required_check = "Accounting support required: this action needs security, quantity, cash and cost basis handling that the app does not yet support."
+    if row.requires_manual:
+        reason = evidence.get('review_reason', reason)
+        required_check = evidence.get('required_check', required_check)
     return {
         "case_id": str(row.case_id), "event_corp_action_id": str(row.event_corp_action_id),
         "action_type": row.action_type, "instrument_id": str(row.instrument_id), "symbol": row.symbol,
@@ -115,7 +157,7 @@ def _case(row: CorporateActionManualCaseRecord) -> dict[str, object]:
         "created_at_utc": row.created_at_utc.isoformat(), "updated_at_utc": row.updated_at_utc.isoformat(),
         "report_date_local": row.report_date_local.isoformat(), "description": row.description,
         "requires_manual": row.requires_manual, "review_reason": reason, "required_check": required_check,
-        "can_correct_split": row.requires_manual and bool(row.action_id) and row.correction_identity_valid and row.action_type in {
-            "FORWARDSPLIT", "REVERSESPLIT", "STOCKDIV",
-        },
+        "can_correct_split": can_correct_split,
+        "review_state": 'handled' if not row.requires_manual else 'actionable' if can_correct_split or options else 'unsupported',
+        "resolution_options": options, "broker_legs": evidence.get('broker_legs', []),
     }

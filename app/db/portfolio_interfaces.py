@@ -58,6 +58,7 @@ class CorporateActionManualCaseRecord:
     requires_manual: bool
     action_id: str | None
     correction_identity_valid: bool
+    evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

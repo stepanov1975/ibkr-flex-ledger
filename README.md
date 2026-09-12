@@ -562,6 +562,11 @@ Operator endpoints:
   and a broker-evidence `note`. It returns before/after snapshots, open FIFO lots, and a preview token.
 - `POST /corporate-actions/cases/{case_id}/split/apply` accepts the same fields plus
   `preview_token`. It recalculates and commits only if the preview still matches.
+- `POST /corporate-actions/cases/{case_id}/resolution/preview` accepts a `treatment`
+  (`security_transfer` or `distribution`) and broker-evidence `note`. Distributions
+  also require an explicit nonnegative `cost_basis` in the credited security's currency.
+- `POST /corporate-actions/cases/{case_id}/resolution/apply` accepts those fields plus
+  the returned `preview_token`, and atomically applies an unchanged preview.
 
 The operations queue shows the broker description, report date, reason for review, and
 required check. **Enter split ratio** opens **Preview changes**, **Apply correction**,
@@ -594,11 +599,26 @@ endpoint rejects status changes on handled actions while allowing metadata edits
 Migration `20260908_09` backfills approval dates and moves incompatible
 legacy automatic splits into manual review.
 
-Spinoffs, identifier changes, cash matching and other unsupported treatments display
-**Accounting support required**, with no completion button. The queue includes these
-even if they were previously marked reviewed or dismissed. **Show handled actions**
-exposes resolved history. The legacy PATCH endpoint only records acknowledgement;
-it cannot correct accounting or clear independent calculation uncertainty.
+The review queue counts only available decisions. Paired identifier changes show both
+broker legs and offer **Preview transfer**. Equal outgoing/incoming quantities must match
+the full long holding; the transfer carries surviving FIFO basis and acquisition dates,
+leaves earlier realized gains with the source, and supports later sales under the new
+security. Stock history includes the original purchases referenced by transferred lots.
+Same-day chains follow their holding dependencies; cyclic or competing
+transfers require accounting support. A single credited distribution offers **Enter distribution basis**, followed
+by preview and apply. Blank basis is never zero. This treatment records an independent
+received security; allocating basis out of the parent still requires accounting support.
+No synthetic trades are created. Migration `20260911_18` stores source-bound resolutions
+and permits corporate-action opening lots.
+
+Both treatments retain all broker legs from the action's current report artifact.
+Identical replay preserves the resolution; changed legs invalidate it and rebuild the
+affected accounting. Instrument metadata updates and manual split corrections also
+recheck saved treatments. Unsupported actions, including incomplete transfers, parent basis
+allocations and cash matching, appear separately under **Unsupported accounting** and
+remain provisional. **Show handled actions** exposes resolved history. The legacy PATCH
+endpoint only records acknowledgement; it cannot correct accounting or clear independent
+calculation uncertainty.
 The API and persistence workflow are implemented in
 `app/api/routers/corporate_actions.py`, `app/domain/corporate_actions.py`, and
 `app/db/corporate_action_correction.py`.

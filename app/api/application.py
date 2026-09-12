@@ -9,6 +9,7 @@ from app.config import AppSettings
 from app.db import DatabaseHealthPort, IngestionRunRepositoryPort, LedgerSnapshotRepositoryPort, PortfolioRepositoryPort
 from app.jobs import JobOrchestratorPort
 from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
+from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
 
 from .routers import (
     api_create_corporate_action_router,
@@ -31,6 +32,7 @@ def create_api_application(
     snapshot_repository: LedgerSnapshotRepositoryPort | None = None,
     portfolio_repository: PortfolioRepositoryPort | None = None,
     split_correction_service: SQLAlchemySplitCorrectionService | None = None,
+    corporate_action_resolution_service: SQLAlchemyCorporateActionResolutionService | None = None,
 ) -> FastAPI:
     """Create the FastAPI application instance for the service.
 
@@ -86,7 +88,7 @@ def create_api_application(
         )
     if portfolio_repository is not None:
         application.include_router(api_create_master_data_router(settings, portfolio_repository))
-        application.include_router(api_create_corporate_action_router(portfolio_repository, split_correction_service))
+        application.include_router(api_create_corporate_action_router(portfolio_repository, split_correction_service, corporate_action_resolution_service))
         application.include_router(api_create_reports_router(settings, portfolio_repository))
         application.include_router(api_create_operations_router(settings, portfolio_repository))
 

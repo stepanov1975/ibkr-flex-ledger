@@ -95,13 +95,17 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 ).isoformat(),
             ) if snapshots else []
             lots = [dict(row) for row in connection.execute(text(
-                "SELECT l.instrument_id, l.open_event_trade_fill_id, l.opened_at_utc, l.closed_at_utc, "
+                "SELECT l.instrument_id, l.open_event_trade_fill_id, l.open_event_corp_action_id, l.opened_at_utc, l.closed_at_utc, "
                 "l.open_quantity, l.remaining_quantity, l.cost_basis_remaining, l.realized_pnl_to_date, "
-                "l.status, t.side FROM position_lot l JOIN event_trade_fill t "
+                "l.status, COALESCE(t.side, 'BUY') AS side FROM position_lot l LEFT JOIN event_trade_fill t "
                 "ON t.event_trade_fill_id=l.open_event_trade_fill_id AND t.account_id=l.account_id "
                 "WHERE l.account_id=:account_id AND l.instrument_id=ANY(:instrument_ids) "
                 "ORDER BY l.opened_at_utc DESC, l.position_lot_id"
             ), params).mappings()]
+            activity_params = {
+                **params, 'opening_trade_ids': list({lot['open_event_trade_fill_id'] for lot in lots
+                                                    if lot['open_event_trade_fill_id'] is not None}),
+            }
             activity: list[dict[str, Any]] = []
             for table, identifier, kind, columns in (
                 ('event_trade_fill', 'event_trade_fill_id', 'trade',
@@ -122,8 +126,9 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                     "JOIN instrument i ON i.account_id=event.account_id AND "
                     + ("(i.instrument_id=event.instrument_id OR (event.instrument_id IS NULL AND i.conid=event.conid)) "
                        if kind == 'corporate_action' else "i.instrument_id=event.instrument_id ")
-                    + "WHERE event.account_id=:account_id AND i.instrument_id=ANY(:instrument_ids)"
-                ), params).mappings())
+                    + "WHERE event.account_id=:account_id AND (i.instrument_id=ANY(:instrument_ids)"
+                    + (" OR event.event_trade_fill_id=ANY(:opening_trade_ids)" if kind == 'trade' else "") + ")"
+                ), activity_params).mappings())
     except SQLAlchemyError as error:
         raise RuntimeError("stock history report failed") from error
 

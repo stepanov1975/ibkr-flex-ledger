@@ -26,7 +26,9 @@ from app.jobs import (
     IngestionJobOrchestrator, IngestionOrchestratorConfig,
 )
 from app.ledger import StockLedgerSnapshotService
+from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
 from app.db.stock_history import _stock_family
+from test_corporate_action_resolutions import _payload as _security_transfer_payload
 from test_end_to_end_seeded import (
     _SeededAdapter, _create_database, _database_url, _drop_database, _reachable_database_url,
 )
@@ -155,6 +157,67 @@ _CLOSED_BROKER_FX_PAYLOAD = _DIRECT_TRADE_FX_PAYLOAD.replace(
     b'position="0" markPrice="11" multiplier="1" costBasisMoney="0" fifoPnlUnrealized="0" '
     b'reportDate="20260821" /></OpenPositions>',
 )
+
+_TRANSFER_HISTORY_PAYLOAD = _security_transfer_payload().replace(
+    b'</Trades>', b'''<Trade ibExecID="OLD-BUY" transactionID="10" conid="900001" symbol="SEED"
+    assetCategory="STK" currency="USD" buySell="BUY" quantity="1" tradePrice="50"
+    reportDate="20260819" dateTime="20260819;100000" />
+    <Trade ibExecID="OLD-SELL" transactionID="11" conid="900001" symbol="SEED"
+    assetCategory="STK" currency="USD" buySell="SELL" quantity="1" tradePrice="75"
+    reportDate="20260819" dateTime="20260819;110000" /></Trades>''',
+).replace(b'amount="0" amountInBase="0"', b'amount="5" amountInBase="5"')
+_CLOSED_TRANSFER_HISTORY_PAYLOAD = _TRANSFER_HISTORY_PAYLOAD.replace(
+    b'</Trades>', b'''<Trade ibExecID="DESTINATION-SELL" transactionID="12" conid="900002" symbol="NEXT"
+    assetCategory="STK" currency="USD" buySell="SELL" quantity="2" tradePrice="120"
+    reportDate="20260821" dateTime="20260821;150000" /></Trades>''',
+).replace(b'position="2"', b'position="0"').replace(b'costBasisMoney="201"', b'costBasisMoney="0"').replace(
+    b'positionValue="220"', b'positionValue="0"',
+)
+
+
+@pytest.mark.parametrize('history_database,remaining,realized,unrealized', [
+    (_TRANSFER_HISTORY_PAYLOAD, 2, 0, 19),
+    (_CLOSED_TRANSFER_HISTORY_PAYLOAD, 0, 39, 0),
+], indirect=['history_database'], ids=['open-transferred-lot', 'closed-transferred-lot'])
+def test_transferred_lot_history_retains_original_purchase_evidence(history_database, remaining, realized, unrealized):
+    client, _, ids, engine = history_database
+    with engine.connect() as connection:
+        case_id = connection.scalar(text('SELECT case_id FROM corporate_action_manual_case'))
+        opening = connection.execute(text(
+            "SELECT t.event_trade_fill_id,t.source_raw_record_id,raw.source_payload FROM event_trade_fill t "
+            "JOIN raw_record raw ON raw.raw_record_id=t.source_raw_record_id WHERE t.ib_exec_id='SEED-EXEC-1'"
+        )).mappings().one()
+    service = SQLAlchemyCorporateActionResolutionService(engine, 'HISTORY')
+    preview = service.preview_or_apply(case_id, 'security_transfer', 'Verified paired broker transfer')
+    service.preview_or_apply(case_id, 'security_transfer', 'Verified paired broker transfer',
+                             preview_token=preview['preview_token'])
+
+    response = client.get(f"/reports/stock-history/{ids['900002']}")
+    assert response.status_code == 200
+    report = response.json()
+    assert {position['conid'] for position in report['positions']} == {'900002'}
+    assert len(report['lots']) == 1
+    lot = report['lots'][0]
+    assert lot['status'] == ('open' if remaining else 'closed')
+    assert Decimal(lot['remaining_quantity']) == remaining
+    assert lot['open_event_trade_fill_id'] == str(opening['event_trade_fill_id'])
+    trades = [row for row in report['activity'] if row['event_type'] == 'trade']
+    original = [row for row in trades if row['event_id'] == lot['open_event_trade_fill_id']]
+    assert len(original) == 1
+    assert original[0]['symbol'] == 'SEED'
+    assert original[0]['instrument_id'] == str(ids['900001'])
+    assert original[0]['source_raw_record_id'] == str(opening['source_raw_record_id'])
+    assert opening['source_payload']['ibExecID'] == 'SEED-EXEC-1'
+    assert original[0]['timestamp_utc'] == lot['opened_at_utc']
+    assert Decimal(original[0]['quantity']) == 2
+    assert Decimal(original[0]['price']) == 100
+    assert len(trades) == (1 if remaining else 2)
+    assert not any(row['event_type'] == 'cashflow' for row in report['activity'])
+    assert Decimal(report['totals'][0]['realized_pnl']) == realized
+    assert Decimal(report['totals'][0]['unrealized_pnl']) == unrealized
+    assert report['stale'] is False
+    source = client.get(f"/reports/stock-history/{ids['900001']}").json()
+    assert Decimal(source['totals'][0]['realized_pnl']) == 30
 
 
 @pytest.mark.parametrize('history_database', [
