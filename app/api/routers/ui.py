@@ -158,8 +158,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <p id="resolution-error" class="bad" role="alert"></p>
 <p><button id="preview-resolution">Preview changes</button> <button id="apply-resolution" disabled>Apply treatment</button> <button id="cancel-resolution">Cancel</button></p>
 <p id="resolution-summary" aria-live="polite"></p>
-<div class="scroll"><table><thead><tr><th>Symbol</th><th>Date</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="resolution-snapshots"></tbody></table></div>
+<div id="resolution-impact" hidden><h3>Latest portfolio impact</h3>
+<div class="scroll"><table><thead><tr><th>Symbol</th><th>As of</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="resolution-snapshots"></tbody></table></div>
+<details id="resolution-history" hidden><summary id="resolution-history-summary">Earlier daily snapshots</summary>
+<p class="muted">These historical portfolio balances are recalculated for the same corporate action. Each date shows the holding at that time, not another distribution or transfer.</p>
+<div class="scroll"><table><thead><tr><th>Symbol</th><th>As of</th><th>Comparison</th><th>Position</th><th>Cost basis</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th><th>State</th></tr></thead><tbody id="resolution-history-snapshots"></tbody></table></div></details>
 <h3>FIFO lots</h3><div class="scroll"><table><thead><tr><th>Comparison</th><th>Symbol</th><th>Remaining units</th><th>Remaining cost basis</th><th>Acquired (UTC)</th></tr></thead><tbody id="resolution-lots"></tbody></table></div>
+</div>
 </section>
 <section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div><p><a href="/ui/ingestion-runs">View all ingestion runs</a></p></section>
 </div></main><script>
@@ -213,7 +218,7 @@ try{const result=await json('/corporate-actions/cases/'+splitCase.case_id+'/spli
 for(const id of ['new-shares','old-shares','split-note'])el(id).oninput=invalidateSplit;
 el('preview-split').onclick=()=>requestSplit(false);el('apply-split').onclick=()=>requestSplit(true);el('cancel-split').onclick=cancelSplit;
 let resolutionCase=null,resolutionTreatment=null,resolutionPreview=null,resolutionDraft=null,resolutionVersion=0,resolutionBusy=false;
-function invalidateResolution(){resolutionVersion++;resolutionPreview=null;resolutionDraft=null;el('apply-resolution').disabled=true;el('resolution-summary').textContent='';el('resolution-snapshots').replaceChildren();el('resolution-lots').replaceChildren()}
+function invalidateResolution(){resolutionVersion++;resolutionPreview=null;resolutionDraft=null;el('apply-resolution').disabled=true;el('resolution-summary').textContent='';el('resolution-impact').hidden=true;el('resolution-history').hidden=true;el('resolution-history').open=false;el('resolution-snapshots').replaceChildren();el('resolution-history-snapshots').replaceChildren();el('resolution-lots').replaceChildren()}
 function cancelResolution(){if(resolutionBusy)return;resolutionCase=null;invalidateResolution();el('resolution-editor').hidden=true}
 function openResolution(item,treatment){
 if(splitBusy||resolutionBusy)return;cancelSplit();resolutionCase=item;resolutionTreatment=treatment;invalidateResolution();el('resolution-error').textContent='';el('resolution-editor').hidden=false;
@@ -224,8 +229,11 @@ el('distribution-basis-fields').hidden=treatment!=='distribution';el('distributi
 if(treatment==='distribution'){const leg=item.broker_legs[0];el('distribution-basis-label').textContent='Total cost basis of all '+formatSplitPosition(leg.quantity)+' credited '+leg.symbol+' units ('+leg.currency+')'}
 }
 function renderResolutionPreview(result){
-el('resolution-summary').textContent='Preview only — no changes saved. '+result.summary+' Check snapshots and lots against the broker evidence before applying.';
-for(const item of result.snapshots){for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');[item.symbol,formatDate(item.report_date_local),side==='before'?'Before':'After',values.position_qty===null?'N/A':formatSplitPosition(values.position_qty)].forEach(value=>cell(tr,value));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional===null?'N/A':values.provisional?'Provisional':'Final');el('resolution-snapshots').append(tr)}}
+el('resolution-summary').textContent='Preview only — no changes saved. One corporate action dated '+formatDate(resolutionCase.report_date_local)+'. '+result.summary+' Check the portfolio impact and lots against the broker evidence before applying.';
+const latestDate=result.snapshots.reduce((latest,item)=>item.report_date_local>latest?item.report_date_local:latest,'');
+const earlierDates=new Set(result.snapshots.filter(item=>item.report_date_local!==latestDate).map(item=>item.report_date_local));
+el('resolution-impact').hidden=false;el('resolution-history').hidden=earlierDates.size===0;el('resolution-history-summary').textContent='Earlier daily snapshots ('+earlierDates.size+' '+(earlierDates.size===1?'date':'dates')+')';
+for(const item of result.snapshots){const target=item.report_date_local===latestDate?'resolution-snapshots':'resolution-history-snapshots';for(const side of ['before','after']){const values=item[side],tr=document.createElement('tr');[item.symbol,formatDate(item.report_date_local),side==='before'?'Before':'After',values.position_qty===null?'N/A':formatSplitPosition(values.position_qty)].forEach(value=>cell(tr,value));for(const key of ['cost_basis','realized_pnl','unrealized_pnl','total_pnl'])cell(tr,values[key]===null?'N/A':formatCurrency(values[key],item.currency));cell(tr,values.provisional===null?'N/A':values.provisional?'Provisional':'Final');el(target).append(tr)}}
 for(const side of ['before','after']){for(const lot of result['lots_'+side]){const tr=document.createElement('tr'),currency=lot.currency||result.snapshots.find(item=>item.symbol===lot.symbol)?.currency;[side==='before'?'Before':'After',lot.symbol,formatSplitPosition(lot.remaining_quantity),formatCurrency(lot.cost_basis_remaining,currency),lot.opened_at_utc].forEach(value=>cell(tr,value));el('resolution-lots').append(tr)}}
 }
 async function requestResolution(apply){

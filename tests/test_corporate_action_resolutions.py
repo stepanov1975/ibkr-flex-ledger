@@ -137,6 +137,50 @@ def test_resolution_preview_rolls_back_and_apply_rebuilds_with_replay(database, 
         assert connection.scalar(text("SELECT sum(l.remaining_quantity) FROM position_lot l JOIN instrument i USING(instrument_id) WHERE i.symbol='NEXT' AND l.status='open'")) == (2 if kind == 'IC' else 5)
 
 
+def test_distribution_across_daily_imports_creates_one_lot_and_survives_replay(database):
+    harness, _, case = _case(database, 'SO')
+    for day in (b'20260822', b'20260823', b'20260823'):
+        harness[1].payload_bytes = _payload('SO').replace(
+            b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="' + day + b'">',
+        ).replace(b'reportDate="20260821" position=', b'reportDate="' + day + b'" position=')
+        assert harness[0].job_execute('ingestion_run').status == 'success'
+    client = _resolution_client(database)
+    cases = client.get('/corporate-actions/cases').json()['items']
+    assert len(cases) == 1
+    assert cases[0]['case_id'] == case['case_id']
+    base = f"/corporate-actions/cases/{case['case_id']}/resolution"
+    body = {'treatment': 'distribution', 'cost_basis': '25', 'note': 'Verified total basis for all five units'}
+    before = _state(database)
+    response = client.post(base + '/preview', json=body)
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert _state(database) == before
+    assert {row['report_date_local'] for row in preview['snapshots']} == {'2026-08-21', '2026-08-22', '2026-08-23'}
+    for row in preview['snapshots']:
+        assert Decimal(row['after']['position_qty']) == 5
+        assert Decimal(row['after']['cost_basis']) == 25
+    assert len(preview['lots_after']) == 1
+    assert Decimal(preview['lots_after'][0]['remaining_quantity']) == 5
+    assert Decimal(preview['lots_after'][0]['cost_basis_remaining']) == 25
+    assert preview['lots_after'][0]['opened_at_utc'] == '2026-08-20 21:00:00+00:00'
+    response = client.post(base + '/apply', json={**body, 'preview_token': preview['preview_token']})
+    assert response.status_code == 200, response.text
+    harness[1].payload_bytes = harness[1].payload_bytes.replace(b'20260823', b'20260824')
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.connect() as connection:
+        period = connection.scalar(text('SELECT period_key FROM raw_artifact ORDER BY period_key DESC LIMIT 1'))
+    assert ingestion_tests._replay(harness, period).status == 'success'
+    assert client.get('/corporate-actions/cases').json()['items'][0]['review_state'] == 'handled'
+    with database.connect() as connection:
+        assert connection.scalar(text('SELECT count(*) FROM event_corp_action')) == 1
+        assert connection.scalar(text('SELECT count(*) FROM corporate_action_resolution WHERE active')) == 1
+        lots = connection.execute(text(
+            "SELECT l.remaining_quantity,l.cost_basis_remaining FROM position_lot l JOIN instrument i USING(instrument_id) "
+            "WHERE i.symbol='NEXT' AND l.status='open'"
+        )).all()
+        assert lots == [(Decimal('5'), Decimal('25'))]
+
+
 @pytest.mark.parametrize('body', [
     {'treatment': 'distribution', 'note': 'Verified'},
     {'treatment': 'distribution', 'cost_basis': '-1', 'note': 'Verified'},
