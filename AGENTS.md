@@ -59,3 +59,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ---
 
+
+## Project technical reference
+
+Read [the technical reference](docs/technical_reference.md) before changing application code.
+It contains the implementation policy, architecture and database boundaries, accounting
+contracts, API and job behavior, migration history, and release validation commands.
+User-facing features and deployment instructions belong in [README.md](README.md).
