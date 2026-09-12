@@ -1,6 +1,7 @@
 """Actionable evidence and source-bound security movement corrections."""
 
 from decimal import Decimal
+from xml.etree import ElementTree as ET
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -68,6 +69,32 @@ def test_distribution_asks_for_basis_without_mistaking_blank_for_zero(database):
     assert case['resolution_options'] == [{'type': 'distribution', 'label': 'Enter distribution basis'}]
     assert case['broker_legs'][0]['cost_basis'] is None
     assert 'cost basis' in case['review_reason']
+
+
+@pytest.mark.parametrize('kind', ['IC', 'SO'])
+@pytest.mark.parametrize('raw_symbol', [None, '', 'N/A'])
+def test_resolution_preview_identifies_securities_without_raw_symbols(database, kind, raw_symbol):
+    harness = ingestion_tests._harness(database)
+    payload = ET.fromstring(_payload(kind))
+    for leg in payload.iter('CorporateAction'):
+        if raw_symbol is None:
+            del leg.attrib['symbol']
+        else:
+            leg.set('symbol', raw_symbol)
+    harness[1].payload_bytes = ET.tostring(payload)
+    assert harness[0].job_execute('ingestion_run').status == 'success'
+    with database.begin() as connection:
+        connection.execute(text("UPDATE instrument SET symbol=CASE conid WHEN '900001' THEN 'SEED' ELSE 'NEXT' END"))
+    client = _resolution_client(database)
+    case = client.get('/corporate-actions/cases').json()['items'][0]
+    body = {'treatment': 'security_transfer' if kind == 'IC' else 'distribution', 'note': 'Verified security by conid'}
+    if kind == 'SO':
+        body['cost_basis'] = '25'
+    response = client.post(f"/corporate-actions/cases/{case['case_id']}/resolution/preview", json=body)
+    assert response.status_code == 200, response.text
+    event = response.json()['event']
+    assert event['destination_symbol'] == 'NEXT'
+    assert event['source_symbol'] == ('SEED' if kind == 'IC' else None)
 
 
 def test_incomplete_identifier_change_is_explained_as_unsupported(database):
