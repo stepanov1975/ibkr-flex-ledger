@@ -64,7 +64,7 @@ def test_dashboard_formats_business_dates_as_day_month_two_digit_year() -> None:
     assert response.status_code == 200
     assert "function formatDate(value)" in response.text
     assert "`${match[3]}/${match[2]}/${match[1].slice(-2)}`" in response.text
-    assert "formatDate(item.report_date_local)" in response.text
+    assert "formatDate(x.report_date_local)" in response.text
 
 
 def test_dashboard_formats_timestamps_in_jerusalem_with_24_hour_time() -> None:
@@ -113,7 +113,8 @@ def test_main_page_exposes_portfolio_summary_and_requested_tables() -> None:
         "<th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th>"
     ) in response.text
     assert "<th>Currency</th><th>Net transfers</th><th>Gross deposits</th><th>Gross withdrawals</th>" in response.text
-    assert "<th>Date</th><th>Type</th><th>Amount</th><th>Currency</th><th>Description</th>" in response.text
+    assert 'href="/ui/transfers"' in response.text
+    assert 'id="transfers"' not in response.text
     assert 'href="/ui/costs"' in response.text
     assert 'href="/ui/operations"' in response.text
 

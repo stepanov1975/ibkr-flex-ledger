@@ -150,6 +150,7 @@ Service endpoints:
 - PostgreSQL host port: `5433` (container port `5432`)
 - Portfolio dashboard: `http://127.0.0.1:8000/ui`
 - Costs dashboard: `http://127.0.0.1:8000/ui/costs`
+- Transfer history: `http://127.0.0.1:8000/ui/transfers`
 - Operations dashboard: `http://127.0.0.1:8000/ui/operations`
 - Ingestion run history: `http://127.0.0.1:8000/ui/ingestion-runs`
 - OpenAPI documentation: `http://127.0.0.1:8000/docs`
@@ -642,6 +643,7 @@ The reporting API exposes:
 - `GET /reports/pnl/by-instrument`
 - `GET /reports/pnl/by-label`
 - `GET /reports/portfolio-summary`
+- `GET /reports/transfer-history`
 - `GET /reports/provenance`
 
 PnL endpoints return JSON by default. Pass `format=csv` for the stable CSV `v1` contract;
@@ -664,7 +666,14 @@ percentage divides that result by positive net transfers. A USD-derived metric i
 when report dates differ or a required FX rate, cash balance, or current position value is
 unavailable.
 
-The same report summarizes all imported cost and dividend history in USD. Cost categories
+The portfolio transfer summary links to `/ui/transfers`, which shows deposit and
+withdrawal history with Previous/Next navigation, 25 rows per page, and a Refresh
+button. `/reports/transfer-history` applies `limit` and `offset` in the database,
+honors the configured API pagination bounds, and returns page counts. Transfers
+are ordered by report date descending, then event ID descending for stable pages;
+amounts retain their original currency and display withdrawals as positive magnitudes.
+
+The portfolio-summary report also summarizes all imported cost and dividend history in USD. Cost categories
 include trade and FX commissions, paid or received interest, withholding and transaction
 taxes, and other instrument- or account-level fees. Net cost is positive for an expense and
 negative for a credit. Each category states whether it is already included in instrument

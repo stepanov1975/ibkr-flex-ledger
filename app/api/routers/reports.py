@@ -85,6 +85,29 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
                      "filters": _filters(report_date_from, report_date_to, label_id)}
         )
 
+    @router.get("/transfer-history")
+    def transfer_history(
+        limit: int = Query(default=settings.api_default_limit),
+        offset: int = Query(default=0),
+    ) -> JSONResponse:
+        if limit < 1 or offset < 0:
+            return JSONResponse(
+                content={"status": "error", "code": "INVALID_PAGINATION", "message": "invalid limit or offset"},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        applied_limit = min(limit, settings.api_max_limit)
+        rows, total = repository.db_report_transfer_history(settings.account_id, applied_limit, offset)
+        return JSONResponse(content={
+            "schema_version": "v1",
+            "items": [
+                {"report_date_local": row.report_date_local.isoformat(), "type": row.transfer_type,
+                 "amount": row.amount, "currency": row.currency, "description": row.description}
+                for row in rows
+            ],
+            "page": {"limit": limit, "applied_limit": applied_limit, "offset": offset,
+                     "returned": len(rows), "total": total, "has_more": offset + len(rows) < total},
+        })
+
     @router.get("/portfolio-summary")
     def portfolio_summary() -> JSONResponse:
         summary = repository.db_report_portfolio_summary(settings.account_id)
