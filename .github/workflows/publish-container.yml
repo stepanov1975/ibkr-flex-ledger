@@ -49,10 +49,13 @@ jobs:
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Check out the release tag
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-          persist-credentials: false
+        # Reference gitlinks have no .gitmodules; avoid recursive submodule cleanup.
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            fetch --depth=1 origin "refs/tags/$RELEASE_TAG"
+          git checkout --detach FETCH_HEAD
 
       - name: Build the release image
         run: |
