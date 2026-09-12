@@ -17,6 +17,18 @@ The app focuses on stocks, with supported option trades and broker position valu
 
 Dates display as `dd/mm/yy`; timestamps use 24-hour time in `Asia/Jerusalem`. Business dates retain the date reported by IBKR.
 
+## Screenshots
+
+Screenshots use fictional sample data.
+
+**Portfolio overview** — summary metrics and instrument P&L with symbol search and stock/option filters.
+
+![Portfolio overview with summary metrics, symbol search, and Stocks and Options filters](docs/images/portfolio.png)
+
+**Stock history** — stock and related option positions, open and closed FIFO lots, and imported activity.
+
+![Stock history showing P&L, stock and option positions, FIFO lots, and trade history](docs/images/stock-history.png)
+
 ## Deployment
 
 ### Requirements
