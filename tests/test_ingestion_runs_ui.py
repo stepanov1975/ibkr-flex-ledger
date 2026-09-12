@@ -102,7 +102,6 @@ def test_ingestion_history_paginates_all_run_types_and_preserves_row_details() -
     context.eval("nodes['next-page'].onclick()")
     assert context.eval("nodes['next-page'].disabled") is True
     assert context.eval("nodes['previous-page'].disabled") is True
-    assert context.eval("nodes['refresh-runs'].disabled") is True
     context.eval("nodes['next-page'].onclick()")
     _flush(context)
 
@@ -154,29 +153,17 @@ def test_ingestion_history_failed_navigation_preserves_page_and_allows_retry() -
     assert context.eval("nodes.runs.children.length") == 25
     assert context.eval("nodes['runs-summary'].textContent") == "1–25 of 27 runs · Page 1 of 2"
     assert context.eval("nodes['next-page'].disabled") is False
-    assert context.eval("nodes['refresh-runs'].disabled") is False
     context.eval("fail=false;nodes['next-page'].onclick()")
     _flush(context)
     assert requests[-1]["offset"] == "25"
     assert context.eval("nodes['runs-error'].textContent") == ""
 
-    context.eval("nodes['refresh-runs'].onclick()")
-    _flush(context)
-    assert requests[-1]["offset"] == "25"
-    assert context.eval("nodes.runs.children.length") == 2
 
 
-def test_ingestion_history_can_refresh_after_initial_load_failure() -> None:
+def test_ingestion_history_shows_initial_load_failure() -> None:
     context, _, requests = _page_context("/ui/ingestion-runs", initial_failure=True)
 
     assert context.eval("nodes['runs-error'].textContent") == "History unavailable"
     assert context.eval("nodes['runs-summary'].textContent") == ""
     assert context.eval("nodes['previous-page'].disabled") is True
     assert context.eval("nodes['next-page'].disabled") is True
-    assert context.eval("nodes['refresh-runs'].disabled") is False
-    context.eval("fail=false;nodes['refresh-runs'].onclick()")
-    _flush(context)
-
-    assert requests[-1]["offset"] == "0"
-    assert context.eval("nodes.runs.children.length") == 25
-    assert context.eval("nodes['runs-error'].textContent") == ""

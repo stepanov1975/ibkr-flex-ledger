@@ -53,22 +53,22 @@ class _Portfolio:
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.instrument_id, conid="123", symbol="TEST",
                 currency="USD", position_qty="2", cost_basis="100", realized_pnl="10", unrealized_pnl="5",
-                total_pnl="15", provisional=False, unresolved_case_count=0,
+                total_pnl="15", provisional=False, unresolved_case_count=0, asset_category="STK",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.short_instrument_id, conid="124",
                 symbol="SHORT", currency="USD", position_qty="-2", cost_basis="-100", realized_pnl="0",
-                unrealized_pnl="-5", total_pnl="-5", provisional=False, unresolved_case_count=0,
+                unrealized_pnl="-5", total_pnl="-5", provisional=False, unresolved_case_count=0, asset_category="OPT",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.closed_instrument_id, conid="125",
                 symbol="CLOSED", currency="USD", position_qty="0", cost_basis="0", realized_pnl="20",
-                unrealized_pnl="0", total_pnl="20", provisional=False, unresolved_case_count=0,
+                unrealized_pnl="0", total_pnl="20", provisional=False, unresolved_case_count=0, asset_category="STK",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.missing_cost_instrument_id, conid="126",
                 symbol="MISSING", currency="USD", position_qty="3", cost_basis=None, realized_pnl="0",
-                unrealized_pnl="0", total_pnl="0", provisional=True, unresolved_case_count=0,
+                unrealized_pnl="0", total_pnl="0", provisional=True, unresolved_case_count=0, asset_category="STK",
             ),
         ]
 
@@ -305,3 +305,8 @@ def test_label_create_is_available_through_portfolio_api() -> None:
 
     assert created.status_code == 201
     assert listed.json()["items"][0]["name"] == "Core"
+
+
+def test_instrument_report_exposes_asset_category_for_ui_filters() -> None:
+    items = _client(_Portfolio()).get("/reports/pnl/by-instrument").json()["items"]
+    assert [item["asset_category"] for item in items] == ["STK", "OPT", "STK", "STK"]

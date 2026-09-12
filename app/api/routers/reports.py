@@ -286,6 +286,7 @@ def _instrument_json(row: InstrumentPnlReportRecord) -> dict[str, object]:
         })
     payload["provisional"] = row.provisional
     payload["unresolved_case_count"] = row.unresolved_case_count
+    payload["asset_category"] = row.asset_category
     return payload
 
 

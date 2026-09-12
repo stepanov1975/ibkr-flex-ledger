@@ -60,12 +60,12 @@ def test_dashboard_formats_business_dates_as_day_month_two_digit_year() -> None:
     application = FastAPI()
     application.include_router(api_create_ui_router())
 
-    response = TestClient(application).get("/ui")
+    response = TestClient(application).get("/ui/transfers")
 
     assert response.status_code == 200
     assert "function formatDate(value)" in response.text
     assert "`${match[3]}/${match[2]}/${match[1].slice(-2)}`" in response.text
-    assert "formatDate(x.report_date_local)" in response.text
+    assert "formatDate(item.report_date_local)" in response.text
 
 
 def test_dashboard_formats_timestamps_in_jerusalem_with_24_hour_time() -> None:
@@ -106,14 +106,13 @@ def test_main_page_exposes_portfolio_summary_and_requested_tables() -> None:
     assert "Net dividend payments" in response.text
     assert "Cash balances" in response.text
     assert "Cost summary by category" not in response.text
-    assert "Transfer summary by currency" in response.text
+    assert "Transfer summary by currency" not in response.text
     assert "Total P&amp;L by instrument" in response.text
-    assert "Transfer history" in response.text
     assert (
         "<th>Symbol</th><th>Position</th><th>Average cost</th><th>Total cost</th>"
         "<th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th>"
     ) in response.text
-    assert "<th>Currency</th><th>Net transfers</th><th>Gross deposits</th><th>Gross withdrawals</th>" in response.text
+    assert "transfer-summary" not in response.text
     assert 'href="/ui/transfers"' in response.text
     assert 'id="transfers"' not in response.text
     assert 'href="/ui/costs"' in response.text
@@ -121,7 +120,7 @@ def test_main_page_exposes_portfolio_summary_and_requested_tables() -> None:
 
 
 def test_main_page_places_supporting_summaries_after_instrument_pnl() -> None:
-    """Keep the instrument P&L table ahead of its dividend, cash, and transfer details."""
+    """Keep the instrument P&L table ahead of its dividend and cash details."""
 
     application = FastAPI()
     application.include_router(api_create_ui_router())
@@ -132,8 +131,6 @@ def test_main_page_places_supporting_summaries_after_instrument_pnl() -> None:
         response.text.index("Total P&amp;L by instrument"),
         response.text.index("Net dividend payments"),
         response.text.index("Cash balances"),
-        response.text.index("Transfer summary by currency"),
-        response.text.index("Transfer history"),
     ]
     assert section_positions == sorted(section_positions)
 
@@ -295,11 +292,12 @@ def test_main_page_toggle_executes_zero_position_filter_without_changing_totals(
     context = quickjs.Context()
     context.eval(
         """
-        function makeNode(){return {children:[],_text:'',className:'',checked:true,
+        function makeNode(){return {children:[],_text:'',className:'',checked:true,value:'',
           get textContent(){return this._text+this.children.map(child=>child.textContent).join('')},
           set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
-        const nodes={'pnl':makeNode(),'hide-zero-positions':makeNode(),'total-pnl':makeNode()};
+        const nodes={'pnl':makeNode(),'hide-zero-positions':makeNode(),'total-pnl':makeNode(),
+          'symbol-search':makeNode(),'show-stocks':makeNode(),'show-options':makeNode(),'pnl-empty':makeNode()};
         const document={getElementById:id=>nodes[id],createElement:()=>makeNode()};
         const Intl={NumberFormat:function(){return {format:value=>String(value)}}};
         """
@@ -308,11 +306,11 @@ def test_main_page_toggle_executes_zero_position_filter_without_changing_totals(
     context.eval(
         """
         latestPnlItems=[
-          {symbol:'ZERO_FIXED',position_qty:'0.00000000',currency:'USD',average_cost:null,total_cost:null,
+          {symbol:'ZERO_FIXED',asset_category:'STK',position_qty:'0.00000000',currency:'USD',average_cost:null,total_cost:null,
            last_day_value:null,realized_pnl:'10',unrealized_pnl:'0',total_pnl:'10'},
-          {symbol:'ZERO_EXPONENT',position_qty:'0E-8',currency:'USD',average_cost:null,total_cost:null,
+          {symbol:'ZERO_EXPONENT',asset_category:'STK',position_qty:'0E-8',currency:'USD',average_cost:null,total_cost:null,
            last_day_value:null,realized_pnl:'20',unrealized_pnl:'0',total_pnl:'20'},
-          {symbol:'OPEN',position_qty:'2',currency:'USD',average_cost:null,total_cost:null,last_day_value:null,
+          {symbol:'OPEN',asset_category:'STK',position_qty:'2',currency:'USD',average_cost:null,total_cost:null,last_day_value:null,
            realized_pnl:'1',unrealized_pnl:'2',total_pnl:'3'}];
         nodes['total-pnl'].textContent='unchanged';
         renderPnl();
@@ -330,9 +328,33 @@ def test_main_page_toggle_executes_zero_position_filter_without_changing_totals(
     assert visible_symbols == ["ZERO_FIXED", "ZERO_EXPONENT", "OPEN"]
     assert context.eval("nodes['total-pnl'].textContent") == "unchanged"
 
+    context.eval("""
+        latestPnlItems=[
+          {symbol:'AAPL',asset_category:'STK',position_qty:'2'},
+          {symbol:'AAPL  260918C00200000',asset_category:'OPT',position_qty:'1'},
+          {symbol:'MSFT',asset_category:'STK',position_qty:'3'},
+          {symbol:'AAPL_CLOSED',asset_category:'STK',position_qty:'0'}];
+        nodes['hide-zero-positions'].checked=true;
+        nodes['symbol-search'].value=' aApL ';
+        nodes['symbol-search'].oninput();
+    """)
+    assert context.eval("nodes.pnl.children.length") == 2
+    context.eval("nodes['show-stocks'].checked=false;nodes['show-stocks'].onchange()")
+    assert context.eval("nodes.pnl.children[0].children[0].textContent") == "AAPL  260918C00200000"
+    context.eval("nodes['show-options'].checked=false;nodes['show-options'].onchange()")
+    assert context.eval("nodes.pnl.children.length") == 0
+    assert context.eval("nodes['pnl-empty'].textContent") == "No instruments match your filters."
+    context.eval("nodes['show-stocks'].checked=true;nodes['show-stocks'].onchange()")
+    assert context.eval("nodes.pnl.children[0].children[0].textContent") == "AAPL"
+    context.eval("nodes['symbol-search'].value='';nodes['symbol-search'].oninput()")
+    assert context.eval("nodes.pnl.children.length") == 2
+    context.eval("nodes['hide-zero-positions'].checked=false;nodes['hide-zero-positions'].onchange()")
+    assert context.eval("nodes.pnl.children.length") == 3
+    assert context.eval("nodes['total-pnl'].textContent") == "unchanged"
 
-def test_main_page_labels_pnl_and_valuation_dates_independently() -> None:
-    """Do not let the last completed request overwrite a different report date."""
+
+def test_main_page_omits_intro_and_summary_date_captions() -> None:
+    """Keep summary cards compact while retaining provisional-data warnings."""
 
     application = FastAPI()
     application.include_router(api_create_ui_router())
@@ -340,11 +362,11 @@ def test_main_page_labels_pnl_and_valuation_dates_independently() -> None:
     response = TestClient(application).get("/ui")
 
     assert response.status_code == 200
-    assert 'id="pnl-report-date"' in response.text
-    assert 'id="valuation-report-date"' in response.text
-    assert "el('pnl-report-date').textContent=latest===null?'N/A':'As of '+formatDate(latest)" in response.text
-    assert "el('valuation-report-date').textContent=x.report_date_local?'As of '+formatDate(x.report_date_local):'N/A'" in response.text
-    assert 'id="report-date"' not in response.text
+    assert "Latest available IBKR data" not in response.text
+    for identifier in ("pnl-report-date", "valuation-report-date", "cost-history-range"):
+        assert identifier not in response.text
+    assert 'id="pnl-state"' in response.text
+    assert "Provisional totals" in response.text
 
 
 def test_operations_page_preserves_existing_dashboard_and_links_to_portfolio() -> None:
@@ -369,7 +391,7 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
     script = script.rsplit("loadAll();", 1)[0]
     context = quickjs.Context()
     context.eval("""
-        function node(){return {children:[],_text:'',className:'',checked:true,
+        function node(){return {children:[],_text:'',className:'',checked:true,value:'',
           get textContent(){return this._text+this.children.map(child=>child.textContent).join('')},
           set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[]}}}
@@ -378,7 +400,7 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
     """)
     context.eval(script)
     context.eval("""
-        let row={symbol:'TEST',position_qty:'1',currency:'USD',report_date_local:'2026-08-21',
+        let row={symbol:'TEST',asset_category:'STK',position_qty:'1',currency:'USD',report_date_local:'2026-08-21',
           realized_pnl:'10',unrealized_pnl:'5',total_pnl:'15',provisional:true,unresolved_case_count:1};
         json=async()=>({items:[row]});loadPnl();
     """)
