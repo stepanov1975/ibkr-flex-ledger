@@ -1,3 +1,8 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../README.md).
+> This describes migration 20260214_01 only; later migrations extend this schema.
+
 # Task 2 Schema Contract (MVP Baseline)
 
 Date: 2026-02-14

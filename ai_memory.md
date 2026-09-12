@@ -1,3 +1,11 @@
+# Engineering decision log
+
+Dated decisions, patterns, and fixes are retained as history. Later entries may supersede
+earlier ones; this log is not an active backlog or the current specification. Start with
+the [documentation index](docs/README.md), [technical reference](docs/technical_reference.md),
+and [contracts](docs/contracts.md). Original filenames in older entries are mapped in the
+[archive index](docs/archive/README.md). Preserve superseded rationale when recording updates.
+
 - [2026-02-14] DECISION :: MVP scope documented in MVP.md with seven core feature groups: ingestion, canonical events, stocks-first ledger, labels/notes, reporting drilldown, reconciliation modes, and operational reliability gates.
 - [2026-02-14] DECISION :: Modular-first policy is mandatory: structure MVP modules for future phase expansion, but do not implement max_plan.md phase 2+ features in initial delivery.
 - [2026-02-14] DECISION :: Database access boundary is strict: only db-layer modules execute SQL/ORM queries; all other layers must use db interfaces/repositories.

@@ -1,12 +1,13 @@
 # Technical reference
 
 Developer architecture, implementation rules, accounting contracts, API details, and
-validation guidance moved from the project README. Task numbers identify the original
+validation guidance for the current application. Task numbers identify the original
 implementation milestones. Commands and code paths below are relative to the repository
 root unless explicitly absolute.
 
 For features and deployment, see the [README](../README.md). For contributor guidance,
-see [AGENTS.md](../AGENTS.md).
+see [AGENTS.md](../AGENTS.md). The [documentation index](README.md) separates current
+guidance, historical evidence, and future design ideas.
 
 ## Implementation policy (important)
 
@@ -20,10 +21,10 @@ Code under `references/` is reference material only. It is not part of this appl
 - Do not call CLI entry points from `references/` as part of app jobs or services.
 - Reuse ideas and patterns only; implement project-native code in the main application modules.
 
-- [max_plan.md](../max_plan.md) is the reference for end-state architecture and future modules.
+- [long-term architecture](design/long_term_architecture.md) is the reference for end-state architecture and future modules.
 - [references/REFERENCE_NOTES.md](../references/REFERENCE_NOTES.md) is the reference index of external projects and reusable patterns.
-- Features described in [max_plan.md](../max_plan.md) are not initial implementation scope.
-- MVP implementation should keep stable boundaries so future capabilities can be added with minimal changes to already working modules.
+- The long-term design is a source of future ideas, not an implementation mandate. Scope each change to the requested behavior.
+- Implementation should keep stable boundaries so future capabilities can be added with minimal changes to already working modules.
 - New domains (options, strategies, advanced performance, expanded corporate actions) should be added as new modules that integrate through existing interfaces.
 - All database operations must be centralized in the database layer only. No direct database queries are allowed outside `db` modules.
 - Before implementing any feature or significant bug fix, scan [references/REFERENCE_NOTES.md](../references/REFERENCE_NOTES.md) first to reuse proven patterns and avoid reinventing existing solutions.
@@ -43,7 +44,7 @@ Code under `references/` is reference material only. It is not part of this appl
 
 Core rule: raw inputs are immutable; derived datasets are reproducible from raw records.
 
-Modularity rule: architecture must be prepared for future domains without forcing rewrites of already working MVP parts.
+Modularity rule: architecture must be prepared for future domains without forcing rewrites of already working modules.
 
 Data-access rule: API routes, services, adapters, CLI, and jobs must use database-layer interfaces/repositories rather than issuing direct SQL/ORM queries.
 
@@ -58,7 +59,7 @@ Core entities:
 
 Traceability is first-class: report values are designed to link back to canonical events and original raw records.
 
-## MVP milestones
+## Original implementation milestones
 
 1. Foundation and project skeleton
 2. Ingestion and raw persistence
@@ -67,13 +68,14 @@ Traceability is first-class: report values are designed to link back to canonica
 5. Labels, notes, and reporting
 6. Reconciliation and audit UX
 
-For full milestone-level acceptance criteria and implementation details, see:
+These milestones explain historical task identifiers; they are not the current backlog.
+For preserved acceptance criteria and design rationale, see:
 
-- [MVP.md](../MVP.md)
-- [MVP_spec_freeze.md](../MVP_spec_freeze.md) (frozen MVP implementation values and contracts)
-- [implementation_task_list.md](../implementation_task_list.md) (outcome-ordered implementation execution checklist)
-- [initial_plan.md](../initial_plan.md)
-- [max_plan.md](../max_plan.md) (reference architecture; not initial scope)
+- [original implementation plan](archive/MVP.md)
+- [contracts](contracts.md) (maintained accounting, API, and reliability values)
+- [original task checklist](archive/implementation_task_list.md) (outcome-ordered implementation execution checklist)
+- [initial design](archive/initial_plan.md)
+- [long-term architecture](design/long_term_architecture.md) (historical end-state design; not a delivery commitment)
 - [references/REFERENCE_NOTES.md](../references/REFERENCE_NOTES.md) (external reference projects and reuse guidance)
 
 ## Quickstart
@@ -99,7 +101,7 @@ For full milestone-level acceptance criteria and implementation details, see:
 
 ## Runtime foundation (Task 1)
 
-The Task 1 runtime foundation now includes:
+The runtime foundation includes:
 
 - FastAPI application skeleton with modular layer boundaries under `app/`
 - Centralized database connectivity in `app/db/` only
@@ -150,7 +152,7 @@ consumed and ignores provenance-only cashflow updates. Existing snapshots need
 reprocessing to establish their FX dependencies; direct overrides and superseded
 rates do not cause stale warnings.
 
-The MVP now includes corporate-action manual cases, instrument labels and notes,
+The application includes corporate-action manual cases, instrument labels and notes,
 PnL/provenance/reconciliation reports, stable CSV v1 exports, and operational
 SLO visibility. Backup, retention, and restore procedures are documented in
 [docs/operations.md](../docs/operations.md).
@@ -209,7 +211,9 @@ If required settings are missing or invalid, startup fails with actionable valid
 
 ## Schema and migrations baseline (Task 2)
 
-Task 2 introduces a full MVP schema baseline and migration workflow.
+Task 2 established the initial schema and migration workflow. The
+[baseline schema contract](archive/task2_schema_contract.md) preserves its column-level
+definitions; [migration guidance](migrations.md) covers the current revision chain.
 
 Included baseline tables:
 
@@ -220,9 +224,9 @@ Included baseline tables:
 
 Key implementation decisions:
 
-- Full column-level MVP schema is implemented in Task 2 (no partial placeholder schema).
+- Full column-level initial schema is implemented in Task 2 (no partial placeholder schema).
 - UUID primary keys are database-generated with PostgreSQL `gen_random_uuid()`.
-- Canonical event natural-key constraints follow [MVP_spec_freeze.md](../MVP_spec_freeze.md) names and contracts.
+- Canonical event natural-key constraints follow [contracts](contracts.md) names and contracts.
 
 Migration files and configuration:
 
@@ -317,7 +321,7 @@ Task 4 replaces the Task 3 persist placeholder with immutable raw artifact and r
 Included behavior:
 
 - Dedicated immutable `raw_artifact` persistence with dedupe key `account_id + period_key + flex_query_id + payload_sha256`
-- Raw section-row extraction persisted into `raw_record` for all detected sections (including non-MVP-mapped sections)
+- Raw section-row extraction persisted into `raw_record` for all detected sections (including sections without canonical mappings)
 - Raw row provenance linked through `raw_record.raw_artifact_id -> raw_artifact.raw_artifact_id`
 - Persist-stage diagnostics now include `payload_sha256`, `raw_artifact_id`, artifact dedupe flag, and inserted/deduplicated raw row counts
 - A duplicate artifact takes the semantic no-op fast path only when
@@ -648,7 +652,7 @@ and instrument counts plus the covered date range.
 ## Reconciliation diff mode (Task 11)
 
 `GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
-frozen tolerance matrix in [MVP_spec_freeze.md](../MVP_spec_freeze.md). JSON and `format=csv` outputs include
+frozen tolerance matrix in [contracts](contracts.md). JSON and `format=csv` outputs include
 absolute/relative differences, tolerances, pass/fail state, provisional state, and source
 identities. Requests fail clearly when required broker reconciliation sections are absent.
 
@@ -695,7 +699,7 @@ The seeded tests create uniquely named temporary databases and remove them after
 accept a release based only on the general suite when this file was skipped for lack of a
 reachable PostgreSQL server.
 
-Operational release proof—including backup checksums, replay run IDs, reconciliation and
+Historical operational release proof—including backup checksums, replay run IDs, reconciliation and
 provisional results, migration state, and measured RPO/RTO—is recorded in
 [docs/releases/2026-08-22-release-evidence.md](../docs/releases/2026-08-22-release-evidence.md).
 

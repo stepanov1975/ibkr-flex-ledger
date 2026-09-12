@@ -1,8 +1,13 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../README.md).
+> Commands, line numbers, checkboxes, and validation results describe the recorded work, not the current release.
+
 # Application review — reassessed against existing data
 
 Reassessment date: September 7, 2026. This report supersedes the original ten-item priority list.
 
-Implementation update: the retained code issues have been fixed and validated with 388 passing tests. Maintenance timers, a fresh backup, and an isolated restore drill are complete. Application deployment and the stored expense repair are complete; direct LAN access is preserved. See [fix status and validation](/stock_app/docs/reviews/2026-09-07-real-data-fixes.md). The evidence below records the pre-fix assessment.
+Implementation update: the retained code issues have been fixed and validated with 388 passing tests. Maintenance timers, a fresh backup, and an isolated restore drill are complete. Application deployment and the stored expense repair are complete; direct LAN access is preserved. See [fix status and validation](2026-09-07-real-data-fixes.md). The evidence below records the pre-fix assessment.
 
 **Three P2 defects are confirmed using existing data and current application code.** Four other findings describe reproducible security/operational risks whose triggering conditions were not observed. Three input-dependent findings are excluded from the active list because their assumptions do not match the stored reports.
 
@@ -25,7 +30,7 @@ The running application image differs from the current working tree in ingestion
 
 ### [P2] Standalone tax and fee amounts are missing from dedicated expense totals — original #4
 
-Location: [service.py:481](/stock_app/app/mapping/service.py:481), lines 481–482. Consumer: [snapshot_service.py:322](/stock_app/app/ledger/snapshot_service.py:322), lines 322–327.
+Location: [service.py:481](../../app/mapping/service.py), lines 481–482. Consumer: [snapshot_service.py:322](../../app/ledger/snapshot_service.py), lines 322–327.
 
 Actual instrument-associated USD cashflow history through the latest snapshot contains:
 
@@ -44,7 +49,7 @@ Fix direction: classify standalone cash expenses into dedicated totals while pre
 
 ### [P2] Closed positions generate false reconciliation failures — original #6
 
-Location: [portfolio.py:952](/stock_app/app/db/portfolio.py:952), lines 952–955; corresponding unrealized-P&L lookup at lines 957–960.
+Location: [portfolio.py:952](../../app/db/portfolio.py), lines 952–955; corresponding unrealized-P&L lookup at lines 957–960.
 
 At the latest snapshot date, **137 closed instruments** have zero quantity and zero unrealized P&L and are absent from the present `OpenPositions` section. Their valuation source is `broker_position_absent`; 136 of these stored snapshots are finalized/nonprovisional.
 
@@ -56,7 +61,7 @@ Fix direction: distinguish an instrument absent from a complete authoritative po
 
 ### [P2] Provenance omits the broker rows actually used for valuation — original #7
 
-Location: [portfolio.py:843](/stock_app/app/db/portfolio.py:843), lines 843–847.
+Location: [portfolio.py:843](../../app/db/portfolio.py), lines 843–847.
 
 **102 latest snapshots** have corresponding `OpenPositions` rows: 99 use `openpositions_mark_price`, and three use `openpositions_unrealized_pnl`. The current provenance query returns **no OpenPositions source for any of the 102**. One actual instrument has no canonical trade/cashflow/corporate-action history and returns **completely empty provenance** despite having a broker-valued snapshot.
 
@@ -95,10 +100,10 @@ Original review checks remain historical evidence: 364 repository tests passed, 
 
 New evidence used for this reassessment:
 
-- [Ingestion, statement-account, FX-date, and diagnostic scan](/tmp/review_ingestion_real_data.py).
-- [Actual corporate-action and cash-expense aggregates](/tmp/review_actual_accounting.py).
-- [Current mapper and in-memory snapshot recomputation using actual inputs](/tmp/review_actual_accounting_recompute.py).
-- [Actual reconciliation/provenance queries and current API router checks](/tmp/review_reporting_actual.py).
+- Ingestion, statement-account, FX-date, and diagnostic scan (temporary investigation script: `/tmp/review_ingestion_real_data.py`; not retained in the repository).
+- Actual corporate-action and cash-expense aggregates (temporary investigation script: `/tmp/review_actual_accounting.py`; not retained in the repository).
+- Current mapper and in-memory snapshot recomputation using actual inputs (temporary investigation script: `/tmp/review_actual_accounting_recompute.py`; not retained in the repository).
+- Actual reconciliation/provenance queries and current API router checks (temporary investigation script: `/tmp/review_reporting_actual.py`; not retained in the repository).
 - Read-only Docker metadata/source-hash comparisons, systemd timer inspection, backup inventory/checksum validation, and PostgreSQL archiver statistics.
 
 The database probes were independently rerun during reassessment and produced the counts reported above. Application source and production data remain unchanged; only this review document was revised.

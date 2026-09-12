@@ -1,7 +1,8 @@
 # Architecture Conventions
 
-Date: 2026-02-14
-Scope: Runtime foundation conventions for Task 1
+Scope: All project-native runtime modules
+
+See the [technical reference](technical_reference.md) for accounting and workflow details.
 
 ## Purpose
 
@@ -33,5 +34,5 @@ It applies to all modules outside `references/`.
 
 ## Foundation Framework Choice
 
-- FastAPI is the API/UI framework for MVP foundation implementation.
+- FastAPI is the API/UI framework.
 - Additional framework choices must not violate the layer boundaries in this document.

@@ -1,3 +1,8 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../README.md).
+> Long-term design reference, not a delivery commitment. Phase numbers and proposed paths are historical; some capabilities have since shipped.
+
 # FlexLedger — “Max Plan” Reference Architecture (All Discussed Features)
 
 > Purpose: This document describes what FlexLedger looks like when **all** discussed features (Concept A+B+C) are implemented, so you can structure the repo and DB early without repainting yourself into a corner.

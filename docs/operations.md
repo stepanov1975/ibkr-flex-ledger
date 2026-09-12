@@ -37,12 +37,13 @@ HTTP errors fail immediately. Retrying GetStatement retains its reference code.
 ## Scheduled operations
 
 The production Docker Compose host uses the checked-in systemd services and timers in
-`deploy/systemd/`. Install and enable all five timers by following
-`deploy/systemd/README.md`. The default UTC schedule is:
+[deploy/systemd](../deploy/systemd). Install the four maintenance/import timers using
+the [scheduler guide](../deploy/systemd/README.md); enable the fifth, outbound-alert
+timer only after configuring a delivery destination. The default UTC schedule is:
 
 - verified backup daily at 02:00;
 - 60-day diagnostics retention daily at 03:15;
-- restore drill every Sunday at 04:00; and
+- restore drill every Sunday at 04:00;
 - ingestion daily at 09:00; and
 - outbound SLO alert evaluation every 15 minutes.
 

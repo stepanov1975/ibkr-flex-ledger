@@ -1,7 +1,10 @@
 # Database Migrations
 
-Date: 2026-02-14
-Scope: Task 2 migration workflow
+Scope: The full Alembic migration chain, from the initial schema through the current head.
+
+The [original schema contract](archive/task2_schema_contract.md) describes revision
+`20260214_01` only. Use [migration files](../alembic/versions) and
+[database metadata](../app/db) for subsequent schema changes.
 
 ## Prerequisites
 
@@ -55,3 +58,24 @@ alembic downgrade -1
 - Alembic is configured in `alembic.ini` with scripts in `alembic/`.
 - Database URL is loaded from project settings contract through `app.config.config_load_database_url()`.
 - `.env` values are supported via the shared settings model.
+
+## Deployment considerations
+
+Container startup runs `alembic upgrade head`. Back up before upgrading and deploy
+application code and database changes together; restart separate ingestion/replay workers
+with the same version. See the [operations guide](operations.md) for backup and recovery.
+
+The incremental-ingestion indexes use transactional `CREATE INDEX`; use a maintenance
+window for large tables because index creation can block writes. Revision `20260911_17`
+requires an online migration to backfill broker identity from successful artifacts and
+stops on unreadable or ambiguous account evidence.
+
+Inspect the revision chain and applied state:
+
+```bash
+alembic history
+alembic current
+alembic heads
+```
+
+A downgrade can remove data and is not a substitute for the verified restore procedure.

@@ -66,3 +66,6 @@ Read [the technical reference](docs/technical_reference.md) before changing appl
 It contains the implementation policy, architecture and database boundaries, accounting
 contracts, API and job behavior, migration history, and release validation commands.
 User-facing features and deployment instructions belong in [README.md](README.md).
+
+Use the [documentation index](docs/README.md) to find maintained guides and historical
+records. Archived plans and dated decision-log entries do not define current scope.
