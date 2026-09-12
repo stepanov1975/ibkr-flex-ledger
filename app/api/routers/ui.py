@@ -117,6 +117,7 @@ _OPERATIONS_DASHBOARD_HTML = """<!doctype html>
 header,main{max-width:1200px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{grid-column:span 4;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 16px 45px #0004}.wide{grid-column:span 8}.full{grid-column:1/-1}
 .metric{font-size:28px;font-weight:700;margin-top:8px}button,input{background:#0e1527;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 11px}button{cursor:pointer;background:#214f4a;border-color:#327568}button:hover{filter:brightness(1.15)}form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+#resolution-editor button:disabled{background:#0e1527;color:var(--muted);border-color:var(--line);cursor:not-allowed;filter:none}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.scroll{overflow:auto;max-height:430px}.pill{padding:3px 7px;border-radius:999px;background:#26324d}.bad{color:var(--bad)}a{color:var(--accent)}
 @media(max-width:850px){.card,.wide{grid-column:1/-1}header{align-items:flex-start;gap:12px;flex-direction:column}}
 </style></head><body><header><div><h1>IBKR Flex Ledger</h1><div class="muted">Auditable portfolio accounting</div></div><div><a href="/ui">Portfolio</a> · <a href="/docs">API docs</a> · <button onclick="loadAll()">Refresh</button></div></header>
@@ -156,8 +157,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <p class="muted">This records the received security's cost basis. It does not reallocate cost basis from the parent security. Enter zero only when the broker evidence confirms zero basis.</p></div>
 <p><label>Broker evidence / note (required) <input id="resolution-note" maxlength="2000" required></label></p>
 <p id="resolution-error" class="bad" role="alert"></p>
-<p><button id="preview-resolution">Preview changes</button> <button id="apply-resolution" disabled>Apply treatment</button> <button id="cancel-resolution">Cancel</button></p>
 <p id="resolution-summary" aria-live="polite"></p>
+<p><button id="preview-resolution" aria-describedby="resolution-summary">Preview changes</button> <button id="apply-resolution" aria-describedby="resolution-summary" disabled>Apply treatment</button> <button id="cancel-resolution">Cancel</button></p>
 <div id="resolution-event-preview" hidden><h3>Event to approve</h3>
 <div class="scroll"><table><thead><tr><th>IBKR action ID</th><th>Event date</th><th>Treatment</th><th>Security</th><th>Units</th><th>Total cost basis</th><th>Broker evidence / note</th></tr></thead><tbody id="resolution-event"></tbody></table></div>
 </div>
@@ -214,7 +215,7 @@ try{const result=await json('/corporate-actions/cases/'+splitCase.case_id+'/spli
 for(const id of ['new-shares','old-shares','split-note'])el(id).oninput=invalidateSplit;
 el('preview-split').onclick=()=>requestSplit(false);el('apply-split').onclick=()=>requestSplit(true);el('cancel-split').onclick=cancelSplit;
 let resolutionCase=null,resolutionTreatment=null,resolutionPreview=null,resolutionDraft=null,resolutionVersion=0,resolutionBusy=false;
-function invalidateResolution(){resolutionVersion++;resolutionPreview=null;resolutionDraft=null;el('apply-resolution').disabled=true;el('resolution-summary').textContent='';el('resolution-event-preview').hidden=true;el('resolution-event').replaceChildren()}
+function invalidateResolution(){resolutionVersion++;resolutionPreview=null;resolutionDraft=null;el('apply-resolution').disabled=true;el('resolution-summary').textContent='Enter the required details, then click Preview changes to enable Apply treatment. Nothing is saved until you apply.';el('resolution-event-preview').hidden=true;el('resolution-event').replaceChildren()}
 function cancelResolution(){if(resolutionBusy)return;resolutionCase=null;invalidateResolution();el('resolution-editor').hidden=true}
 function openResolution(item,treatment){
 if(splitBusy||resolutionBusy)return;cancelSplit();resolutionCase=item;resolutionTreatment=treatment;invalidateResolution();el('resolution-error').textContent='';el('resolution-editor').hidden=false;
@@ -225,7 +226,7 @@ el('distribution-basis-fields').hidden=treatment!=='distribution';el('distributi
 if(treatment==='distribution'){const leg=item.broker_legs[0];el('distribution-basis-label').textContent='Total cost basis of all '+formatSplitPosition(leg.quantity)+' credited '+leg.symbol+' units ('+leg.currency+')'}
 }
 function renderResolutionPreview(result){
-el('resolution-summary').textContent='Preview only — no changes saved. '+result.summary;
+el('resolution-summary').textContent='Preview only — no changes saved. '+result.summary+' Review the event below, then click Apply treatment to save.';
 const event=result.event,transfer=result.treatment==='security_transfer',tr=document.createElement('tr');
 [event.action_id,formatDate(event.report_date_local),transfer?'Security transfer':'Distribution',transfer?event.source_symbol+' → '+event.destination_symbol:event.destination_symbol,formatSplitPosition(event.quantity),transfer?'Carry existing FIFO basis':formatCurrency(event.cost_basis,event.currency),event.note].forEach(value=>cell(tr,value));
 el('resolution-event').replaceChildren();el('resolution-event').append(tr);el('resolution-event-preview').hidden=false;
@@ -238,6 +239,7 @@ if(!draft.note){el('resolution-error').textContent='Enter the broker evidence su
 if(!apply&&resolutionTreatment==='distribution'){const basis=el('distribution-basis').value.trim();if(!basis||!Number.isFinite(Number(basis))||Number(basis)<0){el('resolution-error').textContent='Enter the total cost basis of the credited units in the displayed currency. Zero must be explicit.';return}draft.cost_basis=basis}
 const version=resolutionVersion,body=apply?{...draft,preview_token:resolutionPreview.preview_token}:draft;
 resolutionBusy=true;for(const id of ['distribution-basis','resolution-note','preview-resolution','apply-resolution','cancel-resolution'])el(id).disabled=true;
+el('resolution-summary').textContent=apply?'Applying treatment…':'Preparing preview… No changes have been saved.';
 try{const result=await json('/corporate-actions/cases/'+resolutionCase.case_id+'/resolution/'+(apply?'apply':'preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(version!==resolutionVersion)return;if(apply){resolutionCase=null;invalidateResolution();el('resolution-editor').hidden=true;await loadAll()}else{resolutionDraft=draft;resolutionPreview=result;renderResolutionPreview(result)}}catch(error){invalidateResolution();el('resolution-error').textContent=error.message}finally{resolutionBusy=false;for(const id of ['distribution-basis','resolution-note','preview-resolution','cancel-resolution'])el(id).disabled=false;el('apply-resolution').disabled=!resolutionPreview}
 }
 for(const id of ['distribution-basis','resolution-note'])el(id).oninput=invalidateResolution;
