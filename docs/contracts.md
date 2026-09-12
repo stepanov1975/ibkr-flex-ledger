@@ -46,9 +46,9 @@ Goal: define exact UPSERT natural keys for deterministic replay and deduplicatio
 | Event Type | Natural Key Fields (ordered) | Uniqueness Constraint Name | Collision Handling Rule | Notes |
 |---|---|---|---|---|
 | `trade_fill` | `account_id`, `ib_exec_id` | `uq_event_trade_fill_account_exec` | Ingestion and replay reject conflicting execution identity/economics, refresh validated derived figures, and retain earliest successful origin. | Mirrors execution-level identity in references (`fill_execution_id`/`ibExecID`). |
-| `cashflow` | `account_id`, `transaction_id`, `cash_action`, `currency` | `uq_event_cashflow_account_txn_action_ccy` | If duplicate key with same amount/date, ignore; if amount/date differs, mark as correction and keep latest `report_date`. | `transactionID` is present across IB Flex sections and is the primary anchor. |
+| `cashflow` | `account_id`, `transaction_id`, `cash_action`, `currency` | `uq_event_cashflow_account_txn_action_ccy` | Refresh incoming date, effective timestamp, amount, base amount, withholding, fees, and source/run pointers; replace instrument only when the incoming instrument is non-null. Set `is_correction` on amount/date changes and retain an existing correction flag. | `transactionID` is present across IB Flex sections and is the primary anchor. |
 | `fx` | `account_id`, `transaction_id`, `currency`, `functional_currency` | `uq_event_fx_account_txn_ccy_pair` | If duplicate key reappears, UPSERT computed fields and preserve first-seen source row pointer. | Uses transaction identity first, then currency pair for deterministic uniqueness. |
-| `corp_action` | `account_id`, `action_id` | `uq_event_corp_action_account_action` | If `action_id` is null, fallback key is (`account_id`, `transaction_id`, `conid`, `report_date`, `reorg_code`); conflicts create mandatory manual case. | `actionID`/`transactionID` appear in ibflex corporate-action types. |
+| `corp_action` | `account_id`, `action_id`; also `account_id`, `transaction_id`, `conid`, `report_date_local`, `reorg_code` | `uq_event_corp_action_account_action`; `uq_event_corp_action_fallback` | With `action_id`, UPSERT targets the action key; without it, UPSERT targets the fallback tuple and marks a conflicting row manual/provisional. Both uniqueness constraints are always present, subject to PostgreSQL NULL semantics. A collision on the other constraint fails publication rather than creating a manual case. | The fallback constraint is not conditional on `action_id` being null. |
 
 Acceptance checks:
 - Reprocessing same raw input produces identical canonical row identities.
@@ -66,9 +66,18 @@ Goal: define deterministic ordered source lists and tie-break behavior.
 
 | Priority | Source | Eligibility Condition | Tie-Break Rule | Missing-Data Behavior |
 |---|---|---|---|---|
-| 1 | `OpenPositions.markPrice` | Matching `conid` and target `report_date` exists and `markPrice` is not null | Highest source priority always wins | If unavailable, continue to priority 2 |
-| 2 | `Trades.closePrice` | At least one trade row for `conid` on target `report_date` with non-null `closePrice` | Choose row with latest `dateTime`; if tied, highest numeric `transactionID` | If unavailable, continue to priority 3 |
-| 3 | Last execution `tradePrice` on or before target `report_date` | Trade exists for `conid` with non-null `tradePrice` | Latest `dateTime`; then highest numeric `transactionID`; then highest raw record primary key | Use value but mark valuation as provisional with diagnostic code `EOD_MARK_FALLBACK_LAST_TRADE` |
+| 1 | `OpenPositions.markPrice` | Matching instrument/date and FIFO quantity, with strictly positive mark and multiplier | Highest source priority always wins | If unavailable, continue to priority 2 |
+| 2 | `Trades.closePrice` | At least one trade row for `conid` on target `report_date` with non-null `closePrice` | Last eligible row in the deterministic trade ordering below | If unavailable, continue to priority 3 |
+| 3 | Last execution `tradePrice` on or before target `report_date` | Trade exists for `conid` with non-null `tradePrice` | Last eligible row in the deterministic trade ordering below | Use value but mark valuation as provisional with persisted `valuation_source=trades_last_trade_price` |
+
+Trade candidates are ordered ascending by execution timestamp, numeric transaction ID
+(NULLS FIRST), textual transaction ID (NULLS FIRST), source raw-record UUID, then event
+UUID; the last eligible row wins. This retains a deterministic distinction between IDs
+such as `01` and `1` even when their numeric values match.
+
+Marks and close prices are multiplied by the contract multiplier; last-trade prices also
+divide by the applicable subsequent corporate-action adjustment factor. A zero position
+uses zero with `valuation_source=no_open_position` outside completed broker authority.
 
 If all three sources are missing, valuation is marked provisional and diagnostic code `EOD_MARK_MISSING_ALL_SOURCES` is emitted.
 
@@ -80,11 +89,15 @@ position authority.
 
 ### 2.2 Execution FX Fallback
 
+If currency equals functional currency after trimming and uppercasing, return `1.0`
+with `fx_source=base_currency` before consulting any trade or conversion-rate source.
+The hierarchy below applies to non-base currencies.
+
 | Priority | Source | Eligibility Condition | Tie-Break Rule | Missing-Data Behavior |
 |---|---|---|---|---|
-| 1 | `Trades.fxRateToBase` | Event row has non-null `fxRateToBase` and non-zero denominator context | Highest source priority always wins | If unavailable, continue to priority 2 |
-| 2 | Derived from `netCashInBase / netCash` | Both values are present and `netCash != 0` | Round to 10 decimal places using half-even | If unavailable, continue to priority 3 |
-| 3 | `ConversionRates` for (`currency`, base, `report_date`) | Matching pair exists for report date (or nearest previous available date) | Pick exact date first, otherwise nearest previous date; within same date pick latest `ingestion_run_id`, then highest raw record primary key | If unavailable, use `1.0` only when `currency == base`; otherwise set event provisional and block economic FX output |
+| 1 | `Trades.fxRateToBase` | Event row has strictly positive `fxRateToBase`; no net-cash denominator is required | Highest source priority always wins | If unavailable, continue to priority 2 |
+| 2 | Derived from `netCashInBase / netCash` | Both values are present, `netCash != 0`, and the absolute quotient is positive | Use the positive `abs(netCashInBase) / abs(netCash)` Decimal quotient under the active Decimal context; no explicit ten-place quantization | If unavailable, continue to priority 3 |
+| 3 | `ConversionRates` for (`currency`, base, `report_date`) | Matching pair has a strictly positive rate on the report date (or nearest previous eligible date) | Pick exact date first, otherwise nearest previous date; within same date pick latest `ingestion_run_id`, then highest raw record primary key | If unavailable, mark the non-base-currency calculation provisional and leave economic FX output unavailable |
 
 If all three sources are missing for non-base currency events, emit diagnostic code `FX_RATE_MISSING_ALL_SOURCES`.
 
@@ -104,11 +117,11 @@ Goal: explicitly list which action types are auto-resolved vs mandatory manual.
 | `REVERSESPLIT (RS)` | Auto | One-to-one deterministic reverse-split ratio present | N/A | Deterministic inverse quantity/cost basis transform |
 | `STOCKDIV (SD)` | Auto | Deterministic stock dividend factor available | N/A | Deterministic lot adjustment |
 | `CASHDIV (CD)` | Manual | N/A | Affected instrument remains provisional until payment and withholding are verified | CashTransactions is the cash accounting source; a CorporateActions row alone cannot establish whether the payment is already represented there |
-| `SPINOFF (SO)` | Manual | N/A | Block affected instrument recompute outputs | Requires discretionary cost-basis allocation |
-| `MERGER (TC)` | Manual | N/A | Block affected instrument recompute outputs | Consideration mix and ratio ambiguity |
-| `RIGHTSISSUE (RI/SR)` | Manual | N/A | Block affected instrument recompute outputs | Election/valuation ambiguity |
-| `CHOICEDIV (CH/HD/HI)` | Manual | N/A | Block affected instrument recompute outputs | Election-based action, not deterministic |
-| `GENERICVOLUNTARY (GV)` | Manual | N/A | Block affected instrument recompute outputs | Explicitly non-deterministic without user choice |
+| `SPINOFF (SO)` | Manual | N/A | Affected outputs remain provisional until accounting is resolved | Requires discretionary cost-basis allocation |
+| `MERGER (TC)` | Manual | N/A | Affected outputs remain provisional until accounting is resolved | Consideration mix and ratio ambiguity |
+| `RIGHTSISSUE (RI/SR)` | Manual | N/A | Affected outputs remain provisional until accounting is resolved | Election/valuation ambiguity |
+| `CHOICEDIV (CH/HD/HI)` | Manual | N/A | Affected outputs remain provisional until accounting is resolved | Election-based action, not deterministic |
+| `GENERICVOLUNTARY (GV)` | Manual | N/A | Affected outputs remain provisional until accounting is resolved | Explicitly non-deterministic without user choice |
 
 Manual handling now includes verified split corrections, paired security transfers, and
 single-security distributions with explicit basis. Preview/apply recalculates accounting;
@@ -168,8 +181,9 @@ Goal: define measurable reliability targets and alert thresholds.
 Acceptance checks:
 - Targets are observable from runtime metrics/logs.
 - Alerts can be simulated in test/staging runbooks.
-- Detailed ingestion logs are mandatory and must include at minimum: `run_id`, `stage`, `status`, `started_at_utc`, `ended_at_utc`, `duration_ms`, `source_section`, `source_record_ref`, `error_code`, `error_message`, `exception_type`, `stack_trace`, `retry_count`, and `next_retry_at_utc`.
-- Any failed run must expose a human-readable failure summary plus structured machine-readable diagnostics linked to the same `run_id`.
+- The original observability target called for `run_id`, `stage`, `status`, `started_at_utc`, `ended_at_utc`, `duration_ms`, `source_section`, `source_record_ref`, `error_code`, `error_message`, `exception_type`, `stack_trace`, `retry_count`, and `next_retry_at_utc`. This is a historical target, not the emitted field schema.
+- Current timeline events contain `stage`, `status`, `at_utc`, and optional stage-specific `details`. Ingestion failures use `details.error_type`, `details.error_message`, and `details.traceback`; duration, source, and retry details depend on the stage.
+- Run detail responses supply `ingestion_run_id`, `started_at_utc`, `ended_at_utc`, `duration_ms`, `error_code`, `error_message`, and the `diagnostics` array in the run envelope. Run IDs and timing fields are not repeated in every timeline event. See section 9.4 for retry fields.
 
 ---
 
@@ -306,7 +320,8 @@ Goal: freeze deterministic list endpoint behavior while keeping page-size defaul
 
 Global list query contract:
 - Query params: `limit`, `offset`, `sort_by`, `sort_dir`.
-- Configurable defaults: `API_DEFAULT_LIMIT=50`, `API_MAX_LIMIT=200`, `API_DEFAULT_SORT_DIR=asc`.
+- Configurable defaults: `API_DEFAULT_LIMIT=50`, `API_MAX_LIMIT=200`.
+- Sort direction defaults are endpoint-specific code constants; `API_DEFAULT_SORT_DIR` is not a supported setting.
 - Validation:
 	- `limit < 1` -> `400 INVALID_PAGINATION`
 	- `offset < 0` -> `400 INVALID_PAGINATION`
@@ -350,15 +365,15 @@ Paginated resource-list response envelope:
 - `items`: array
 - `page`: `{limit, offset, returned, total, has_more, applied_limit}`
 - `sort`: `{sort_by, sort_dir}`
-- `filters`: normalized applied filters
+- `filters`: requested filter values serialized by the endpoint; these are not guaranteed to reflect database normalization. For example, instrument `search` is echoed as supplied, while the repository strips whitespace and treats a blank result as no search filter.
 
 This shared envelope applies to paginated resource lists; report endpoints have their
 own schemas. For example, reconciliation JSON exposes `schema_version`, `tolerance_policy`,
 `items`, and `filters`. Consult the running OpenAPI documentation for each endpoint.
 
 Contract boundary:
-- Runtime-configurable: `API_DEFAULT_LIMIT`, `API_MAX_LIMIT`, `API_DEFAULT_SORT_DIR`.
-- Code-level constants: per-endpoint allowed sort/filter fields and default sort keys.
+- Runtime-configurable: `API_DEFAULT_LIMIT`, `API_MAX_LIMIT`.
+- Code-level constants: per-endpoint allowed sort/filter fields, default sort keys, and default sort directions.
 
 ---
 
