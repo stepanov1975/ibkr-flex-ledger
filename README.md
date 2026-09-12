@@ -159,6 +159,35 @@ The published application port accepts direct LAN access at
 `http://<server-LAN-IP>:8000` (or the configured `APPLICATION_PORT`). The application has
 no in-app authentication; this deployment uses the trusted LAN as its access boundary.
 
+### Published container image
+
+Stable GitHub releases publish the existing Dockerfile to
+`ghcr.io/stepanov1975/ibkr-flex-ledger` for `linux/amd64`. Use a release tag for
+deployment; `latest` follows the latest stable GitHub release.
+
+```bash
+docker pull ghcr.io/stepanov1975/ibkr-flex-ledger:v1.1.0
+```
+
+To use the image with the existing Compose database and `.env` configuration,
+save this as `compose.release.yml`:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/stepanov1975/ibkr-flex-ledger:v1.1.0
+```
+
+Then run `docker compose -f docker-compose.yml -f compose.release.yml up -d --no-build --pull always`.
+Startup applies database migrations, as with a local build.
+
+The `Publish container image` workflow checks migrations and `/health` against
+a temporary PostgreSQL database before publishing. Its manual run accepts an
+existing stable release tag to retry publishing. The workflow summary records
+the image digest. New GHCR packages default to private; the owner can make the
+package public in GitHub package settings. Private pulls require `docker login
+ghcr.io` with a token that has `read:packages` permission.
+
 ### UI date and time display
 
 The dashboard displays date-only values as `dd/mm/yy` and timestamps as
