@@ -609,9 +609,9 @@ Same-day chains follow their holding dependencies; cyclic or competing
 transfers require accounting support. A single credited distribution offers **Enter distribution basis**, followed
 by preview and apply. Blank basis is never zero. This treatment records an independent
 received security; allocating basis out of the parent still requires accounting support.
-The preview shows the latest portfolio balance before and after the action. Earlier
-daily snapshot comparisons are expandable history of the same action, not repeated
-distributions or transfers; all affected snapshots are still recalculated on apply.
+The preview shows one event with its IBKR action ID, event date, security, quantity,
+proposed basis treatment and broker note. All affected snapshots and lots are still
+recalculated on apply.
 No synthetic trades are created. Migration `20260911_18` stores source-bound resolutions
 and permits corporate-action opening lots.
 

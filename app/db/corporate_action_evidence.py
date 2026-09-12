@@ -9,6 +9,8 @@ from uuid import UUID
 
 from sqlalchemy import Connection, text
 
+from app.domain.flex_parsing import domain_flex_normalize_optional_text
+
 
 def action_evidence(connection: Connection, event_id: UUID) -> dict[str, Any]:
     event = connection.execute(text(
@@ -17,7 +19,7 @@ def action_evidence(connection: Connection, event_id: UUID) -> dict[str, Any]:
     ), {'id': event_id}).mappings().one()
     rows = connection.execute(text(
         "SELECT DISTINCT ON (r.source_payload::text) r.source_payload::text AS exact_payload, "
-        "r.source_payload, i.instrument_id, i.currency AS instrument_currency, i.asset_category "
+        "r.source_payload, i.instrument_id, i.symbol AS instrument_symbol, i.currency AS instrument_currency, i.asset_category "
         "FROM raw_record r LEFT JOIN instrument i "
         "ON i.account_id=r.account_id AND i.conid=r.source_payload->>'conid' "
         "WHERE r.account_id=:account_id AND r.section_name='CorporateActions' AND "
@@ -30,7 +32,8 @@ def action_evidence(connection: Connection, event_id: UUID) -> dict[str, Any]:
     for row in rows:
         payload = row['source_payload']
         legs.append({
-            'symbol': payload.get('symbol'), 'conid': payload.get('conid'),
+            'symbol': domain_flex_normalize_optional_text(payload.get('symbol')) or row['instrument_symbol'] or payload.get('conid'),
+            'conid': payload.get('conid'),
             'quantity': payload.get('quantity'), 'currency': payload.get('currency'),
             'cost_basis': payload.get('costBasis') or None,
             'report_date_local': _date(payload.get('reportDate')),
