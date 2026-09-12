@@ -674,6 +674,45 @@ def test_distribution_preview_uses_event_currency_and_explicit_zero_basis() -> N
     assert context.eval("nodes['resolution-event'].children[0].children[5].textContent") == 'EUR 0'
 
 
+def test_distribution_guidance_tracks_preview_and_input_changes() -> None:
+    context = _resolution_ui_context()
+    context.eval("nodes.cases.children[1].children.at(-1).children[0].onclick()")
+    assert context.eval("nodes['apply-resolution'].disabled") is True
+    guidance = context.eval("nodes['resolution-summary'].textContent")
+    assert 'Preview changes' in guidance
+    assert 'enable Apply treatment' in guidance
+
+    context.eval("nodes['distribution-basis'].value='0';nodes['resolution-note'].value='Broker confirms zero basis'")
+    for field in ('distribution-basis', 'resolution-note'):
+        context.eval("hold=true;nodes['preview-resolution'].onclick()")
+        _drain_ui_jobs(context)
+        assert 'Preparing preview' in context.eval("nodes['resolution-summary'].textContent")
+        assert context.eval("nodes['apply-resolution'].disabled") is True
+        context.eval("release();hold=false")
+        _drain_ui_jobs(context)
+        assert context.eval("nodes['apply-resolution'].disabled") is False
+        assert 'click Apply treatment to save' in context.eval("nodes['resolution-summary'].textContent")
+
+        context.eval("nodes[" + json.dumps(field) + "].oninput()")
+        assert context.eval("nodes['apply-resolution'].disabled") is True
+        assert 'enable Apply treatment' in context.eval("nodes['resolution-summary'].textContent")
+
+    context.eval("failure='Preview is stale';nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-error'].textContent") == 'Preview is stale'
+    assert 'enable Apply treatment' in context.eval("nodes['resolution-summary'].textContent")
+
+    context.eval("failure=null;nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    context.eval("hold=true;nodes['apply-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert 'Applying treatment' in context.eval("nodes['resolution-summary'].textContent")
+    context.eval("release();hold=false")
+    _drain_ui_jobs(context)
+    assert context.eval("requests.at(-1).body.cost_basis") == '0'
+    assert context.eval("nodes['resolution-editor'].hidden") is True
+
+
 def test_distribution_preview_shows_one_event_despite_daily_snapshot_history() -> None:
     context = _resolution_ui_context()
     context.eval("""
