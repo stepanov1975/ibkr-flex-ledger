@@ -1,7 +1,10 @@
 ## Project requirements
-1. Always read README.md at the start of the session to load architectural decisions, conventions, and patterns.
+1. Read [README.md](../README.md) for product/deployment context and the
+   [technical reference](../docs/technical_reference.md) for architecture, contracts, and
+   conventions. Follow [AGENTS.md](../AGENTS.md); use the [documentation index](../docs/README.md)
+   to distinguish current guidance from historical plans.
 2. Use Tree of Thoughts (ToT) for implementation of new features or complex bug fixes.
-3. When bug discovered/need to be fixed, if this bug can be reproduced using test, **first** create test thatreproduces bug, run test see it fails, fix bug, run test see it pass.
+3. When a bug can be reproduced in a test, **first** write the regression test, verify that it fails, fix the bug, and verify that it passes.
 4. Code under `references/` is reference material only. It is not part of this application runtime. Reuse ideas and patterns only; implement project-native code in the main application modules.
 
 ### No Backward Compatibility Code Needed
@@ -113,7 +116,7 @@ Important! When creating or running tests **always read `testing.md` for detaile
 
 ## LINTING 
 1. **Pre-Completion Gate:** Code is NOT complete until linting passes with zero errors.
-2. **Always** read `linting.md` for detailed JavaScript and Python linting protocols.
+2. **Always** read `linting.md` for the Python linting and type-checking protocols.
 3. **Never** run linting on code in `references/` directory
 
 ## Stale File Handling
@@ -122,9 +125,10 @@ In this case, halt implementation of the current task and ask from user to resta
 
 # Persistent Memory Instructions (ai_memory.md)
 
-Treat `ai_memory.md` as your long-term project memory.
+Treat [ai_memory.md](../ai_memory.md) as a dated decision log. Historical entries do not
+override the maintained technical reference or contracts.
 1. **Initialization**: Always read `ai_memory.md` at the start of a session to load architectural decisions, conventions, and patterns.
-2. **Updates**: After significant changes (bug fixes, new patterns, API choices), update the file. Add new insights or prune obsolete ones.
+2. **Updates**: After significant changes (bug fixes, new patterns, API choices), update the file. Add new insights and mark superseded decisions with a dated correction; preserve useful rationale.
 3. **Criteria**: Store only *durable* engineering knowledge (Why a decision was made, how a complex module works). Avoid chatter.
 4. **Conflict Resolution**: If `ai_memory.md` conflicts with the actual codebase, trust the code and update the memory file.
 5. **Format**: `- [YYYY-MM-DD] {TAG} :: Concise description`.
@@ -151,29 +155,10 @@ Use this format for non-obvious logic:
 # FSN[YYYY-MM-DD]: <DO NOT ... / ALWAYS ...> (Instruction for AI/Devs)
 # Context: <Why the "obvious" fix breaks things> | Symptom: <What fails>
 # Guard: <Runtime check> | Test: <pytest_name>
+```
 
-# SQLite Best Practices
+## Database guidance
 
-## General Principles
-- Prioritize using parameterized queries (e.g., `?` placeholders) to prevent SQL injection vulnerabilities. Never use f-strings or string formatting to insert values directly into SQL statements.
-- Always manage database connections properly. In Python, use a `with` statement to ensure the connection is automatically closed.
-- For multiple related database operations, wrap them in a transaction (`BEGIN TRANSACTION; ... COMMIT;`) to ensure atomicity.
-- `sqlite3.connect()` calls MUST include NFS-safe settings: `timeout=30.0` parameter and execute these PRAGMAs: `busy_timeout=30000` (tolerate NFS lock latency), `synchronous=FULL` (max durability), `locking_mode=EXCLUSIVE` (single-host optimization), `mmap_size=0` (disable mmap on NFS), `wal_autocheckpoint=1000` (manage WAL growth).
-- Production database resides on NFS mount with single-host access; all connections require these settings to prevent "disk I/O error" under concurrent access.
-
-## Naming Conventions
-- **Table Names:** Use plural nouns in `snake_case`. For example: `users`, `blog_posts`, `product_orders`.
-- **Column Names:** Use singular nouns in `snake_case`. For example: `first_name`, `email_address`, `order_date`.
-- **Primary Keys:**
-    - Prefer a simple `id` for the primary key column.
-    - Use `INTEGER PRIMARY KEY` to create an auto-incrementing alias for the `rowid`.
-- **Foreign Keys:**
-    - Name foreign key columns using the singular name of the referenced table followed by `_id`.
-    - For a table named `users`, the foreign key in the `posts` table should be `user_id`.
-
-## Schema and Data Types
-- Use the most specific and appropriate data types available in SQLite: `INTEGER`, `TEXT`, `REAL`, `BLOB`.
-- Define `NOT NULL` constraints for columns that must always have a value.
-- Use `DEFAULT` constraints for columns that should have a default value if one isn't provided.
-- Add `UNIQUE` constraints to columns that must not contain duplicate values, like usernames or email addresses.
-- When creating tables, explicitly define foreign key constraints to enforce referential integrity. Ensure `PRAGMA foreign_keys = ON;` is executed for each connection.
+Use the [PostgreSQL architecture rules](../docs/architecture_conventions.md) and
+[migration guide](../docs/migrations.md). Superseded SQLite/NFS advice is retained only
+in the [historical archive](../docs/archive/sqlite_guidance.md).

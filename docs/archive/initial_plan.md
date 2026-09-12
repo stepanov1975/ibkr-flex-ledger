@@ -1,3 +1,8 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../README.md).
+> Paths in the original text are relative to the repository root unless stated otherwise.
+
 # IBKR Trade Ledger & Portfolio Insights (Homelab) — MVP Spec
 
 Implementation note:

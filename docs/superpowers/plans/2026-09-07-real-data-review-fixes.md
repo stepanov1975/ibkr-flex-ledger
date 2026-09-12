@@ -1,3 +1,8 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../../README.md).
+> Commands, line numbers, checkboxes, and validation results describe the recorded work, not the current release.
+
 # Real-data review fixes implementation plan
 
 Approved scope: user requested fixes to the reassessed review report. Retain the single-account USD architecture and existing uncommitted work. Fix observed report defects (#4/#6/#7), retained security issue (#1), and small operational code issues (#8/#9/#10). Exclude withdrawn input-format scenarios (#2/#3/#5). Outbound alerts remain dashboard-only per user instruction.

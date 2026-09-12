@@ -59,7 +59,7 @@ All code in `references/` is for reference only.
 - Avoid mixing parser, storage, analytics, and UI logic in one module.
 - Avoid direct database calls outside the dedicated db layer.
 - Avoid SQLite patterns from references for production path, because this project is PostgreSQL-first.
-- Avoid broad scope from options-heavy analytics in MVP; keep stocks-first boundaries.
+- Keep options-heavy analytics scoped to explicitly requested features; preserve the stocks-first boundaries and existing supported option behavior.
 - Avoid direct code copy from references; implement native modules aligned with local architecture.
 
 ## License notes before borrowing code

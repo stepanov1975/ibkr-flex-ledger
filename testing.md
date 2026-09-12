@@ -23,7 +23,10 @@ Run one module or test while iterating:
 ```
 
 Database integration tests use the configured `DATABASE_URL`. The local Docker
-PostgreSQL guidance is documented in `docs/migrations.md`.
+PostgreSQL guidance is documented in the [migration guide](docs/migrations.md).
+Database-dependent tests may skip without a reachable server; a passing general suite
+alone does not satisfy the [seeded release gate](docs/technical_reference.md#release-quality-gate-task-13).
+That gate requires a PostgreSQL user able to create and drop isolated test databases.
 
 ## Handling failures
 

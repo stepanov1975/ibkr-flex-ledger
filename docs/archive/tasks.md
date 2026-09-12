@@ -1,3 +1,8 @@
+> Historical record. Preserved for design rationale and implementation evidence;
+> it does not define current behavior or an active work queue. See the
+> [documentation index](../README.md).
+> Paths in the original text are relative to the repository root unless stated otherwise.
+
 # Task Plan
 Implement Task 7 from `implementation_task_list.md`: deliver a stocks-first FIFO ledger and deterministic daily PnL snapshots using existing canonical event data and Task 6 valuation/FX outputs. Snapshot computation must run automatically at the end of successful ingestion, and snapshot read APIs must be exposed in Task 7. The implementation should extend current project-native contracts (not reference code), keep SQL in `app/db` only, and reuse existing orchestrator patterns used by ingestion/reprocess. Work must proceed one milestone at a time, with each milestone ending in a verifiable artifact (tests, interfaces, service behavior, or wiring). If interrupted, resume by selecting the first subtask with `status: planned`, setting it to `in progress`, completing all checklist items, then marking it `done` and filling its Summary.
 

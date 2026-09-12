@@ -116,3 +116,10 @@ Starting Compose does not install scheduled jobs. On a Linux host with systemd, 
 PostgreSQL data lives in the persistent `postgres_data` volume. Additional volumes retain archived database logs, backups, and diagnostics. `docker compose down` preserves volumes; adding `--volumes` deletes them.
 
 Follow the [operations guide](docs/operations.md) for verified backups, restore procedures, alerts, and recovery. Back up before upgrading. Update your checkout to the desired release and rerun `docker compose up -d --build`, or update the image tag and rerun the published-image command. Startup applies migrations; restart any separately running import or replay workers with the same version. See [migration guidance](docs/migrations.md) for maintenance-window considerations.
+
+## Project documentation
+
+Start with the [documentation index](docs/README.md) for contributor guidance, accounting
+and API contracts, operations, and design history. The [technical reference](docs/technical_reference.md)
+describes the current implementation. Early MVP plans are preserved in the
+[archive](docs/archive/README.md); they no longer define the application's scope.
