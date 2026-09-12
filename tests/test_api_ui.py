@@ -587,6 +587,8 @@ def test_transfer_preview_uses_broker_legs_and_applies_once() -> None:
     }
     assert context.eval("nodes['apply-resolution'].disabled") is False
     assert 'NEW' in context.eval("nodes['resolution-snapshots'].textContent")
+    assert context.eval("nodes['resolution-history'].hidden") is True
+    assert context.eval("nodes['resolution-impact'].hidden") is False
     assert 'USD 120' in context.eval("nodes['resolution-snapshots'].textContent")
     assert 'N/A' in context.eval("nodes['resolution-snapshots'].textContent")
     assert context.eval("nodes['resolution-lots'].children[0].children[1].textContent") == 'OLD'
@@ -668,6 +670,65 @@ def test_resolution_lot_basis_uses_functional_currency_for_foreign_security() ->
     context.eval("delete preview.lots_after[0].currency;nodes['preview-resolution'].onclick()")
     _drain_ui_jobs(context)
     assert context.eval("nodes['resolution-lots'].children[1].children[3].textContent") == 'USD 120'
+
+
+def test_distribution_preview_shows_latest_balance_with_collapsed_daily_history() -> None:
+    context = _resolution_ui_context()
+    context.eval("""
+        items[1].symbol='DVLT.CNT';items[1].report_date_local='2026-02-23';
+        Object.assign(items[1].broker_legs[0],{symbol:'DVLT.CNT',quantity:'5',currency:'USD',report_date_local:'2026-02-23'});
+        preview.summary='Record 5 credited units with total cost basis 25 USD.';
+        preview.snapshots=['2026-09-10','2026-09-11','2026-09-09'].map(day=>({
+          ...preview.snapshots[0],symbol:'DVLT.CNT',report_date_local:day,
+          before:{...preview.snapshots[0].before,position_qty:'5'},
+          after:{...preview.snapshots[0].after,position_qty:'5',cost_basis:'25'}}));
+        preview.lots_before=[];
+        preview.lots_after=[{symbol:'DVLT.CNT',remaining_quantity:'5',cost_basis_remaining:'25',currency:'USD',
+          opened_at_utc:'2026-02-23T00:00:00Z'}];
+        nodes.cases.children[1].children.at(-1).children[0].onclick();
+        nodes['distribution-basis'].value='25';nodes['resolution-note'].value='Verified broker basis';
+        nodes['preview-resolution'].onclick();
+    """)
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-snapshots'].children.length") == 2
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[1].textContent") == '11/09/26'
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[3].textContent") == '5'
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[4].textContent") == 'USD 25'
+    assert '23/02/26' in context.eval("nodes['resolution-summary'].textContent")
+    assert context.eval("nodes['resolution-history'].hidden") is False
+    assert context.eval("nodes['resolution-history'].open") is False
+    assert '2' in context.eval("nodes['resolution-history-summary'].textContent")
+    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
+    history = context.eval("nodes['resolution-history-snapshots'].textContent")
+    assert '10/09/26' in history and '09/09/26' in history and '11/09/26' not in history
+    assert context.eval("nodes['resolution-lots'].children.length") == 1
+    context.eval("nodes['resolution-history'].open=true;nodes['preview-resolution'].onclick()")
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-snapshots'].children.length") == 2
+    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
+    assert context.eval("nodes['resolution-history'].open") is False
+    context.eval("nodes['distribution-basis'].oninput()")
+    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 0
+    assert context.eval("nodes['resolution-impact'].hidden") is True
+    assert context.eval("nodes['apply-resolution'].disabled") is True
+
+
+def test_resolution_preview_preserves_both_securities_in_latest_comparison() -> None:
+    context = _resolution_ui_context()
+    context.eval("""
+        const destination=preview.snapshots[0];
+        const source={...destination,symbol:'OLD',before:destination.after,after:destination.before};
+        preview.snapshots=[{...source,report_date_local:'2026-08-20'},
+          {...destination,report_date_local:'2026-08-20'},source,destination];
+        nodes.cases.children[0].children.at(-1).children[0].onclick();
+        nodes['resolution-note'].value='Verified transfer';nodes['preview-resolution'].onclick();
+    """)
+    _drain_ui_jobs(context)
+    assert context.eval("nodes['resolution-snapshots'].children.length") == 4
+    assert context.eval("nodes['resolution-snapshots'].children[1].children[0].textContent") == 'OLD'
+    assert context.eval("nodes['resolution-snapshots'].children[3].children[0].textContent") == 'NEW'
+    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
+    assert '1 date' in context.eval("nodes['resolution-history-summary'].textContent")
 
 
 def test_resolution_preview_distinguishes_absent_snapshot_from_zero_position() -> None:
