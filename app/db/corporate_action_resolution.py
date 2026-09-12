@@ -54,7 +54,7 @@ class SQLAlchemyCorporateActionResolutionService:
         with self._engine.connect() as connection, connection.begin() as transaction:
             SQLAlchemySplitCorrectionService(self._engine, self._account_id)._lock_account(connection)
             case = connection.execute(text(
-                "SELECT c.*, e.account_id, e.requires_manual, e.source_raw_record_id, e.report_date_local "
+                "SELECT c.*, e.account_id, e.action_id, e.requires_manual, e.source_raw_record_id, e.report_date_local "
                 "FROM corporate_action_manual_case c JOIN event_corp_action e USING(event_corp_action_id) "
                 "WHERE c.case_id=:id AND e.account_id=:account_id FOR UPDATE OF c, e"
             ), {'id': case_id, 'account_id': self._account_id}).mappings().one_or_none()
@@ -110,6 +110,14 @@ class SQLAlchemyCorporateActionResolutionService:
                                   'currency': row['currency'], 'before': {field: old.get(field) for field in fields},
                                   'after': {field: row[field] for field in fields}})
             result = {'case_id': str(case_id), 'treatment': treatment,
+                      'event': {'event_corp_action_id': str(case['event_corp_action_id']), 'action_id': case['action_id'],
+                                'report_date_local': movement['report_date_local'],
+                                'source_symbol': next((leg['symbol'] for leg in evidence['broker_legs']
+                                                       if leg['instrument_id'] == movement['source_instrument_id']), None),
+                                'destination_symbol': next(leg['symbol'] for leg in evidence['broker_legs']
+                                                           if leg['instrument_id'] == movement['destination_instrument_id']),
+                                'quantity': movement['quantity'], 'currency': movement['currency'],
+                                'cost_basis': cost_basis, 'note': note.strip()},
                       'summary': ('Transfer the matched holding with its existing FIFO basis and acquisition dates.' if treatment == 'security_transfer'
                                   else f"Record {movement['quantity']} credited units with total cost basis {cost_basis} {movement['currency']}; parent basis stays unchanged."),
                       'snapshots': snapshots, 'lots_before': lots_before, 'lots_after': _lots(connection, params)}

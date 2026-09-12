@@ -114,6 +114,13 @@ def test_resolution_preview_rolls_back_and_apply_rebuilds_with_replay(database, 
     assert response.status_code == 200, response.text
     preview = response.json()
     assert preview['applied'] is False
+    assert 'event' in preview
+    assert preview['event'] == {
+        'event_corp_action_id': case['event_corp_action_id'], 'action_id': 'MOVE',
+        'report_date_local': '2026-08-21', 'source_symbol': 'SEED' if kind == 'IC' else None,
+        'destination_symbol': 'NEXT', 'quantity': '2' if kind == 'IC' else '5',
+        'currency': 'USD', 'cost_basis': body.get('cost_basis'), 'note': body['note'],
+    }
     assert _state(database) == before
     after_lots = [lot for lot in preview['lots_after'] if lot['symbol'] == 'NEXT' and Decimal(lot['remaining_quantity'])]
     assert sum(Decimal(lot['remaining_quantity']) for lot in after_lots) == (2 if kind == 'IC' else 5)

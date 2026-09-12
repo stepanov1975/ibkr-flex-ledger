@@ -1,6 +1,7 @@
 """Portfolio and operations dashboard route regression coverage."""
 
 import json
+import re
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -485,14 +486,17 @@ def _resolution_ui_context() -> quickjs.Context:
     """Run the shipped operations UI with only browser/network boundaries replaced."""
     application = FastAPI()
     application.include_router(api_create_ui_router())
-    script = TestClient(application).get("/ui/operations").text.split("<script>", 1)[1].split("</script>", 1)[0]
+    html = TestClient(application).get("/ui/operations").text
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
     context = quickjs.Context()
+    context.eval('const elementIds=' + json.dumps(re.findall(r'id="([^"]+)"', html)))
     context.eval("""
         function node(){return {children:[],_text:'',value:'',checked:false,disabled:false,hidden:false,
           get textContent(){return this._text+this.children.map(child=>child.textContent).join(' ')},
           set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this._text='';this.children=[]}}}
-        const nodes={};const document={getElementById:id=>nodes[id]||(nodes[id]=node()),createElement:()=>node()};
+        const nodes=Object.fromEntries(elementIds.map(id=>[id,node()]));
+        const document={getElementById:id=>nodes[id]||null,createElement:()=>node()};
         const Intl={DateTimeFormat:function(){return {format:value=>'21/08/26 12:00'}},
           NumberFormat:function(locale,options){return {format:value=>options.currency+' '+value}}};
         const console={error:()=>{}};
@@ -514,6 +518,9 @@ def _resolution_ui_context() -> quickjs.Context:
           {...common,case_id:'handled',symbol:'DONE',action_type:'IC',review_state:'handled',requires_manual:false,
            resolution_note:'Confirmed by statement',review_reason:'Already handled',required_check:'',resolution_options:[],broker_legs:[]}];
         const preview={case_id:'transfer',treatment:'security_transfer',summary:'Carry 10 units and USD 120 basis from OLD to NEW.',
+          event:{event_corp_action_id:'event-transfer',action_id:'MOVE',report_date_local:'2026-08-21',
+            source_symbol:'OLD',destination_symbol:'NEW',quantity:'10',currency:'USD',cost_basis:null,
+            note:'Broker notice confirms unchanged ownership'},
           preview_token:'verified-inputs',applied:false,snapshots:[{symbol:'NEW',report_date_local:'2026-08-21',currency:'USD',
             before:{position_qty:'0',cost_basis:'0',realized_pnl:'0',unrealized_pnl:null,total_pnl:null,provisional:true},
             after:{position_qty:'10',cost_basis:'120',realized_pnl:'0',unrealized_pnl:'30',total_pnl:'30',provisional:false}}],
@@ -586,14 +593,11 @@ def test_transfer_preview_uses_broker_legs_and_applies_once() -> None:
         'treatment': 'security_transfer', 'note': 'Broker notice confirms unchanged ownership',
     }
     assert context.eval("nodes['apply-resolution'].disabled") is False
-    assert 'NEW' in context.eval("nodes['resolution-snapshots'].textContent")
-    assert context.eval("nodes['resolution-history'].hidden") is True
-    assert context.eval("nodes['resolution-impact'].hidden") is False
-    assert 'USD 120' in context.eval("nodes['resolution-snapshots'].textContent")
-    assert 'N/A' in context.eval("nodes['resolution-snapshots'].textContent")
-    assert context.eval("nodes['resolution-lots'].children[0].children[1].textContent") == 'OLD'
-    assert context.eval("nodes['resolution-lots'].children[1].children[1].textContent") == 'NEW'
-    assert '2025-01-02' in context.eval("nodes['resolution-lots'].textContent")
+    assert context.eval("nodes['resolution-event-preview'].hidden") is False
+    assert context.eval("nodes['resolution-event'].children.length") == 1
+    event_text = context.eval("nodes['resolution-event'].textContent")
+    for value in ('MOVE', '21/08/26', 'OLD', 'NEW', '10', 'Carry existing FIFO basis', 'Broker notice confirms unchanged ownership'):
+        assert value in event_text
     context.eval("hold=true;nodes['apply-resolution'].onclick();nodes['apply-resolution'].onclick()")
     _drain_ui_jobs(context)
     assert context.eval("requests.length") == 2
@@ -629,7 +633,7 @@ def test_distribution_requires_explicit_basis_and_invalidates_changed_preview() 
     _drain_ui_jobs(context)
     assert context.eval("requests.length") == 1
     assert context.eval("nodes['apply-resolution'].disabled") is True
-    assert context.eval("nodes['resolution-snapshots'].children.length") == 0
+    assert context.eval("nodes['resolution-event'].children.length") == 0
     context.eval("hold=true;nodes['preview-resolution'].onclick();nodes['resolution-note'].oninput();release();hold=false")
     _drain_ui_jobs(context)
     assert context.eval("nodes['apply-resolution'].disabled") is True
@@ -655,98 +659,62 @@ def test_distribution_requires_explicit_basis_and_invalidates_changed_preview() 
     assert context.eval("nodes['resolution-editor'].hidden") is True
 
 
-def test_resolution_lot_basis_uses_functional_currency_for_foreign_security() -> None:
+def test_distribution_preview_uses_event_currency_and_explicit_zero_basis() -> None:
     context = _resolution_ui_context()
     context.eval("""
-        for(const leg of items[0].broker_legs)leg.currency='EUR';
-        nodes.cases.children[0].children.at(-1).children[0].onclick();
-        nodes['resolution-note'].value='Verified foreign security transfer';
+        preview.treatment='distribution';
+        Object.assign(preview.event,{action_id:'DISTRIBUTION',source_symbol:null,destination_symbol:'SPIN',
+          quantity:'2',currency:'EUR',cost_basis:'0',note:'Broker confirms zero basis'});
+        nodes.cases.children[1].children.at(-1).children[0].onclick();
+        nodes['distribution-basis'].value='0';nodes['resolution-note'].value='Broker confirms zero basis';
         nodes['preview-resolution'].onclick();
     """)
     _drain_ui_jobs(context)
-    assert 'EUR' in context.eval("nodes['resolution-legs'].textContent")
-    assert context.eval("nodes['resolution-lots'].children[0].children[3].textContent") == 'USD 120'
-    assert context.eval("nodes['resolution-lots'].children[1].children[3].textContent") == 'USD 120'
-    context.eval("delete preview.lots_after[0].currency;nodes['preview-resolution'].onclick()")
-    _drain_ui_jobs(context)
-    assert context.eval("nodes['resolution-lots'].children[1].children[3].textContent") == 'USD 120'
+    assert context.eval("nodes['resolution-event'].children.length") == 1
+    assert context.eval("nodes['resolution-event'].children[0].children[5].textContent") == 'EUR 0'
 
 
-def test_distribution_preview_shows_latest_balance_with_collapsed_daily_history() -> None:
+def test_distribution_preview_shows_one_event_despite_daily_snapshot_history() -> None:
     context = _resolution_ui_context()
     context.eval("""
         items[1].symbol='DVLT.CNT';items[1].report_date_local='2026-02-23';
         Object.assign(items[1].broker_legs[0],{symbol:'DVLT.CNT',quantity:'5',currency:'USD',report_date_local:'2026-02-23'});
-        preview.summary='Record 5 credited units with total cost basis 25 USD.';
+        preview.treatment='distribution';preview.summary='Record 5 credited units with total cost basis 25 USD.';
+        Object.assign(preview.event,{action_id:'161624952',report_date_local:'2026-02-23',source_symbol:null,
+          destination_symbol:'DVLT.CNT',quantity:'5',cost_basis:'25',note:'Verified broker basis'});
         preview.snapshots=['2026-09-10','2026-09-11','2026-09-09'].map(day=>({
-          ...preview.snapshots[0],symbol:'DVLT.CNT',report_date_local:day,
-          before:{...preview.snapshots[0].before,position_qty:'5'},
-          after:{...preview.snapshots[0].after,position_qty:'5',cost_basis:'25'}}));
-        preview.lots_before=[];
-        preview.lots_after=[{symbol:'DVLT.CNT',remaining_quantity:'5',cost_basis_remaining:'25',currency:'USD',
-          opened_at_utc:'2026-02-23T00:00:00Z'}];
+          ...preview.snapshots[0],symbol:'DVLT.CNT',report_date_local:day}));
         nodes.cases.children[1].children.at(-1).children[0].onclick();
         nodes['distribution-basis'].value='25';nodes['resolution-note'].value='Verified broker basis';
         nodes['preview-resolution'].onclick();
     """)
     _drain_ui_jobs(context)
-    assert context.eval("nodes['resolution-snapshots'].children.length") == 2
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[1].textContent") == '11/09/26'
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[3].textContent") == '5'
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[4].textContent") == 'USD 25'
-    assert '23/02/26' in context.eval("nodes['resolution-summary'].textContent")
-    assert context.eval("nodes['resolution-history'].hidden") is False
-    assert context.eval("nodes['resolution-history'].open") is False
-    assert '2' in context.eval("nodes['resolution-history-summary'].textContent")
-    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
-    history = context.eval("nodes['resolution-history-snapshots'].textContent")
-    assert '10/09/26' in history and '09/09/26' in history and '11/09/26' not in history
-    assert context.eval("nodes['resolution-lots'].children.length") == 1
-    context.eval("nodes['resolution-history'].open=true;nodes['preview-resolution'].onclick()")
+    assert context.eval("Object.hasOwn(nodes,'resolution-event')") is True
+    assert context.eval("nodes['resolution-event'].children.length") == 1
+    assert json.loads(context.eval("JSON.stringify(nodes['resolution-event'].children[0].children.map(cell=>cell.textContent))")) == [
+        '161624952', '23/02/26', 'Distribution', 'DVLT.CNT', '5', 'USD 25', 'Verified broker basis',
+    ]
+    for removed_id in ('resolution-snapshots', 'resolution-history', 'resolution-history-snapshots', 'resolution-lots'):
+        assert context.eval('elementIds.includes(' + json.dumps(removed_id) + ')') is False
+    context.eval("nodes['preview-resolution'].onclick()")
     _drain_ui_jobs(context)
-    assert context.eval("nodes['resolution-snapshots'].children.length") == 2
-    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
-    assert context.eval("nodes['resolution-history'].open") is False
+    assert context.eval("nodes['resolution-event'].children.length") == 1
     context.eval("nodes['distribution-basis'].oninput()")
-    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 0
-    assert context.eval("nodes['resolution-impact'].hidden") is True
+    assert context.eval("nodes['resolution-event'].children.length") == 0
+    assert context.eval("nodes['resolution-event-preview'].hidden") is True
     assert context.eval("nodes['apply-resolution'].disabled") is True
 
 
-def test_resolution_preview_preserves_both_securities_in_latest_comparison() -> None:
+def test_resolution_preview_renders_current_server_event_instead_of_stale_case() -> None:
     context = _resolution_ui_context()
     context.eval("""
-        const destination=preview.snapshots[0];
-        const source={...destination,symbol:'OLD',before:destination.after,after:destination.before};
-        preview.snapshots=[{...source,report_date_local:'2026-08-20'},
-          {...destination,report_date_local:'2026-08-20'},source,destination];
+        Object.assign(preview.event,{report_date_local:'2026-08-22',source_symbol:'UPDATED.OLD',
+          destination_symbol:'UPDATED.NEW',quantity:'12',note:'Verified updated event'});
         nodes.cases.children[0].children.at(-1).children[0].onclick();
-        nodes['resolution-note'].value='Verified transfer';nodes['preview-resolution'].onclick();
+        nodes['resolution-note'].value='Verified updated event';nodes['preview-resolution'].onclick();
     """)
     _drain_ui_jobs(context)
-    assert context.eval("nodes['resolution-snapshots'].children.length") == 4
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[0].textContent") == 'OLD'
-    assert context.eval("nodes['resolution-snapshots'].children[3].children[0].textContent") == 'NEW'
-    assert context.eval("nodes['resolution-history-snapshots'].children.length") == 4
-    assert '1 date' in context.eval("nodes['resolution-history-summary'].textContent")
-
-
-def test_resolution_preview_distinguishes_absent_snapshot_from_zero_position() -> None:
-    context = _resolution_ui_context()
-    context.eval("""
-        preview.snapshots[0].before={position_qty:null,cost_basis:null,realized_pnl:null,
-          unrealized_pnl:null,total_pnl:null,provisional:null};
-        preview.lots_after.push({symbol:'OLD',remaining_quantity:'0',cost_basis_remaining:'0',
-          currency:'USD',opened_at_utc:'2025-01-02T10:00:00Z'});
-        nodes.cases.children[0].children.at(-1).children[0].onclick();
-        nodes['resolution-note'].value='Verified opening of destination and closure of source';
-        nodes['preview-resolution'].onclick();
-    """)
-    _drain_ui_jobs(context)
-    assert context.eval("nodes['resolution-snapshots'].children[0].children[3].textContent") == 'N/A'
-    assert context.eval("nodes['resolution-snapshots'].children[0].children[8].textContent") == 'N/A'
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[3].textContent") == '10'
-    assert context.eval("nodes['resolution-snapshots'].children[1].children[8].textContent") == 'Final'
-    assert context.eval("nodes['resolution-lots'].children[2].children[1].textContent") == 'OLD'
-    assert context.eval("nodes['resolution-lots'].children[2].children[2].textContent") == '0'
-    assert context.eval("nodes['resolution-lots'].children[2].children[3].textContent") == 'USD 0'
+    assert context.eval("nodes['resolution-event'].children.length") == 1
+    assert context.eval("nodes['resolution-event'].children[0].children[1].textContent") == '22/08/26'
+    assert context.eval("nodes['resolution-event'].children[0].children[3].textContent") == 'UPDATED.OLD → UPDATED.NEW'
+    assert context.eval("nodes['resolution-event'].children[0].children[4].textContent") == '12'
