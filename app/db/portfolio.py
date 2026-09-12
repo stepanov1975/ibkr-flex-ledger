@@ -435,6 +435,33 @@ class SQLAlchemyPortfolioService:
             for row in rows
         ]
 
+    def db_report_transfer_history(
+        self, account_id: str, limit: int, offset: int,
+    ) -> tuple[list[TransferReportRecord], int]:
+        params = {"account_id": self._text(account_id, "account_id"), "limit": limit, "offset": offset}
+        source = (
+            "FROM event_cashflow event JOIN raw_record raw ON raw.raw_record_id=event.source_raw_record_id "
+            "WHERE event.account_id=:account_id AND event.cash_action='Deposits/Withdrawals' "
+        )
+        try:
+            with self._engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
+                rows = connection.execute(text(
+                    "SELECT event.report_date_local, event.amount, UPPER(BTRIM(event.currency)) AS currency, "
+                    "NULLIF(BTRIM(raw.source_payload->>'description'), '') AS description " + source
+                    + "ORDER BY event.report_date_local DESC, event.event_cashflow_id DESC LIMIT :limit OFFSET :offset"
+                ), params).mappings().all()
+                total = int(connection.execute(text("SELECT count(*) " + source), params).scalar_one())
+        except SQLAlchemyError as error:
+            raise RuntimeError("transfer history report failed") from error
+        return ([
+            TransferReportRecord(
+                report_date_local=row["report_date_local"],
+                transfer_type="Deposit" if row["amount"] >= 0 else "Withdrawal",
+                amount=str(abs(row["amount"])), currency=row["currency"], description=row["description"],
+            )
+            for row in rows
+        ], total)
+
     def db_report_portfolio_summary(self, account_id: str) -> PortfolioSummaryReportRecord:
         eligible_artifacts = (
             "SELECT artifact.* FROM raw_artifact artifact "

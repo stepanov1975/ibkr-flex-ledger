@@ -285,6 +285,10 @@ class PortfolioRepositoryPort(Protocol):
 
     def db_report_portfolio_summary(self, account_id: str) -> PortfolioSummaryReportRecord: ...
 
+    def db_report_transfer_history(
+        self, account_id: str, limit: int, offset: int,
+    ) -> tuple[list[TransferReportRecord], int]: ...
+
     def db_report_provenance(
         self,
         account_id: str,
