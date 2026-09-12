@@ -21,7 +21,7 @@ Dates display as `dd/mm/yy`; timestamps use 24-hour time in `Asia/Jerusalem`. Bu
 
 ### Requirements
 
-- A host with Docker Engine and Docker Compose, and a checkout of this repository.
+- A host with Docker Engine and Docker Compose, and a checkout of this repository at `/stock_app`. The supplied scheduler and maintenance scripts expect this path and the default Compose project name `stock_app`.
 - An IBKR Flex Web Service token and an XML Flex query for a single account with USD base currency.
 - A trusted network for access. The app has no built-in authentication, and Compose publishes its application and database ports on the host. Restrict access to your trusted LAN.
 
@@ -35,7 +35,7 @@ The report must contain one statement for one account, with its account ID in th
 
 ### 2. Configure the application
 
-Run all commands from the repository root. Create your local configuration:
+Run all commands from `/stock_app`, keeping the default Compose project name `stock_app` (do not override it with `-p` or `COMPOSE_PROJECT_NAME`). Create your local configuration:
 
 ```bash
 cp .env.example .env
@@ -111,7 +111,7 @@ Review the result in [ingestion run history](http://127.0.0.1:8000/ui/ingestion-
 
 ## Scheduling, backups, and upgrades
 
-Starting Compose does not install scheduled jobs. On a Linux host with systemd, follow the [scheduler setup](deploy/systemd/README.md) to enable daily imports, daily backups and diagnostics retention, and weekly restore drills. The supplied units assume the repository is at `/stock_app`; adjust their paths if yours differs. Enable the optional alert timer after configuring webhook or email delivery.
+Starting Compose does not install scheduled jobs. On a Linux host with systemd, follow the [scheduler setup](deploy/systemd/README.md) to enable daily imports, daily backups and diagnostics retention, and weekly restore drills. The supplied units and job scripts require the `/stock_app` deployment and Compose project name `stock_app` used above. Enable the optional alert timer after configuring webhook or email delivery.
 
 PostgreSQL data lives in the persistent `postgres_data` volume. Additional volumes retain archived database logs, backups, and diagnostics. `docker compose down` preserves volumes; adding `--volumes` deletes them.
 
