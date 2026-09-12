@@ -67,6 +67,7 @@ class InstrumentPnlReportRecord:
     instrument_id: UUID
     conid: str
     symbol: str
+    asset_category: str
     currency: str
     position_qty: str
     cost_basis: str | None

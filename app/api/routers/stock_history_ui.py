@@ -5,12 +5,12 @@ STOCK_HISTORY_HTML = """<!doctype html>
 <title>Stock history · IBKR Portfolio</title><style>
 :root{color-scheme:dark;--panel:#151d31;--line:#2a3552;--text:#edf2ff;--muted:#9ba9c7;--accent:#68d5b4;--bad:#ff7c8b}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1020,#111a2d);color:var(--text);font:15px system-ui,sans-serif}
-header,main{max-width:1400px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center;gap:16px}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}a{color:var(--accent)}
+.page-heading,main{max-width:1400px;margin:auto;padding:24px}.page-heading{display:flex;justify-content:space-between;align-items:center;gap:16px}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}a{color:var(--accent)}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 16px 45px #0004}.full{grid-column:1/-1}.metric{font-size:25px;font-weight:700;margin-top:8px}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.number{text-align:right;white-space:nowrap}.scroll{overflow:auto;max-height:600px}.bad{color:var(--bad)}
 button{background:#214f4a;color:var(--text);border:1px solid #327568;border-radius:8px;padding:9px 11px;cursor:pointer}button:hover{filter:brightness(1.15)}#history-error:empty,#history-state:empty{display:none}#history-error,#history-state{margin-bottom:16px}
-@media(max-width:700px){.grid{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
-</style></head><body><header><div><h1 id="stock-name">Stock history</h1><div class="muted">Stock and related options · All imported history</div></div><div><a href="/ui">Back to portfolio</a> · <button onclick="loadHistory()">Refresh</button></div></header>
+@media(max-width:700px){.grid{grid-template-columns:1fr}.page-heading{align-items:flex-start;flex-direction:column}}
+</style></head><body><div class="page-heading"><div><h1 id="stock-name">Stock history</h1><div class="muted">Stock and related options · All imported history</div></div></div>
 <main><div id="history-error" class="bad" role="alert"></div><div id="history-state" class="bad"></div><div class="grid">
 <section class="card"><h2>Total realized P&amp;L</h2><div id="realized-pnl" class="metric">N/A</div></section>
 <section class="card"><h2>Total unrealized P&amp;L</h2><div id="unrealized-pnl" class="metric">N/A</div></section>

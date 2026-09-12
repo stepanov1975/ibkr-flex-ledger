@@ -126,6 +126,9 @@ The dashboard displays date-only values as `dd/mm/yy` and timestamps as
 uses the `Asia/Jerusalem` timezone; date-only business values retain their
 reported calendar date. The portfolio table hides zero-position instruments by
 default; its toggle can reveal them, and unavailable display values use `N/A`.
+Inline symbol search is case-insensitive. Stocks and Options checkboxes are both
+enabled by default and filter rows using the report's `asset_category` (`STK`/`OPT`),
+without changing portfolio totals. The instrument table scroll area allows up to 760 px.
 API payloads and persisted timestamps remain ISO/UTC.
 
 Each portfolio symbol links to `/ui/stocks/{instrument_id}`. This page shows the
@@ -631,9 +634,8 @@ percentage divides that result by positive net transfers. A USD-derived metric i
 when report dates differ or a required FX rate, cash balance, or current position value is
 unavailable.
 
-The portfolio transfer summary links to `/ui/transfers`, which shows deposit and
-withdrawal history with Previous/Next navigation, 25 rows per page, and a Refresh
-button. `/reports/transfer-history` applies `limit` and `offset` in the database,
+The shared Transfers navigation links to `/ui/transfers`, which shows deposit and
+withdrawal history with Previous/Next navigation, 25 rows per page. `/reports/transfer-history` applies `limit` and `offset` in the database,
 honors the configured API pagination bounds, and returns page counts. Transfers
 are ordered by report date descending, then event ID descending for stable pages;
 amounts retain their original currency and display withdrawals as positive magnitudes.

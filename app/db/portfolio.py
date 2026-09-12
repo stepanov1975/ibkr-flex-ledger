@@ -376,7 +376,7 @@ class SQLAlchemyPortfolioService:
         instrument_id: UUID | None,
     ) -> list[InstrumentPnlReportRecord]:
         query = text(
-            "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, s.currency, s.position_qty, s.cost_basis, "
+            "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, i.asset_category, s.currency, s.position_qty, s.cost_basis, "
             "s.realized_pnl, s.unrealized_pnl, s.total_pnl, s.provisional, "
             "(SELECT count(*) FROM corporate_action_manual_case c WHERE c.instrument_id=s.instrument_id AND c.status='open') "
             "AS unresolved_case_count FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
@@ -390,7 +390,8 @@ class SQLAlchemyPortfolioService:
         return [
             InstrumentPnlReportRecord(
                 report_date_local=row["report_date_local"], instrument_id=row["instrument_id"], conid=row["conid"],
-                symbol=row["symbol"], currency=row["currency"], position_qty=str(row["position_qty"]),
+                symbol=row["symbol"], asset_category=row["asset_category"], currency=row["currency"],
+                position_qty=str(row["position_qty"]),
                 cost_basis=None if row["cost_basis"] is None else str(row["cost_basis"]),
                 realized_pnl=str(row["realized_pnl"]), unrealized_pnl=str(row["unrealized_pnl"]),
                 total_pnl=str(row["total_pnl"]), provisional=bool(row["provisional"]),

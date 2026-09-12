@@ -19,7 +19,7 @@ def _page(path):
 def _context(script):
     context = quickjs.Context()
     context.eval('''
-        function makeNode(tag=''){return {tag,children:[],_text:'',className:'',checked:true,
+        function makeNode(tag=''){return {tag,children:[],_text:'',className:'',checked:true,value:'',
           get textContent(){return this._text+this.children.map(child=>child.textContent).join('')},
           set textContent(value){this._text=String(value);this.children=[]},
           append(...items){this.children.push(...items)},replaceChildren(){this.children=[];this._text=''}}}
@@ -38,7 +38,7 @@ def test_portfolio_symbols_are_links_to_instrument_history():
     context = _context(script)
     identifier = str(uuid4())
     context.eval('latestPnlItems='+json.dumps([
-        {'instrument_id': identifier, 'symbol': '<TEST>', 'position_qty': '3', 'currency': 'USD'},
+        {'instrument_id': identifier, 'symbol': '<TEST>', 'asset_category': 'STK', 'position_qty': '3', 'currency': 'USD'},
     ])+';renderPnl();')
     assert context.eval("nodes.pnl.children[0].children[0].children[0].tag") == 'a'
     assert context.eval("nodes.pnl.children[0].children[0].children[0].href") == f'/ui/stocks/{identifier}'

@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from .ingestion_runs_ui import INGESTION_RUNS_HTML
 from .stock_history_ui import STOCK_HISTORY_HTML
 from .transfer_history_ui import TRANSFER_HISTORY_HTML
+from .ui_layout import render_ui_page
 
 
 def api_create_ui_router() -> APIRouter:
@@ -17,27 +18,27 @@ def api_create_ui_router() -> APIRouter:
 
     @router.get("/ui", response_class=HTMLResponse)
     def portfolio_dashboard() -> HTMLResponse:
-        return HTMLResponse(_PORTFOLIO_DASHBOARD_HTML)
+        return HTMLResponse(render_ui_page(_PORTFOLIO_DASHBOARD_HTML, "/ui"))
 
     @router.get("/ui/stocks/{instrument_id}", response_class=HTMLResponse)
     def stock_history_dashboard(instrument_id: UUID) -> HTMLResponse:
-        return HTMLResponse(STOCK_HISTORY_HTML.replace("__INSTRUMENT_ID__", str(instrument_id)))
+        return HTMLResponse(render_ui_page(STOCK_HISTORY_HTML.replace("__INSTRUMENT_ID__", str(instrument_id))))
 
     @router.get("/ui/costs", response_class=HTMLResponse)
     def costs_dashboard() -> HTMLResponse:
-        return HTMLResponse(_COSTS_DASHBOARD_HTML)
+        return HTMLResponse(render_ui_page(_COSTS_DASHBOARD_HTML, "/ui/costs"))
 
     @router.get("/ui/transfers", response_class=HTMLResponse)
     def transfer_history_dashboard() -> HTMLResponse:
-        return HTMLResponse(TRANSFER_HISTORY_HTML)
+        return HTMLResponse(render_ui_page(TRANSFER_HISTORY_HTML, "/ui/transfers"))
 
     @router.get("/ui/operations", response_class=HTMLResponse)
     def operations_dashboard() -> HTMLResponse:
-        return HTMLResponse(_OPERATIONS_DASHBOARD_HTML)
+        return HTMLResponse(render_ui_page(_OPERATIONS_DASHBOARD_HTML, "/ui/operations"))
 
     @router.get("/ui/ingestion-runs", response_class=HTMLResponse)
     def ingestion_runs_dashboard() -> HTMLResponse:
-        return HTMLResponse(INGESTION_RUNS_HTML)
+        return HTMLResponse(render_ui_page(INGESTION_RUNS_HTML, "/ui/ingestion-runs"))
 
     return router
 
@@ -47,39 +48,41 @@ _PORTFOLIO_DASHBOARD_HTML = """<!doctype html>
 <title>IBKR Portfolio</title><style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--line:#2a3552;--text:#edf2ff;--muted:#9ba9c7;--accent:#68d5b4;--bad:#ff7c8b}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1020,#111a2d);color:var(--text);font:15px system-ui,sans-serif}
-header,main{max-width:1400px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
+main{max-width:1400px;margin:auto;padding:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{grid-column:span 3;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 16px 45px #0004}.half{grid-column:span 6}.full{grid-column:1/-1}
 .metric{font-size:25px;font-weight:700;margin-top:8px}button{background:#214f4a;color:var(--text);border:1px solid #327568;border-radius:8px;padding:9px 11px;cursor:pointer}button:hover{filter:brightness(1.15)}
+.summary-card{padding:12px 16px}.summary-card h2{font-size:14px;margin-bottom:6px}.summary-card .metric{font-size:24px;margin-top:0}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.number{text-align:right}.scroll{overflow:auto;max-height:520px}.bad{color:var(--bad)}a{color:var(--accent)}
 .section-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-heading h2{margin:0}.toggle{display:flex;align-items:center;gap:7px;color:var(--muted);white-space:nowrap}.toggle input{accent-color:var(--accent)}
-@media(max-width:1000px){.card{grid-column:span 6}.half{grid-column:1/-1}}@media(max-width:650px){.card{grid-column:1/-1}header{align-items:flex-start;gap:12px;flex-direction:column}}
-</style></head><body><header><div><h1>IBKR Portfolio</h1><div class="muted">Latest available IBKR data</div></div><div><a href="/ui/costs">Costs</a> · <a href="/ui/operations">Operations</a> · <a href="/docs">API docs</a> · <button onclick="loadAll()">Refresh</button></div></header>
+.instrument-card .scroll{max-height:760px}.instrument-card th{position:sticky;top:0;background:var(--panel)}
+.instrument-card .section-heading,.instrument-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:center}.instrument-filters input[type=search]{width:200px;max-width:100%;background:#0e1527;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit}.instrument-filters input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.instrument-card{min-width:0}#pnl-empty:empty{display:none}
+@media(max-width:1000px){.card{grid-column:span 6}.half{grid-column:1/-1}}@media(max-width:650px){.card{grid-column:1/-1}}
+</style></head><body>
 <main><div class="grid">
-<section class="card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div id="pnl-report-date" class="muted">Loading…</div><div id="pnl-state" class="muted"></div></section>
-<section class="card"><h2>Realized</h2><div id="realized-pnl" class="metric">—</div></section>
-<section class="card"><h2>Unrealized</h2><div id="unrealized-pnl" class="metric">—</div></section>
-<section class="card"><h2>Estimated net liquidation value</h2><div id="net-liquidation" class="metric">—</div><div id="valuation-report-date" class="muted">Loading…</div></section>
-<section class="card"><h2>Net transfers (USD)</h2><div id="net-transfers-usd" class="metric">—</div></section>
-<section class="card"><h2>Total profit (USD)</h2><div id="total-profit-usd" class="metric">—</div></section>
-<section class="card"><h2>Return on net transfers</h2><div id="profit-percent" class="metric">—</div></section>
-<section class="card"><h2>Total costs (USD)</h2><div id="total-costs-usd" class="metric">—</div><div id="cost-history-range" class="muted">Loading…</div></section>
-<section class="card full"><div class="section-heading"><h2>Total P&amp;L by instrument</h2><label class="toggle"><input id="hide-zero-positions" type="checkbox" checked> Hide zero positions</label></div><div class="scroll"><table><thead><tr><th>Symbol</th><th>Position</th><th>Average cost</th><th>Total cost</th><th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody id="pnl"></tbody></table></div></section>
+<section class="card summary-card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div id="pnl-state" class="muted"></div></section>
+<section class="card summary-card"><h2>Realized</h2><div id="realized-pnl" class="metric">—</div></section>
+<section class="card summary-card"><h2>Unrealized</h2><div id="unrealized-pnl" class="metric">—</div></section>
+<section class="card summary-card"><h2>Estimated net liquidation value</h2><div id="net-liquidation" class="metric">—</div></section>
+<section class="card summary-card"><h2>Net transfers (USD)</h2><div id="net-transfers-usd" class="metric">—</div></section>
+<section class="card summary-card"><h2>Total profit (USD)</h2><div id="total-profit-usd" class="metric">—</div></section>
+<section class="card summary-card"><h2>Return on net transfers</h2><div id="profit-percent" class="metric">—</div></section>
+<section class="card summary-card"><h2>Total costs (USD)</h2><div id="total-costs-usd" class="metric">—</div></section>
+<section class="card full instrument-card"><div class="section-heading"><h2>Total P&amp;L by instrument</h2><div class="instrument-filters"><input id="symbol-search" type="search" aria-label="Search symbols" placeholder="Search symbols…"><label class="toggle"><input id="show-stocks" type="checkbox" checked> Stocks</label><label class="toggle"><input id="show-options" type="checkbox" checked> Options</label><label class="toggle"><input id="hide-zero-positions" type="checkbox" checked> Hide zero positions</label></div></div><div class="scroll"><table><thead><tr><th>Symbol</th><th>Position</th><th>Average cost</th><th>Total cost</th><th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody id="pnl"></tbody></table></div><p id="pnl-empty" class="muted" role="status"></p></section>
 <section class="card"><h2>Net dividend payments</h2><div id="net-dividend-payments-usd" class="metric">—</div><div class="muted">Gross <span id="gross-dividend-payments-usd">—</span> · Withholding <span id="dividend-withholding-tax-usd">—</span></div></section>
 <section class="card half"><h2>Cash balances</h2><div class="scroll"><table><thead><tr><th>Currency</th><th class="number">Total cash</th></tr></thead><tbody id="cash-balances"></tbody></table></div></section>
-<section class="card half"><div class="section-heading"><h2>Transfer summary by currency</h2><a href="/ui/transfers">Transfer history</a></div><div class="scroll"><table><thead><tr><th>Currency</th><th>Net transfers</th><th>Gross deposits</th><th>Gross withdrawals</th></tr></thead><tbody id="transfer-summary"></tbody></table></div></section>
 </div></main><script>
 const el=id=>document.getElementById(id);const esc=value=>String(value??'');
 function cell(row,value,cls=''){const td=document.createElement('td');td.textContent=esc(value);if(cls)td.className=cls;row.append(td)}
 function formatCurrency(value,currency){if(value===null||value===undefined)return 'N/A';const amount=Number(value);if(!Number.isFinite(amount)||!currency)return esc(value);try{return new Intl.NumberFormat('en-US',{style:'currency',currency,currencyDisplay:'code',minimumFractionDigits:2,maximumFractionDigits:2}).format(amount)}catch{return esc(value)}}
 function formatPosition(value){const amount=Number(value);return Number.isFinite(amount)?new Intl.NumberFormat('en-US',{minimumFractionDigits:0,maximumFractionDigits:3}).format(amount):esc(value)}
 function formatPercent(value){if(value===null||value===undefined)return 'N/A';const amount=Number(value);return Number.isFinite(amount)?new Intl.NumberFormat('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).format(amount)+'%':'N/A'}
-function formatDate(value){const match=/^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(String(value??''));return match?`${match[3]}/${match[2]}/${match[1].slice(-2)}`:'—'}
 async function json(url){const response=await fetch(url);const data=await response.json();if(!response.ok)throw new Error(data?.message||data?.code||response.statusText);return data}
 let latestPnlItems=[];
-function renderPnl(){el('pnl').replaceChildren();const hideZero=el('hide-zero-positions').checked;for(const item of latestPnlItems){if(hideZero&&Number(item.position_qty)===0)continue;const tr=document.createElement('tr');const symbolCell=document.createElement('td');const link=document.createElement('a');link.href='/ui/stocks/'+encodeURIComponent(item.instrument_id);link.textContent=item.symbol+(item.provisional?' (Provisional)':'');if(item.provisional)link.className='bad';symbolCell.append(link);tr.append(symbolCell);cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.average_cost,item.currency));cell(tr,formatCurrency(item.total_cost,item.currency));cell(tr,formatCurrency(item.last_day_value,item.currency));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));el('pnl').append(tr)}}
-async function loadPnl(){const x=await json('/reports/pnl/by-instrument');const latest=x.items.reduce((value,item)=>value===null||item.report_date_local>value?item.report_date_local:value,null);latestPnlItems=latest===null?[]:x.items.filter(item=>item.report_date_local===latest);let realized=0,unrealized=0,total=0;for(const item of latestPnlItems){realized+=Number(item.realized_pnl);unrealized+=Number(item.unrealized_pnl);total+=Number(item.total_pnl)}renderPnl();const provisional=latestPnlItems.some(item=>item.provisional);el('pnl-state').textContent=provisional?'Provisional totals — see Operations for details':'';el('pnl-state').className=provisional?'bad':'muted';for(const id of ['total-pnl','realized-pnl','unrealized-pnl'])el(id).className=provisional?'metric bad':'metric';const currency=latestPnlItems[0]?.currency||'USD';el('total-pnl').textContent=latest===null?'No snapshots':formatCurrency(total,currency);el('realized-pnl').textContent=latest===null?'No snapshots':formatCurrency(realized,currency);el('unrealized-pnl').textContent=latest===null?'No snapshots':formatCurrency(unrealized,currency);el('pnl-report-date').textContent=latest===null?'N/A':'As of '+formatDate(latest)}
-async function loadSummary(){const x=await json('/reports/portfolio-summary');el('cash-balances').replaceChildren();for(const item of x.cash_balances){const tr=document.createElement('tr');cell(tr,item.currency);cell(tr,formatCurrency(item.amount,item.currency),'number');el('cash-balances').append(tr)}el('transfer-summary').replaceChildren();for(const item of x.transfer_summary_by_currency){const tr=document.createElement('tr');cell(tr,item.currency);cell(tr,formatCurrency(item.net_transfers,item.currency),'number');cell(tr,formatCurrency(item.gross_deposits,item.currency),'number');cell(tr,formatCurrency(item.gross_withdrawals,item.currency),'number');el('transfer-summary').append(tr)}el('net-liquidation').textContent=formatCurrency(x.estimated_net_liquidation_value_usd,'USD');el('net-transfers-usd').textContent=formatCurrency(x.net_transfers_usd,'USD');el('total-profit-usd').textContent=formatCurrency(x.total_profit_usd,'USD');el('profit-percent').textContent=formatPercent(x.profit_percent);el('total-costs-usd').textContent=formatCurrency(x.total_costs_usd,'USD');el('net-dividend-payments-usd').textContent=formatCurrency(x.net_dividend_payments_usd,'USD');el('gross-dividend-payments-usd').textContent=formatCurrency(x.gross_dividend_payments_usd,'USD');el('dividend-withholding-tax-usd').textContent=formatCurrency(x.dividend_withholding_tax_usd,'USD');el('cost-history-range').textContent=x.activity_date_from&&x.activity_date_to?'All history: '+formatDate(x.activity_date_from)+' – '+formatDate(x.activity_date_to):'No cost or dividend history';el('valuation-report-date').textContent=x.report_date_local?'As of '+formatDate(x.report_date_local):'N/A'}
+function renderPnl(){el('pnl').replaceChildren();const hideZero=el('hide-zero-positions').checked;const query=el('symbol-search').value.trim().toUpperCase();const stocks=el('show-stocks').checked,options=el('show-options').checked;for(const item of latestPnlItems){if(hideZero&&Number(item.position_qty)===0)continue;const category=item.asset_category.trim().toUpperCase();if(!((stocks&&category==='STK')||(options&&category==='OPT')))continue;if(!item.symbol.toUpperCase().includes(query))continue;const tr=document.createElement('tr');const symbolCell=document.createElement('td');const link=document.createElement('a');link.href='/ui/stocks/'+encodeURIComponent(item.instrument_id);link.textContent=item.symbol+(item.provisional?' (Provisional)':'');if(item.provisional)link.className='bad';symbolCell.append(link);tr.append(symbolCell);cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.average_cost,item.currency));cell(tr,formatCurrency(item.total_cost,item.currency));cell(tr,formatCurrency(item.last_day_value,item.currency));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));el('pnl').append(tr)}el('pnl-empty').textContent=el('pnl').children.length?'':'No instruments match your filters.'}
+async function loadPnl(){const x=await json('/reports/pnl/by-instrument');const latest=x.items.reduce((value,item)=>value===null||item.report_date_local>value?item.report_date_local:value,null);latestPnlItems=latest===null?[]:x.items.filter(item=>item.report_date_local===latest);let realized=0,unrealized=0,total=0;for(const item of latestPnlItems){realized+=Number(item.realized_pnl);unrealized+=Number(item.unrealized_pnl);total+=Number(item.total_pnl)}renderPnl();const provisional=latestPnlItems.some(item=>item.provisional);el('pnl-state').textContent=provisional?'Provisional totals — see Operations for details':'';el('pnl-state').className=provisional?'bad':'muted';for(const id of ['total-pnl','realized-pnl','unrealized-pnl'])el(id).className=provisional?'metric bad':'metric';const currency=latestPnlItems[0]?.currency||'USD';el('total-pnl').textContent=latest===null?'No snapshots':formatCurrency(total,currency);el('realized-pnl').textContent=latest===null?'No snapshots':formatCurrency(realized,currency);el('unrealized-pnl').textContent=latest===null?'No snapshots':formatCurrency(unrealized,currency)}
+async function loadSummary(){const x=await json('/reports/portfolio-summary');el('cash-balances').replaceChildren();for(const item of x.cash_balances){const tr=document.createElement('tr');cell(tr,item.currency);cell(tr,formatCurrency(item.amount,item.currency),'number');el('cash-balances').append(tr)}el('net-liquidation').textContent=formatCurrency(x.estimated_net_liquidation_value_usd,'USD');el('net-transfers-usd').textContent=formatCurrency(x.net_transfers_usd,'USD');el('total-profit-usd').textContent=formatCurrency(x.total_profit_usd,'USD');el('profit-percent').textContent=formatPercent(x.profit_percent);el('total-costs-usd').textContent=formatCurrency(x.total_costs_usd,'USD');el('net-dividend-payments-usd').textContent=formatCurrency(x.net_dividend_payments_usd,'USD');el('gross-dividend-payments-usd').textContent=formatCurrency(x.gross_dividend_payments_usd,'USD');el('dividend-withholding-tax-usd').textContent=formatCurrency(x.dividend_withholding_tax_usd,'USD')}
 el('hide-zero-positions').onchange=renderPnl;
+el('symbol-search').oninput=renderPnl;el('show-stocks').onchange=renderPnl;el('show-options').onchange=renderPnl;
 async function loadAll(){for(const task of [loadPnl,loadSummary]){try{await task()}catch(error){console.error(error)}}}loadAll();
 </script></body></html>"""
 
@@ -89,11 +92,11 @@ _COSTS_DASHBOARD_HTML = """<!doctype html>
 <title>IBKR Portfolio Costs</title><style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--line:#2a3552;--text:#edf2ff;--muted:#9ba9c7;--accent:#68d5b4}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1020,#111a2d);color:var(--text);font:15px system-ui,sans-serif}
-header,main{max-width:1200px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 8px}.muted{color:var(--muted)}
+.page-heading,main{max-width:1200px;margin:auto;padding:24px}.page-heading{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 8px}.muted{color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{grid-column:1/-1;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 16px 45px #0004}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:14px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.number{text-align:right}.scroll{overflow:auto;max-height:520px}tfoot th,tfoot td{color:var(--text);font-weight:700}button{background:#214f4a;color:var(--text);border:1px solid #327568;border-radius:8px;padding:9px 11px;cursor:pointer}button:hover{filter:brightness(1.15)}a{color:var(--accent)}
-@media(max-width:650px){header{align-items:flex-start;gap:12px;flex-direction:column}}
-</style></head><body><header><div><h1>Portfolio Costs</h1><div class="muted">All imported IBKR cost history</div></div><div><a href="/ui">Portfolio</a> · <a href="/ui/operations">Operations</a> · <a href="/docs">API docs</a> · <button onclick="loadCosts()">Refresh</button></div></header>
+@media(max-width:650px){.page-heading{align-items:flex-start;gap:12px;flex-direction:column}}
+</style></head><body><div class="page-heading"><div><h1>Portfolio Costs</h1><div class="muted">All imported IBKR cost history</div></div></div>
 <main><div class="grid">
 <section class="card"><h2>Securities commissions</h2><div id="securities-commission-coverage" class="muted">Loading…</div><div class="scroll"><table><thead><tr><th>Instrument type</th><th>Side</th><th>Executions</th><th>Commission</th></tr></thead><tbody id="securities-commission-summary"></tbody><tfoot><tr><th>Total buys</th><td></td><td id="buy-execution-total"></td><td id="buy-commission-total" class="number"></td></tr><tr><th>Total sells</th><td></td><td id="sell-execution-total"></td><td id="sell-commission-total" class="number"></td></tr><tr><th>Grand total</th><td></td><td id="securities-execution-total"></td><td id="securities-commission-total" class="number"></td></tr></tfoot></table></div></section>
 <section class="card"><h2>Cost summary by category</h2><div id="cost-history-range" class="muted">Loading…</div><div class="scroll"><table><thead><tr><th>Category</th><th>Net cost</th><th>P&amp;L treatment</th></tr></thead><tbody id="cost-summary"></tbody></table></div><div class="muted">Costs outside instrument P&amp;L: <span id="costs-outside-pnl-usd">—</span></div></section>
@@ -114,13 +117,13 @@ _OPERATIONS_DASHBOARD_HTML = """<!doctype html>
 <title>IBKR Flex Ledger</title><style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--line:#2a3552;--text:#edf2ff;--muted:#9ba9c7;--accent:#68d5b4;--bad:#ff7c8b}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1020,#111a2d);color:var(--text);font:15px system-ui,sans-serif}
-header,main{max-width:1200px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
+.page-heading,main{max-width:1200px;margin:auto;padding:24px}.page-heading{display:flex;justify-content:space-between;align-items:center}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{grid-column:span 4;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 16px 45px #0004}.wide{grid-column:span 8}.full{grid-column:1/-1}
 .metric{font-size:28px;font-weight:700;margin-top:8px}button,input{background:#0e1527;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 11px}button{cursor:pointer;background:#214f4a;border-color:#327568}button:hover{filter:brightness(1.15)}form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 #resolution-editor button:disabled{background:#0e1527;color:var(--muted);border-color:var(--line);cursor:not-allowed;filter:none}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted)}.scroll{overflow:auto;max-height:430px}.pill{padding:3px 7px;border-radius:999px;background:#26324d}.bad{color:var(--bad)}a{color:var(--accent)}
-@media(max-width:850px){.card,.wide{grid-column:1/-1}header{align-items:flex-start;gap:12px;flex-direction:column}}
-</style></head><body><header><div><h1>IBKR Flex Ledger</h1><div class="muted">Auditable portfolio accounting</div></div><div><a href="/ui">Portfolio</a> · <a href="/docs">API docs</a> · <button onclick="loadAll()">Refresh</button></div></header>
+@media(max-width:850px){.card,.wide{grid-column:1/-1}.page-heading{align-items:flex-start;gap:12px;flex-direction:column}}
+</style></head><body><div class="page-heading"><div><h1>IBKR Flex Ledger</h1><div class="muted">Auditable portfolio accounting</div></div></div>
 <main><div class="grid">
 <section class="card"><h2>Scheduled ingestion success</h2><div id="success" class="metric">—</div><div id="slo-note" class="muted">Loading SLO…</div></section>
 <section class="card"><h2>Actions needing attention</h2><div id="case-count" class="metric">—</div><div class="muted">Available decisions · <span id="unsupported-count">—</span> need accounting support</div></section>

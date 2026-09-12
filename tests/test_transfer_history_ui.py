@@ -76,7 +76,7 @@ def test_transfer_history_navigates_pages_and_preserves_formatted_details():
         "20/08/26", "Deposit", "ILS 0.00", "ILS", "",
     ]
     context.eval("nodes['next-page'].onclick()")
-    assert context.eval("nodes['previous-page'].disabled && nodes['next-page'].disabled && nodes['refresh-transfers'].disabled")
+    assert context.eval("nodes['previous-page'].disabled && nodes['next-page'].disabled")
     context.eval("nodes['next-page'].onclick()")
     _flush(context)
     assert context.eval("nodes.transfers.children.length") == 2
@@ -120,33 +120,23 @@ def test_transfer_history_failed_navigation_preserves_rows_and_allows_retry():
     assert context.eval("nodes.transfers.children.length") == 25
     assert context.eval("nodes['transfers-summary'].textContent") == "1–25 of 27 transfers · Page 1 of 2"
     assert context.eval("nodes['next-page'].disabled") is False
-    assert context.eval("nodes['refresh-transfers'].disabled") is False
     context.eval("fail=false;nodes['next-page'].onclick()")
     _flush(context)
     assert requests[-1]["offset"] == "25"
     assert context.eval("nodes['transfers-error'].textContent") == ""
-    context.eval("nodes['refresh-transfers'].onclick()")
-    _flush(context)
-    assert requests[-1]["offset"] == "25"
 
 
-def test_transfer_history_can_retry_an_initial_failure():
+def test_transfer_history_shows_an_initial_failure():
     context, _, _, _ = _page_context(initial_failure=True)
     assert context.eval("nodes['transfers-error'].textContent") == "History unavailable"
     assert context.eval("nodes['transfers-summary'].textContent") == ""
     assert context.eval("nodes['previous-page'].disabled && nodes['next-page'].disabled")
-    context.eval("fail=false;nodes['refresh-transfers'].onclick()")
-    _flush(context)
-    assert context.eval("nodes.transfers.children.length") == 25
-    assert context.eval("nodes['transfers-error'].textContent") == ""
 
 
-def test_transfer_history_refresh_recovers_when_the_last_page_disappears():
+def test_transfer_history_navigation_recovers_when_the_next_page_disappears():
     context, _, requests, items = _page_context()
-    context.eval("nodes['next-page'].onclick()")
-    _flush(context)
     del items[2:]
-    context.eval("nodes['refresh-transfers'].onclick()")
+    context.eval("nodes['next-page'].onclick()")
     _flush(context)
     assert requests[-1]["offset"] == "0"
     assert context.eval("nodes.transfers.children.length") == 2
