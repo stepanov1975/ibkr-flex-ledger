@@ -30,6 +30,13 @@ if(x.nav){const n=x.nav;s.append(node('p','As of '+day(n.date)+' · '+money(n.to
 s=section('Account value history');s.append(node('p','Successive statement observations. See dated values below.'));chart(s,x.nav_history);const details=node('details');details.append(node('summary','Dated values'));table(details,['Date','Broker NAV'],x.nav_history.map(p=>[day(p.date),money(p.nav,p.currency)]));s.append(details);
 s=section('What changed during the statement period');
 if(x.change_in_nav){const n=x.change_in_nav;s.append(node('p',day(n.from_date)+' to '+day(n.to_date)));table(s,['Starting value','Ending value','Broker time-weighted return'],[[money(n.starting,n.currency),money(n.ending,n.currency),n.twr_percent===null?'N/A':Number(n.twr_percent).toFixed(2)+'%']]);table(s,['Movement','Amount'],n.components.filter(c=>c.amount===null||Number(c.amount)!==0).map(c=>[c.label,money(c.amount,n.currency)]));check(s,n.check,n.currency)}else s.append(node('p','Change in NAV section unavailable.'));
+s=section('Commission details');
+if(x.commissions){const n=x.commissions;s.append(node('p','Broker signs: negative amounts are charges; positive amounts are rebates. These costs are already in trade commissions and are not added again.'));
+s.append(node('p','Statement period '+day(n.from_date)+' to '+day(n.to_date)+' · '+(n.covered_executions??'N/A')+' of '+(n.commissioned_executions??'N/A')+' commissioned executions have uniquely linked details.'));
+table(s,['Currency','Signed total'],n.totals.map(r=>[r.currency,money(r.total,r.currency)]));
+for(const t of n.totals){table(s,['Component ('+t.currency+')','Signed amount'],t.components.map(r=>[r.label,money(r.amount,t.currency)]));}
+table(s,['Date','Instrument','Trade ID','Commission','Component check','Execution check'],n.details.map(r=>[day(r.date),instrumentLink(r.symbol,r.instrument_id),r.trade_id,money(r.total,r.currency),r.components_check.status.replaceAll('_',' '),r.execution_check.status.replaceAll('_',' ')]));
+const d=node('details');d.append(node('summary','Regulatory breakdown (already included in totals)'));table(d,['Trade ID','Regulatory item','Amount'],n.details.flatMap(r=>r.regulatory.map(c=>[r.trade_id,c.label,money(c.amount,r.currency)])));s.append(d);}
 s=section('Portfolio concentration');
 if(x.concentration){const n=x.concentration;s.append(node('p','Signed market-value weights against broker NAV as of '+day(n.nav_date)+'. Holdings are ordered by absolute market value. Option weights do not measure underlying exposure; currency groups describe quotation currency, not economic currency risk.'));
 const pct=v=>v===null?'N/A':Number(v).toFixed(2)+'%';

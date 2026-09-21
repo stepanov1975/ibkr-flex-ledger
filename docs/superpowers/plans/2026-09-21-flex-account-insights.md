@@ -91,3 +91,6 @@ account figures or raw reports are committed as test fixtures.
   misleading IBKR percentOfNAV name: broker percentages use asset-class totals.
   Account NAV weights remain separate. Live checks: 101 matched, two unavailable.
   Twelve holdings/UI tests, Ruff and MyPy pass.
+- Step 8 complete: independent review approved commission components, execution
+  links and coverage. Eleven commission/UI tests pass. Live data: ten component
+  sums match, nine execution comparisons match and one differs. Ruff/MyPy pass.

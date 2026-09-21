@@ -103,3 +103,16 @@ def test_concentration_ui_labels_derivative_weights():
     rendered = context(report).eval('JSON.stringify(nodes.content)')
     assert 'Option weights do not measure underlying exposure' in rendered
     assert 'cash and accruals excluded' in rendered
+
+
+def test_commission_ui_reports_coverage_and_signed_costs():
+    from app.analytics.account_commissions import account_commissions
+    from test_account_commissions import detail, trade
+    from test_account_insights import row
+    report = AccountInsights([], []).build()
+    report['commissions'] = account_commissions([detail(), row('CashReport',
+        fromDate='20260901', toDate='20260918')], [trade()])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'USD -3.00' in rendered
+    assert '1 of 1 commissioned executions' in rendered
+    assert 'already included in totals' in rendered

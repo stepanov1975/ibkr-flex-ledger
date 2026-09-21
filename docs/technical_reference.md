@@ -765,3 +765,10 @@ https://www.ibkrguides.com/reportingreference/reportguide/open%20positionsfq.htm
 Broker percentage checks therefore use asset-class totals. Securities allocation
 excludes cash/accruals; quotation currency is not economic FX exposure, and option
 market value is not delta exposure. Missing FX or duplicate summaries remain unknown.
+
+Commission details preserve broker signs (negative charges, positive rebates).
+Component totals include thirdPartyRegulatoryCharge once; its regulatory detail
+is displayed separately. Comparisons require unique trade/security/commission-
+currency identity. Duplicate details invalidate aggregate amounts. Coverage counts
+use CashReport period metadata from the same artifact and never imply that missing
+detail means zero commission. These amounts are not added to portfolio costs again.
