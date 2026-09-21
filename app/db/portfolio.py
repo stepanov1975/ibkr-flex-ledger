@@ -365,6 +365,11 @@ class SQLAlchemyPortfolioService:
             raise RuntimeError("manual case update failed") from error
         return self._manual_case(full_row)
 
+    def db_report_account_insights(self, account_id: str) -> dict[str, Any]:
+        from .account_insights import db_account_insights
+
+        return db_account_insights(self._engine, self._text(account_id, "account_id"))
+
     def db_report_stock_history(self, account_id: str, instrument_id: UUID) -> dict[str, Any] | None:
         return db_stock_history(self._engine, self._text(account_id, "account_id"), instrument_id)
 

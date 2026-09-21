@@ -653,6 +653,18 @@ and instrument counts plus the covered date range.
 
 ## Reconciliation diff mode (Task 11)
 
+### Account insights
+
+`GET /reports/account-insights` and `/ui/account` expose broker NAV components,
+normalized daily NAV history, and ChangeInNAV period movements/TWR. Read-only
+queries select whole sections from successful artifacts in a repeatable read.
+Failed reports cannot supersede published sources. Raw IDs, artifact IDs and
+statement dates accompany sections. History normalizes row dates and prefers the
+newest successful source. Cash/position comparisons require matching statement
+dates; summary positions exclude lot detail. Missing inputs remain unknown.
+MTM and realized/change-in-unrealized are alternative modes; TWR is never added
+to money. Existing portfolio profit and return-on-net-transfers remain unchanged.
+
 `GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
 frozen tolerance matrix in [contracts](contracts.md). JSON and `format=csv` outputs include
 absolute/relative differences, tolerances, pass/fail state, provisional state, and source
@@ -717,3 +729,46 @@ Configuration file:
 - `.vscode/settings.json`
 
 If VS Code was already open when this was configured, run **Developer: Reload Window** once.
+
+Account insights calculation checks use signed remaining FIFO lots, remaining
+basis and current broker marks; broker-authoritative snapshot quantities are not
+treated as independent evidence. Period trading gains require exact fresh
+opening/closing snapshots and subtract canonical cash impacts. Cash rollforwards
+use native currency net cash; unsupported FX legs remain not comparable. MTM
+component checks are explicitly broker arithmetic, not independent ledger checks.
+
+Pending income reads current open dividend accruals as a snapshot and historical
+accruals as payment-check evidence, never summing repeated snapshots. Payment
+matches require action, security and currency identity; unmatched or fee-bearing
+cases remain unverified. Accrual reversals are not cash payments. Interest accrual
+rollforwards retain their periods and distinguish base summaries from currencies.
+
+The account lending panel preserves shares-at-IB as owned quantity, displays the
+magnitude of lent shares, and checks net shares using signed broker fields. Owned
+shares are compared only with unique same-date position summaries. NAV collateral
+and its securities offsets retain their own date and are not spendable cash.
+
+Cash settlement shows ending and settled cash per native currency, with unsettled
+cash calculated as their difference only when both exist. BASE_SUMMARY is excluded
+from the currency rows. Negative balances retain their signs; settled cash is not
+labelled buying power or withdrawable funds.
+
+Option lifecycle rows from the selected OptionEAE section link through unique
+trade/security/currency identity to existing canonical executions and instrument
+history. Quantity and gross-proceeds checks exclude commissions/taxes. Underlying
+delivery checks require a unique same-date leg and use the reported multiplier;
+ambiguous or missing legs remain unverified. No synthetic trades are inserted.
+
+Concentration shows signed whole-account NAV weights separately from IBKR
+OpenPositions.percentOfNAV, which IBKR defines against the asset-class total:
+https://www.ibkrguides.com/reportingreference/reportguide/open%20positionsfq.htm .
+Broker percentage checks therefore use asset-class totals. Securities allocation
+excludes cash/accruals; quotation currency is not economic FX exposure, and option
+market value is not delta exposure. Missing FX or duplicate summaries remain unknown.
+
+Commission details preserve broker signs (negative charges, positive rebates).
+Component totals include thirdPartyRegulatoryCharge once; its regulatory detail
+is displayed separately. Comparisons require unique trade/security/commission-
+currency identity. Duplicate details invalidate aggregate amounts. Coverage counts
+use CashReport period metadata from the same artifact and never imply that missing
+detail means zero commission. These amounts are not added to portfolio costs again.

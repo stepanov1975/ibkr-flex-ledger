@@ -10,6 +10,7 @@ restricting new work to the original delivery scope.
 | --- | --- |
 | [Project README](../README.md) | Features, supported scope, configuration, and deployment |
 | [Technical reference](technical_reference.md) | Architecture, accounting behavior, APIs, jobs, and release gates |
+| [Account insights](account_insights.md) | Broker visibility, calculation checks, source coverage and interpretation |
 | [Contracts](contracts.md) | Natural keys, valuation rules, tolerances, CSV schemas, API conventions, and reliability targets |
 | [Architecture conventions](architecture_conventions.md) | Mandatory module, database, and reference-code boundaries |
 | [Flex query field catalog](flex_query_fields.md) | Reference-derived field descriptions for core report sections |

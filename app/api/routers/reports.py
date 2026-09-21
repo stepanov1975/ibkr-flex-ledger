@@ -38,6 +38,12 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
 
     router = APIRouter(prefix="/reports", tags=["reports"])
 
+    @router.get("/account-insights")
+    def account_insights() -> JSONResponse:
+        return JSONResponse(content=jsonable_encoder(
+            repository.db_report_account_insights(settings.account_id), custom_encoder={Decimal: str},
+        ))
+
     @router.get("/stock-history/{instrument_id}")
     def stock_history(instrument_id: UUID) -> JSONResponse:
         report = repository.db_report_stock_history(settings.account_id, instrument_id)

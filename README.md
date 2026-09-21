@@ -4,6 +4,7 @@ Self-hosted portfolio accounting and analytics for Interactive Brokers (IBKR) Fl
 
 ## Features
 
+- **Account insights:** Review broker NAV/history, period changes, calculation checks, pending income, lending, settled cash, option activity, concentration and commission details. See the [account insights guide](docs/account_insights.md).
 - **Portfolio overview:** View positions, realized and unrealized profit and loss, cash balances by currency, net transfers, and estimated portfolio value and profit when the required data is available.
 - **Stock history:** Open a symbol to explore its trades, related options, cashflows, corporate actions, and open or closed FIFO lots, including partial closes.
 - **Costs and dividends:** Review commissions, interest, taxes, other fees, and dividend payments. Break securities commissions down by instrument type and buy/sell side.

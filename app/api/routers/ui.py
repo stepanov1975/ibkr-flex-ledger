@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from .account_insights_ui import ACCOUNT_INSIGHTS_HTML
 from .ingestion_runs_ui import INGESTION_RUNS_HTML
 from .stock_history_ui import STOCK_HISTORY_HTML
 from .transfer_history_ui import TRANSFER_HISTORY_HTML
@@ -23,6 +24,10 @@ def api_create_ui_router() -> APIRouter:
     @router.get("/ui/stocks/{instrument_id}", response_class=HTMLResponse)
     def stock_history_dashboard(instrument_id: UUID) -> HTMLResponse:
         return HTMLResponse(render_ui_page(STOCK_HISTORY_HTML.replace("__INSTRUMENT_ID__", str(instrument_id))))
+
+    @router.get("/ui/account", response_class=HTMLResponse)
+    def account_insights_dashboard() -> HTMLResponse:
+        return HTMLResponse(render_ui_page(ACCOUNT_INSIGHTS_HTML, "/ui/account"))
 
     @router.get("/ui/costs", response_class=HTMLResponse)
     def costs_dashboard() -> HTMLResponse:
