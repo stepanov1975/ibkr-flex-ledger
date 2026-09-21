@@ -3,9 +3,12 @@
 from sqlalchemy import Engine, text
 from typing import Any
 
+from app.analytics.account_checks import account_calculation_checks
+from .account_insight_evidence import db_account_insight_evidence
 from app.analytics.account_insights import AccountInsights, InsightRow
 
-_SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV")
+_SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV",
+             "FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase")
 _ELIGIBLE = """
 SELECT a.* FROM raw_artifact a
 JOIN ingestion_run owner ON owner.ingestion_run_id=a.ingestion_run_id
@@ -40,5 +43,8 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
             ORDER BY a.report_date_local DESC,a.created_at_utc DESC,
                      a.raw_artifact_id DESC,r.raw_record_id DESC
         """), {"account_id": account_id}).mappings().all()
-        return AccountInsights([InsightRow(**dict(row)) for row in rows],
-                               [InsightRow(**dict(row)) for row in history]).build()
+        sources = [InsightRow(**dict(row)) for row in rows]
+        report = AccountInsights(sources, [InsightRow(**dict(row)) for row in history]).build()
+        evidence = db_account_insight_evidence(connection, account_id)
+        report["checks"] = account_calculation_checks(sources, evidence)
+        return report

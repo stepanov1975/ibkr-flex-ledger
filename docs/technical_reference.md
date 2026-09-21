@@ -729,3 +729,10 @@ Configuration file:
 - `.vscode/settings.json`
 
 If VS Code was already open when this was configured, run **Developer: Reload Window** once.
+
+Account insights calculation checks use signed remaining FIFO lots, remaining
+basis and current broker marks; broker-authoritative snapshot quantities are not
+treated as independent evidence. Period trading gains require exact fresh
+opening/closing snapshots and subtract canonical cash impacts. Cash rollforwards
+use native currency net cash; unsupported FX legs remain not comparable. MTM
+component checks are explicitly broker arithmetic, not independent ledger checks.

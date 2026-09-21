@@ -72,3 +72,7 @@ account figures or raw reports are committed as test fixtures.
 - Step 1 complete: independent review approved after fixing missing mode inputs,
   summary/lot selection and normalized history deduplication. Twelve focused
   analytics/UI/PostgreSQL tests pass; Ruff and MyPy pass. Fresh live export verified.
+- Step 2: independent review findings addressed (nullable deductions, freshness of
+  both period boundaries, ambiguous position detail). Focused analytics/UI and
+  PostgreSQL checks pass; live NAV and ChangeInNAV comparisons match. Ledger
+  checks explicitly distinguish independent evidence from broker arithmetic.
