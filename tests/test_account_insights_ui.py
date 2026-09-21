@@ -82,3 +82,15 @@ def test_settled_cash_ui_explains_negative_balances():
     rendered = context(report).eval('JSON.stringify(nodes.content)')
     assert 'USD -15.00' in rendered
     assert 'not buying power' in rendered
+
+
+def test_option_ui_links_to_existing_instrument_history():
+    from app.analytics.account_options import account_option_activity
+    from test_account_options import option
+    report = AccountInsights([], []).build()
+    trade = {'payload': {'tradeID': 'T', 'conid': 'o'}, 'currency': 'USD', 'quantity': Decimal('1'),
+             'price': Decimal('0'), 'side': 'BUY', 'instrument_id': 'instrument-id', 'event_id': 'event'}
+    report['option_activity'] = account_option_activity([option()], [trade])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert '/ui/stocks/instrument-id' in rendered
+    assert 'Assignment' in rendered

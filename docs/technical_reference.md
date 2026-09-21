@@ -752,3 +752,9 @@ Cash settlement shows ending and settled cash per native currency, with unsettle
 cash calculated as their difference only when both exist. BASE_SUMMARY is excluded
 from the currency rows. Negative balances retain their signs; settled cash is not
 labelled buying power or withdrawable funds.
+
+Option lifecycle rows from the selected OptionEAE section link through unique
+trade/security/currency identity to existing canonical executions and instrument
+history. Quantity and gross-proceeds checks exclude commissions/taxes. Underlying
+delivery checks require a unique same-date leg and use the reported multiplier;
+ambiguous or missing legs remain unverified. No synthetic trades are inserted.

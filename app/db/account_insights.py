@@ -3,6 +3,7 @@
 from sqlalchemy import Engine, text
 from typing import Any
 
+from app.analytics.account_options import account_option_activity
 from app.analytics.account_holdings import account_lending, account_settled_cash
 from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
@@ -11,7 +12,7 @@ from app.analytics.account_insights import AccountInsights, InsightRow
 
 _SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV",
              "FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase",
-             "OpenDividendAccruals", "ChangeInDividendAccruals", "InterestAccruals", "NetStockPositionSummary")
+             "OpenDividendAccruals", "ChangeInDividendAccruals", "InterestAccruals", "NetStockPositionSummary", "OptionEAE")
 _ELIGIBLE = """
 SELECT a.* FROM raw_artifact a
 JOIN ingestion_run owner ON owner.ingestion_run_id=a.ingestion_run_id
@@ -54,4 +55,5 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
         report["income"] = account_income(sources, [r for r in historical if r.section == "OpenDividendAccruals"], evidence["cash"])
         report["lending"] = account_lending(sources)
         report["settled_cash"] = account_settled_cash(sources)
+        report["option_activity"] = account_option_activity(sources, evidence["trades"])
         return report

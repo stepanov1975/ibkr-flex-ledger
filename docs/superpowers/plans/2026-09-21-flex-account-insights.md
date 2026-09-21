@@ -84,3 +84,6 @@ account figures or raw reports are committed as test fixtures.
   Six holdings/UI tests, Ruff and MyPy pass; ownership and collateral are distinct.
 - Step 5 complete: independent review approved native settled/unsettled cash.
   Eight holdings/UI tests, Ruff and MyPy pass.
+- Step 6 complete: independent review approved option lifecycle links and checks.
+  Live report's two assignments and their stock legs match; focused option/UI
+  tests, Ruff and MyPy pass. Expirations do not invent delivery legs.
