@@ -71,3 +71,14 @@ def test_lending_ui_shows_owned_and_lent_separately():
     assert 'LENT' in rendered
     assert '40.00%' in rendered
     assert 'Owned shares' in rendered
+
+
+def test_settled_cash_ui_explains_negative_balances():
+    from app.analytics.account_holdings import account_settled_cash
+    from test_account_insights import row
+    report = AccountInsights([], []).build()
+    report['settled_cash'] = account_settled_cash([row('CashReport', currency='USD',
+        endingCash='-10', endingSettledCash='-15')])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'USD -15.00' in rendered
+    assert 'not buying power' in rendered

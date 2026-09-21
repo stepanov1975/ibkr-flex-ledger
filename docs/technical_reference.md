@@ -747,3 +747,8 @@ The account lending panel preserves shares-at-IB as owned quantity, displays the
 magnitude of lent shares, and checks net shares using signed broker fields. Owned
 shares are compared only with unique same-date position summaries. NAV collateral
 and its securities offsets retain their own date and are not spendable cash.
+
+Cash settlement shows ending and settled cash per native currency, with unsettled
+cash calculated as their difference only when both exist. BASE_SUMMARY is excluded
+from the currency rows. Negative balances retain their signs; settled cash is not
+labelled buying power or withdrawable funds.

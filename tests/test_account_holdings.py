@@ -23,3 +23,16 @@ def test_lending_missing_values_and_zero_owned():
                              sharesLent="-5", netShares="-5")])["holdings"][0]
     assert r["lent_percent"] is None
     assert r["net_check"]["status"] == r["holding_check"]["status"] == "not_comparable"
+
+
+def test_settled_cash_excludes_base_and_preserves_negative_and_unknown():
+    from app.analytics.account_holdings import account_settled_cash
+    rows = [row("CashReport", currency="BASE_SUMMARY", endingCash="100", endingSettledCash="100"),
+            row("CashReport", currency="USD", endingCash="-10", endingSettledCash="-15"),
+            row("CashReport", currency="EUR", endingCash="20")]
+    report = account_settled_cash(rows)
+    assert len(report) == 2
+    assert report[0]["ending"] == D("-10")
+    assert report[0]["unsettled"] == D("5")
+    assert report[1]["settled"] is None
+    assert report[1]["unsettled"] is None

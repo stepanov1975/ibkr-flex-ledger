@@ -3,7 +3,7 @@
 from sqlalchemy import Engine, text
 from typing import Any
 
-from app.analytics.account_holdings import account_lending
+from app.analytics.account_holdings import account_lending, account_settled_cash
 from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
 from .account_insight_evidence import db_account_insight_evidence
@@ -53,4 +53,5 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
         report["checks"] = account_calculation_checks(sources, evidence)
         report["income"] = account_income(sources, [r for r in historical if r.section == "OpenDividendAccruals"], evidence["cash"])
         report["lending"] = account_lending(sources)
+        report["settled_cash"] = account_settled_cash(sources)
         return report

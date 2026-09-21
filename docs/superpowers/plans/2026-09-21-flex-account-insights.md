@@ -82,3 +82,5 @@ account figures or raw reports are committed as test fixtures.
   cash deductions. Eight focused income/UI tests, Ruff and MyPy pass.
 - Step 4 complete: independent review approved signed securities-lending view.
   Six holdings/UI tests, Ruff and MyPy pass; ownership and collateral are distinct.
+- Step 5 complete: independent review approved native settled/unsettled cash.
+  Eight holdings/UI tests, Ruff and MyPy pass.

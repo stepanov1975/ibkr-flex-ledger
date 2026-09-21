@@ -34,3 +34,22 @@ def account_lending(rows: list[InsightRow]) -> dict[str, Any]:
                                      ("slbCashCollateral", "slbDirectSecuritiesBorrowed", "slbDirectSecuritiesLent")]
     return {"holdings": holdings, "collateral": collateral,
             "collateral_date": nav["date"] if nav else None, "currency": nav["currency"] if nav else None}
+
+
+def account_settled_cash(rows: list[InsightRow]) -> list[dict[str, Any]]:
+    """Show native cash settlement without treating base summaries as extra cash."""
+    from .account_insights import insight_date
+
+    result = []
+    for row in AccountInsights(rows, []).section("CashReport"):
+        p = row.payload
+        currency = str(p.get("currency") or "").strip().upper()
+        if not currency or currency == "BASE_SUMMARY":
+            continue
+        ending, settled = insight_decimal(p.get("endingCash")), insight_decimal(p.get("endingSettledCash"))
+        result.append({"currency": currency, "from_date": insight_date(p.get("fromDate")),
+                       "to_date": insight_date(p.get("toDate")), "report_date": row.report_date,
+                       "ending": ending, "settled": settled,
+                       "unsettled": ending - settled if ending is not None and settled is not None else None,
+                       "raw_id": row.raw_id})
+    return result
