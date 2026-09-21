@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from app.analytics.account_insights import AccountInsights, InsightRow, insight_decimal
+from app.analytics.account_insights import AccountInsights, InsightRow, _CHANGE_COMPONENTS, _NAV_COMPONENTS, insight_decimal
 
 
 def row(section, **payload):
@@ -11,13 +11,15 @@ def row(section, **payload):
 
 
 def sample():
-    return [
+    rows = [
         row("EquitySummaryInBase", reportDate="20260918", currency="USD", total="155",
             cash="50", stock="100", dividendAccruals="3", interestAccruals="2",
             slbCashCollateral="20", slbDirectSecuritiesLent="-20"),
         row("CashReport", currency="BASE_SUMMARY", endingCash="50"),
         row("OpenPositions", conid="1", currency="USD", positionValue="100", levelOfDetail="SUMMARY"),
     ]
+    rows[0].payload.update({key: "0" for key in _NAV_COMPONENTS if key not in rows[0].payload})
+    return rows
 
 
 def test_nav_explains_accruals_and_offsets_collateral():
@@ -56,6 +58,7 @@ def test_nav_detects_unexplained_difference_and_missing_numbers():
 def test_change_nav_modes_twr_and_unknown_components():
     r = row("ChangeInNAV", startingValue="100", endingValue="112", mtm="10", realized="0",
             changeInUnrealized="0", dividends="2", twr="12", currency="USD")
+    r.payload.update({key: "0" for key in _CHANGE_COMPONENTS if key not in r.payload})
     report = AccountInsights([r], []).change_in_nav()
     assert report["check"]["status"] == "matched"
     assert report["twr_percent"] == Decimal("12")
@@ -90,3 +93,23 @@ def test_review_history_normalizes_dates_and_preserves_newest_precedence():
     result = AccountInsights([], history).build()["nav_history"]
     assert [r["date"] for r in result] == [date(2026, 9, 1), date(2026, 9, 18)]
     assert result[-1]["nav"] == Decimal("200")
+
+
+def test_missing_nav_component_cannot_match_even_when_remaining_values_balance():
+    rows = sample()
+    del rows[0].payload["interestAccruals"]
+    rows[0].payload["total"] = "153"
+    check = AccountInsights(rows, []).nav()["check"]
+    assert check["status"] == "not_comparable"
+    assert "interestAccruals" in check["reason"]
+
+
+def test_missing_nav_movement_cannot_match_even_when_remaining_values_balance():
+    payload = dict.fromkeys(_CHANGE_COMPONENTS, "0")
+    payload.update(startingValue="100", endingValue="110", mtm="10")
+    r = row("ChangeInNAV", **payload)
+    assert AccountInsights([r], []).change_in_nav()["check"]["status"] == "matched"
+    del r.payload["depositsWithdrawals"]
+    check = AccountInsights([r], []).change_in_nav()["check"]
+    assert check["status"] == "not_comparable"
+    assert "depositsWithdrawals" in check["reason"]

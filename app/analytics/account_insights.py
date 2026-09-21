@@ -121,6 +121,7 @@ class AccountInsights:
         currency = payload.get("currency")
         components: list[dict[str, Any]] = [{"field": key, "label": insight_label(key), "amount": insight_decimal(payload[key])}
                       for key in _NAV_COMPONENTS if key in payload]
+        missing = [key for key in _NAV_COMPONENTS if insight_decimal(payload.get(key)) is None]
         cash_rows = self.section("CashReport")
         cash = [item for item in cash_rows if item.payload.get("currency") == "BASE_SUMMARY"]
         positions = self.section("OpenPositions")
@@ -146,12 +147,13 @@ class AccountInsights:
             valid_dates = False
         estimate = insight_sum([insight_decimal(cash[0].payload.get("endingCash")), insight_sum(amounts)]) if valid_dates else None
         extras = insight_sum([entry["amount"] for entry in components if entry["field"] not in ("cash", "stock", "options", "bonds", "funds", "notes", "commodities", "crypto", "physDel")])
-        explained = insight_sum([estimate, extras])
+        explained = insight_sum([estimate, extras]) if not missing else None
         return {"date": day, "currency": currency, "total": insight_decimal(payload.get("total")),
                 "raw_id": row.raw_id, "components": components, "cash_and_positions": estimate,
                 "additional_components": extras,
                 "check": insight_check("Account value including accruals and other components",
                                        insight_decimal(payload.get("total")), explained,
+                                       "Missing NAV components: " + ", ".join(missing) if missing else
                                        "Same-date cash and positions plus reported additional NAV components; missing inputs remain unknown.")}
 
     def change_in_nav(self) -> dict[str, Any] | None:
@@ -174,12 +176,14 @@ class AccountInsights:
                  "currency", "fromDate", "toDate", "startingValue", "endingValue", "twr"}
         unknown = sorted(key for key, value in p.items() if key not in known and str(value).strip())
         starting, ending = insight_decimal(p.get("startingValue")), insight_decimal(p.get("endingValue"))
-        complete = not ambiguous and not unknown and all(insight_decimal(p.get(key)) is not None for key in mode_fields)
+        missing = [key for key in fields if insight_decimal(p.get(key)) is None]
+        complete = not ambiguous and not unknown and not missing
         calculated = insight_sum([starting, *[item["amount"] for item in components]]) if complete else None
         return {"from_date": insight_date(p.get("fromDate")), "to_date": insight_date(p.get("toDate")),
                 "currency": p.get("currency"), "starting": starting, "ending": ending,
                 "twr_percent": insight_decimal(p.get("twr")), "components": components, "raw_id": row.raw_id,
                 "unknown_fields": unknown, "check": insight_check("Period NAV movement", ending, calculated,
                     "Broker component arithmetic; MTM and realized modes are alternatives. Unknown fields: " + ", ".join(unknown)
-                    if unknown else "Broker component arithmetic; not an independent ledger check." if not ambiguous
+                    if unknown else "Missing NAV movements: " + ", ".join(missing) if missing
+                    else "Broker component arithmetic; not an independent ledger check." if not ambiguous
                     else "Ambiguous MTM and realized components.")}

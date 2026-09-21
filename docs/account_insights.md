@@ -20,6 +20,9 @@ the ledger. Refresh reloads stored data; use ingestion to obtain a new export.
 
 Include these sections and their fields in Flex configuration, then import a new
 report. Missing sections or fields are unavailable, not zero.
+NAV and ChangeInNAV checks require all recognized components for the selected
+calculation mode, including explicit zeroes. Missing component names appear in
+the check explanation. Cash and MTM checks also run when OpenPositions is absent.
 
 ## Understanding checks
 

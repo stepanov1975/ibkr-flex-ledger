@@ -97,3 +97,18 @@ def test_review_ambiguous_position_cannot_match_fifo_summary():
         row("FIFOPerformanceSummaryInBase", conid="1", totalUnrealizedPnl="20")]
     checks = account_calculation_checks(rows, evidence())
     assert next(c for c in checks if c["name"] == "Summary unrealized P&L")["status"] == "not_comparable"
+
+
+def test_cash_and_mtm_checks_do_not_require_positions_section():
+    rows = [row("CashReport", currency="USD", fromDate="20260901", toDate="20260918",
+                startingCash="100", endingCash="80"),
+            row("MTMPerformanceSummaryInBase", conid="1", total="5", priorOpenMtm="1",
+                transactionMtm="6", commissions="-2", other="0")]
+    e = evidence()
+    e["trades"] = [{"report_date_local": date(2026, 9, 10), "net_cash": D("-20"),
+                    "currency": "USD", "payload": {"assetCategory": "STK"}}]
+    checks = account_calculation_checks(rows, e)
+    assert [c["name"] for c in checks] == ["Canonical cash rollforward", "MTM component arithmetic"]
+    assert all(c["status"] == "matched" for c in checks)
+    rows[0].payload["endingCash"] = "90"
+    assert account_calculation_checks(rows, e)[0]["status"] == "different"

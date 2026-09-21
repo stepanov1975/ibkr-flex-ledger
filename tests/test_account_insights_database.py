@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from app.analytics.account_insights import _CHANGE_COMPONENTS, _NAV_COMPONENTS
 from app.db.account_insights import db_account_insights
 from test_ingestion_integrity_regressions import database, _harness  # noqa: F401
 from test_end_to_end_seeded import _SEEDED_PAYLOAD
@@ -9,7 +10,10 @@ from test_end_to_end_seeded import _SEEDED_PAYLOAD
 
 def test_insights_successful_whole_sections_and_history(database):  # noqa: F811
     orchestrator, adapter, _, _, _, _, _ = _harness(database)
-    extra = b'<EquitySummaryInBase><EquitySummaryByReportDateInBase reportDate="20260821" currency="USD" total="250" cash="30" stock="220"/></EquitySummaryInBase><ChangeInNAV currency="USD" fromDate="20260820" toDate="20260821" startingValue="240" endingValue="250" mtm="10"/>'
+    nav_zeroes = " ".join(f'{key}="0"' for key in _NAV_COMPONENTS if key not in ("cash", "stock"))
+    movement_zeroes = " ".join(f'{key}="0"' for key in _CHANGE_COMPONENTS)
+    extra = (f'<EquitySummaryInBase><EquitySummaryByReportDateInBase reportDate="20260821" currency="USD" total="250" cash="30" stock="220" {nav_zeroes}/></EquitySummaryInBase>'
+             f'<ChangeInNAV currency="USD" fromDate="20260820" toDate="20260821" startingValue="240" endingValue="250" mtm="10" {movement_zeroes}/>').encode()
     adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"</FlexStatement>", extra + b"</FlexStatement>")
     assert orchestrator.job_execute("ingestion_run").status == "success"
     result = db_account_insights(database, "INTEGRITY")

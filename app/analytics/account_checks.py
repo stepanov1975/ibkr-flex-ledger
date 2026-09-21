@@ -13,16 +13,14 @@ def account_calculation_checks(rows: list[InsightRow], evidence: dict[str, Any])
     """Compare FIFO and canonical activity, refusing incompatible periods or stale values."""
     source = AccountInsights(rows, [])
     positions = source.section("OpenPositions")
-    if not positions:
-        return []
-    day = positions[0].report_date
+    day = positions[0].report_date if positions else None
     instruments = {i["conid"]: i for i in evidence["instruments"]}
     snapshots = {(s["instrument_id"], s["report_date_local"]): s for s in evidence["snapshots"]}
     broker_positions = {str(r.payload["conid"]): r for r in positions
                         if r.payload.get("conid") and r.payload.get("levelOfDetail", "SUMMARY") == "SUMMARY"
                         and r.payload.get("assetCategory") not in ("CASH", "FX")}
     checks = []
-    for conid in sorted(set(instruments) | set(broker_positions)):
+    for conid in sorted(set(instruments) | set(broker_positions)) if positions else []:
         instrument = instruments.get(conid, {})
         identifier = instrument.get("instrument_id")
         broker = broker_positions.get(conid)
