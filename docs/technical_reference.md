@@ -742,3 +742,8 @@ accruals as payment-check evidence, never summing repeated snapshots. Payment
 matches require action, security and currency identity; unmatched or fee-bearing
 cases remain unverified. Accrual reversals are not cash payments. Interest accrual
 rollforwards retain their periods and distinguish base summaries from currencies.
+
+The account lending panel preserves shares-at-IB as owned quantity, displays the
+magnitude of lent shares, and checks net shares using signed broker fields. Owned
+shares are compared only with unique same-date position summaries. NAV collateral
+and its securities offsets retain their own date and are not spendable cash.

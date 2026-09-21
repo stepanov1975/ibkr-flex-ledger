@@ -59,3 +59,15 @@ def test_income_ui_keeps_pending_and_paid_separate():
     assert 'Expected net' in rendered
     assert 'USD 8.00' in rendered
     assert 'not comparable' in rendered
+
+
+def test_lending_ui_shows_owned_and_lent_separately():
+    from app.analytics.account_holdings import account_lending
+    from test_account_insights import row
+    report = AccountInsights([], []).build()
+    report['lending'] = account_lending([row('NetStockPositionSummary', conid='1', symbol='LENT',
+        sharesAtIb='100', sharesLent='-40', sharesBorrowed='0', netShares='60')])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'LENT' in rendered
+    assert '40.00%' in rendered
+    assert 'Owned shares' in rendered

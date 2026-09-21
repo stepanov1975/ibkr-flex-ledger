@@ -80,3 +80,5 @@ account figures or raw reports are committed as test fixtures.
   implemented. Live export contains action IDs; missing identities remain visible
   as unverified. Review fixes preserve ambiguous entitlement groups and canonical
   cash deductions. Eight focused income/UI tests, Ruff and MyPy pass.
+- Step 4 complete: independent review approved signed securities-lending view.
+  Six holdings/UI tests, Ruff and MyPy pass; ownership and collateral are distinct.
