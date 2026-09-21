@@ -39,6 +39,7 @@ def render_ui_page(html: str, active_page: str = "") -> str:
         + f'>{label}</a>'
         for href, label in (
             ("/ui", "Home"),
+            ("/ui/account", "Account insights"),
             ("/ui/costs", "Costs"),
             ("/ui/transfers", "Transfers"),
             ("/ui/operations", "Operations"),

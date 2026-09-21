@@ -69,3 +69,6 @@ account figures or raw reports are committed as test fixtures.
 ## Progress
 
 - Planning: fresh export completed successfully; ChangeInNAV is now present.
+- Step 1 complete: independent review approved after fixing missing mode inputs,
+  summary/lot selection and normalized history deduplication. Twelve focused
+  analytics/UI/PostgreSQL tests pass; Ruff and MyPy pass. Fresh live export verified.

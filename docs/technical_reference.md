@@ -653,6 +653,18 @@ and instrument counts plus the covered date range.
 
 ## Reconciliation diff mode (Task 11)
 
+### Account insights
+
+`GET /reports/account-insights` and `/ui/account` expose broker NAV components,
+normalized daily NAV history, and ChangeInNAV period movements/TWR. Read-only
+queries select whole sections from successful artifacts in a repeatable read.
+Failed reports cannot supersede published sources. Raw IDs, artifact IDs and
+statement dates accompany sections. History normalizes row dates and prefers the
+newest successful source. Cash/position comparisons require matching statement
+dates; summary positions exclude lot detail. Missing inputs remain unknown.
+MTM and realized/change-in-unrealized are alternative modes; TWR is never added
+to money. Existing portfolio profit and return-on-net-transfers remain unchanged.
+
 `GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
 frozen tolerance matrix in [contracts](contracts.md). JSON and `format=csv` outputs include
 absolute/relative differences, tolerances, pass/fail state, provisional state, and source

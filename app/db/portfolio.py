@@ -12,6 +12,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .stock_history import db_stock_history
+from .account_insights import db_account_insights
 from .corporate_action_evidence import action_evidence
 
 from .portfolio_interfaces import (
@@ -364,6 +365,9 @@ class SQLAlchemyPortfolioService:
         except SQLAlchemyError as error:
             raise RuntimeError("manual case update failed") from error
         return self._manual_case(full_row)
+
+    def db_report_account_insights(self, account_id: str) -> dict[str, Any]:
+        return db_account_insights(self._engine, self._text(account_id, "account_id"))
 
     def db_report_stock_history(self, account_id: str, instrument_id: UUID) -> dict[str, Any] | None:
         return db_stock_history(self._engine, self._text(account_id, "account_id"), instrument_id)

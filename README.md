@@ -4,6 +4,7 @@ Self-hosted portfolio accounting and analytics for Interactive Brokers (IBKR) Fl
 
 ## Features
 
+- **Account insights:** Open `/ui/account` for broker NAV, dated account-value history, a cash/positions/accrual comparison and statement-period Change in NAV with broker TWR.
 - **Portfolio overview:** View positions, realized and unrealized profit and loss, cash balances by currency, net transfers, and estimated portfolio value and profit when the required data is available.
 - **Stock history:** Open a symbol to explore its trades, related options, cashflows, corporate actions, and open or closed FIFO lots, including partial closes.
 - **Costs and dividends:** Review commissions, interest, taxes, other fees, and dividend payments. Break securities commissions down by instrument type and buy/sell side.
