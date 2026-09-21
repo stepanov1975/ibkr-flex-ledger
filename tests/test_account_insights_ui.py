@@ -116,3 +116,41 @@ def test_commission_ui_reports_coverage_and_signed_costs():
     assert 'USD -3.00' in rendered
     assert '1 of 1 commissioned executions' in rendered
     assert 'already included in totals' in rendered
+
+
+def test_checks_show_differences_first_and_preserve_quantity_precision():
+    report = AccountInsights([], []).build()
+    report['checks'] = [
+        {'symbol': 'MATCHED', 'name': 'Quantity', 'currency': 'units', 'broker': '2', 'calculated': '2',
+         'difference': '0', 'status': 'matched', 'reason': '', 'from_date': None, 'to_date': None},
+        {'symbol': 'DIFFERENT', 'name': 'Quantity', 'currency': 'units', 'broker': '2', 'calculated': '2.0001',
+         'difference': '0.0001', 'status': 'different', 'reason': '', 'from_date': None, 'to_date': None}]
+    ctx = context(report)
+    rendered = ctx.eval('JSON.stringify(nodes.content)')
+    assert '0.0001 units' in rendered
+    assert 'MATCHED' not in rendered
+    ctx.eval("""
+function findInput(n){if(n.tagName==='input')return n;for(const child of n.children){const found=findInput(child);if(found)return found}return null}
+const toggle=findInput(nodes.content);toggle.checked=true;toggle.onchange();
+""")
+    assert 'MATCHED' in ctx.eval('JSON.stringify(nodes.content)')
+
+
+def test_detail_checks_explain_the_values_behind_a_difference():
+    from app.analytics.account_commissions import account_commissions
+    from test_account_commissions import detail, trade
+    report = AccountInsights([], []).build()
+    report['commissions'] = account_commissions([detail()], [trade(commission=Decimal('-4'))])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'broker USD -3.00; calculated USD -4.00; difference USD -1.00' in rendered
+
+
+def test_lending_exceptions_visible_even_without_shares_on_loan():
+    from app.analytics.account_holdings import account_lending
+    from test_account_insights import row
+    report = AccountInsights([], []).build()
+    report['lending'] = account_lending([row('NetStockPositionSummary', conid='1',
+        symbol='EXCEPTION', sharesAtIb='100', sharesLent='0', sharesBorrowed='0', netShares='99')])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'EXCEPTION' in rendered
+    assert 'difference 1 units' in rendered

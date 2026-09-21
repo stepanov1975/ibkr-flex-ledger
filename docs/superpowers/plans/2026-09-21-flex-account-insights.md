@@ -94,3 +94,39 @@ account figures or raw reports are committed as test fixtures.
 - Step 8 complete: independent review approved commission components, execution
   links and coverage. Eleven commission/UI tests pass. Live data: ten component
   sums match, nine execution comparisons match and one differs. Ruff/MyPy pass.
+
+## Completion and validation
+
+All eight steps were independently reviewed, findings fixed and committed before
+starting the next step:
+
+| Step | Commit |
+| --- | --- |
+| NAV/history/ChangeInNAV | e8e18b8 |
+| Independent calculation checks | afab0f7 |
+| Pending income | 1f3fa53 |
+| Securities lending | 1369853 |
+| Settled cash | fd4c9e5 |
+| Option lifecycle | d3f0651 |
+| Concentration | 549c138 |
+| Commission details | a586561 |
+
+A second independent integration reviewer identified two UI issues: mismatch
+values were hidden in some panels, and lending exceptions could be filtered out.
+Both were fixed and approved with executable UI regressions. Calculation checks
+show exceptions first with a matched toggle and preserve eight-decimal quantities.
+Large panels scroll; source identities are expandable.
+
+Validation on 2026-09-21:
+
+- Full repository suite after all eight features: 884 passed.
+- Final focused account-insights suite, including PostgreSQL and final UI fixes:
+  44 passed, no skips.
+- Explicit seeded release gate plus account-insights PostgreSQL regression:
+  11 passed, no skips.
+- Ruff, MyPy and git diff whitespace check pass.
+- Read-only live API/UI smoke checks: HTTP 200; monetary JSON values remain strings.
+- Fresh export imported the newly configured ChangeInNAV successfully.
+
+User guide: ../../account_insights.md. Implemented on codex/flex-account-insights;
+no deployment, push, pull request or merge was performed.
