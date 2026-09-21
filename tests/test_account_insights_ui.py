@@ -94,3 +94,12 @@ def test_option_ui_links_to_existing_instrument_history():
     rendered = context(report).eval('JSON.stringify(nodes.content)')
     assert '/ui/stocks/instrument-id' in rendered
     assert 'Assignment' in rendered
+
+
+def test_concentration_ui_labels_derivative_weights():
+    from app.analytics.account_holdings import account_concentration
+    report = AccountInsights([], []).build()
+    report['concentration'] = account_concentration([])
+    rendered = context(report).eval('JSON.stringify(nodes.content)')
+    assert 'Option weights do not measure underlying exposure' in rendered
+    assert 'cash and accruals excluded' in rendered

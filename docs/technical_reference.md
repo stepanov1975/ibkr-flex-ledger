@@ -758,3 +758,10 @@ trade/security/currency identity to existing canonical executions and instrument
 history. Quantity and gross-proceeds checks exclude commissions/taxes. Underlying
 delivery checks require a unique same-date leg and use the reported multiplier;
 ambiguous or missing legs remain unverified. No synthetic trades are inserted.
+
+Concentration shows signed whole-account NAV weights separately from IBKR
+OpenPositions.percentOfNAV, which IBKR defines against the asset-class total:
+https://www.ibkrguides.com/reportingreference/reportguide/open%20positionsfq.htm .
+Broker percentage checks therefore use asset-class totals. Securities allocation
+excludes cash/accruals; quotation currency is not economic FX exposure, and option
+market value is not delta exposure. Missing FX or duplicate summaries remain unknown.

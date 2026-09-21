@@ -36,3 +36,29 @@ def test_settled_cash_excludes_base_and_preserves_negative_and_unknown():
     assert report[0]["unsettled"] == D("5")
     assert report[1]["settled"] is None
     assert report[1]["unsettled"] is None
+
+
+def test_concentration_signed_weights_and_missing_fx():
+    from app.analytics.account_holdings import account_concentration
+    rows = [row("EquitySummaryInBase", total="1000", currency="USD", reportDate="20260918"),
+            row("OpenPositions", conid="1", symbol="SHORT", assetCategory="OPT", currency="USD",
+                positionValue="-100", percentOfNAV="100"),
+            row("OpenPositions", conid="2", symbol="LONG", assetCategory="STK", currency="EUR",
+                positionValue="200", fxRateToBase="1.5", percentOfNAV="100")]
+    report = account_concentration(rows)
+    assert [r["symbol"] for r in report["holdings"]] == ["LONG", "SHORT"]
+    assert all(r["check"]["status"] == "matched" for r in report["holdings"])
+    assert report["holdings"][0]["calculated_percent"] == D("30")
+    assert report["holdings"][1]["calculated_percent"] == D("-10")
+    rows[-1].payload.pop("fxRateToBase")
+    report = account_concentration(rows)
+    assert next(r for r in report["currency_allocation"] if r["currency"] == "EUR")["value_usd"] is None
+
+
+def test_concentration_zero_nav_and_duplicate_rows_are_unknown():
+    from app.analytics.account_holdings import account_concentration
+    nav = row("EquitySummaryInBase", total="0", currency="USD", reportDate="20260918")
+    position = row("OpenPositions", conid="1", symbol="TEST", positionValue="20", currency="USD")
+    assert account_concentration([nav, position])["holdings"][0]["calculated_percent"] is None
+    nav.payload["total"] = "100"
+    assert all(r["value_usd"] is None for r in account_concentration([nav, position, position])["holdings"])

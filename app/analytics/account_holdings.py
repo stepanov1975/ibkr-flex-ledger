@@ -53,3 +53,51 @@ def account_settled_cash(rows: list[InsightRow]) -> list[dict[str, Any]]:
                        "unsettled": ending - settled if ending is not None and settled is not None else None,
                        "raw_id": row.raw_id})
     return result
+
+
+def account_concentration(rows: list[InsightRow]) -> dict[str, Any]:
+    """Show signed market-value weights without implying derivative delta exposure."""
+    source = AccountInsights(rows, [])
+    nav = source.nav()
+    total = nav["total"] if nav else None
+    holdings = []
+    positions = source.section("OpenPositions")
+    summaries = [r for r in positions if r.payload.get("conid")
+                 and r.payload.get("levelOfDetail", "SUMMARY") == "SUMMARY"
+                 and r.payload.get("assetCategory") not in ("CASH", "FX")]
+    for row in summaries:
+        p = row.payload
+        value, rate = insight_decimal(p.get("positionValue")), insight_decimal(p.get("fxRateToBase"))
+        currency = str(p.get("currency") or "").strip().upper()
+        if currency == "USD":
+            rate = Decimal("1")
+        unique = sum(r.payload["conid"] == p["conid"] for r in summaries) == 1
+        base = value * rate if unique and value is not None and rate is not None and rate > 0 else None
+        aligned = nav and nav["currency"] == "USD" and nav["date"] == row.report_date
+        percent = base / total * 100 if aligned and base is not None and total is not None and total > 0 else None
+        broker_percent = insight_decimal(p.get("percentOfNAV"))
+        holdings.append({"symbol": p.get("symbol"), "conid": p["conid"], "asset_category": p.get("assetCategory"),
+                         "currency": currency, "date": row.report_date, "value_usd": base, "class_percent": None,
+                         "broker_percent": broker_percent, "calculated_percent": percent, "raw_id": row.raw_id,
+                         "check": insight_check("Broker asset-class weight (%)", broker_percent, None,
+                                                "Asset-class identity is required for the broker percentage check.")})
+    holdings.sort(key=lambda r: (r["value_usd"] is None, -abs(r["value_usd"] or Decimal("0")), str(r["symbol"])))
+    allocations = []
+    for category in sorted({r["asset_category"] for r in holdings if r["asset_category"]}):
+        selected = [r for r in holdings if r["asset_category"] == category]
+        class_total = insight_sum([r["value_usd"] for r in selected])
+        for holding in selected:
+            class_percent = (holding["value_usd"] / class_total * 100
+                             if holding["value_usd"] is not None and class_total not in (None, Decimal("0")) else None)
+            holding["class_percent"] = class_percent
+            holding["check"] = insight_check("Broker asset-class weight (%)", holding["broker_percent"], class_percent,
+                "IBKR percentOfNAV divides position value by its asset-class total, not whole-account NAV.")
+        allocations.append({"asset_category": category, "value_usd": class_total,
+                            "percent": insight_sum([r["calculated_percent"] for r in selected])})
+    currencies = []
+    for currency in sorted({r["currency"] for r in holdings if r["currency"]}):
+        selected = [r for r in holdings if r["currency"] == currency]
+        currencies.append({"currency": currency, "value_usd": insight_sum([r["value_usd"] for r in selected]),
+                           "percent": insight_sum([r["calculated_percent"] for r in selected])})
+    return {"holdings": holdings, "asset_allocation": allocations, "currency_allocation": currencies,
+            "nav_date": nav["date"] if nav else None, "nav": total}

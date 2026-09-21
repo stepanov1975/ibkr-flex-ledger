@@ -87,3 +87,7 @@ account figures or raw reports are committed as test fixtures.
 - Step 6 complete: independent review approved option lifecycle links and checks.
   Live report's two assignments and their stock legs match; focused option/UI
   tests, Ruff and MyPy pass. Expirations do not invent delivery legs.
+- Step 7 complete: independently reviewed after live validation corrected the
+  misleading IBKR percentOfNAV name: broker percentages use asset-class totals.
+  Account NAV weights remain separate. Live checks: 101 matched, two unavailable.
+  Twelve holdings/UI tests, Ruff and MyPy pass.

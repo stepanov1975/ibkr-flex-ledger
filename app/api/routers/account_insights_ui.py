@@ -30,6 +30,13 @@ if(x.nav){const n=x.nav;s.append(node('p','As of '+day(n.date)+' · '+money(n.to
 s=section('Account value history');s.append(node('p','Successive statement observations. See dated values below.'));chart(s,x.nav_history);const details=node('details');details.append(node('summary','Dated values'));table(details,['Date','Broker NAV'],x.nav_history.map(p=>[day(p.date),money(p.nav,p.currency)]));s.append(details);
 s=section('What changed during the statement period');
 if(x.change_in_nav){const n=x.change_in_nav;s.append(node('p',day(n.from_date)+' to '+day(n.to_date)));table(s,['Starting value','Ending value','Broker time-weighted return'],[[money(n.starting,n.currency),money(n.ending,n.currency),n.twr_percent===null?'N/A':Number(n.twr_percent).toFixed(2)+'%']]);table(s,['Movement','Amount'],n.components.filter(c=>c.amount===null||Number(c.amount)!==0).map(c=>[c.label,money(c.amount,n.currency)]));check(s,n.check,n.currency)}else s.append(node('p','Change in NAV section unavailable.'));
+s=section('Portfolio concentration');
+if(x.concentration){const n=x.concentration;s.append(node('p','Signed market-value weights against broker NAV as of '+day(n.nav_date)+'. Holdings are ordered by absolute market value. Option weights do not measure underlying exposure; currency groups describe quotation currency, not economic currency risk.'));
+const pct=v=>v===null?'N/A':Number(v).toFixed(2)+'%';
+table(s,['Holding','Asset','Currency','Value (USD)','Broker asset-class weight','Calculated asset-class weight','Account NAV weight','Check'],n.holdings.map(r=>[r.symbol,r.asset_category,r.currency,money(r.value_usd),pct(r.broker_percent),pct(r.class_percent),pct(r.calculated_percent),r.check.status.replaceAll('_',' ')]));
+s.append(node('h3','Securities allocation (cash and accruals excluded)'));
+table(s,['Asset','Value (USD)','NAV weight'],n.asset_allocation.map(r=>[r.asset_category,money(r.value_usd),pct(r.percent)]));
+table(s,['Quotation currency','Securities value (USD)','NAV weight'],n.currency_allocation.map(r=>[r.currency,money(r.value_usd),pct(r.percent)]));}
 s=section('Option assignments, exercises and expirations');
 s.append(node('p','Linked to existing imported trades. Delivery checks require a unique underlying leg; adjusted contracts may need review.'));
 table(s,['Date','Instrument','Activity','Quantity','Multiplier','Gross proceeds','Trade quantity','Cash check','Delivery'],(x.option_activity||[]).map(r=>[day(r.date),instrumentLink(r.symbol,r.instrument_id),r.type,r.quantity,r.multiplier,money(r.proceeds,r.currency),r.quantity_check.status.replaceAll('_',' '),r.cash_check.status.replaceAll('_',' '),r.delivery?r.delivery.status.replaceAll('_',' '):'Not applicable']));
