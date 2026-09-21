@@ -76,3 +76,7 @@ account figures or raw reports are committed as test fixtures.
   both period boundaries, ambiguous position detail). Focused analytics/UI and
   PostgreSQL checks pass; live NAV and ChangeInNAV comparisons match. Ledger
   checks explicitly distinguish independent evidence from broker arithmetic.
+- Step 3: pending dividends, interest rollforward and historical payment checks
+  implemented. Live export contains action IDs; missing identities remain visible
+  as unverified. Review fixes preserve ambiguous entitlement groups and canonical
+  cash deductions. Eight focused income/UI tests, Ruff and MyPy pass.

@@ -736,3 +736,9 @@ treated as independent evidence. Period trading gains require exact fresh
 opening/closing snapshots and subtract canonical cash impacts. Cash rollforwards
 use native currency net cash; unsupported FX legs remain not comparable. MTM
 component checks are explicitly broker arithmetic, not independent ledger checks.
+
+Pending income reads current open dividend accruals as a snapshot and historical
+accruals as payment-check evidence, never summing repeated snapshots. Payment
+matches require action, security and currency identity; unmatched or fee-bearing
+cases remain unverified. Accrual reversals are not cash payments. Interest accrual
+rollforwards retain their periods and distinguish base summaries from currencies.

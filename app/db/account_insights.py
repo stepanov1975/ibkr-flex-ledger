@@ -3,12 +3,14 @@
 from sqlalchemy import Engine, text
 from typing import Any
 
+from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
 from .account_insight_evidence import db_account_insight_evidence
 from app.analytics.account_insights import AccountInsights, InsightRow
 
 _SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV",
-             "FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase")
+             "FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase",
+             "OpenDividendAccruals", "ChangeInDividendAccruals", "InterestAccruals")
 _ELIGIBLE = """
 SELECT a.* FROM raw_artifact a
 JOIN ingestion_run owner ON owner.ingestion_run_id=a.ingestion_run_id
@@ -39,12 +41,14 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
                 r.section_name AS section,r.source_payload AS payload,r.raw_record_id::text AS raw_id,
                 a.raw_artifact_id::text AS artifact_id,a.report_date_local AS report_date
             FROM eligible a JOIN raw_record r USING(raw_artifact_id)
-            WHERE r.section_name='EquitySummaryInBase' AND r.source_payload->>'reportDate' IS NOT NULL
+            WHERE r.section_name IN ('EquitySummaryInBase','OpenDividendAccruals')
             ORDER BY a.report_date_local DESC,a.created_at_utc DESC,
                      a.raw_artifact_id DESC,r.raw_record_id DESC
         """), {"account_id": account_id}).mappings().all()
         sources = [InsightRow(**dict(row)) for row in rows]
-        report = AccountInsights(sources, [InsightRow(**dict(row)) for row in history]).build()
+        historical = [InsightRow(**dict(row)) for row in history]
+        report = AccountInsights(sources, [r for r in historical if r.section == "EquitySummaryInBase"]).build()
         evidence = db_account_insight_evidence(connection, account_id)
         report["checks"] = account_calculation_checks(sources, evidence)
+        report["income"] = account_income(sources, [r for r in historical if r.section == "OpenDividendAccruals"], evidence["cash"])
         return report

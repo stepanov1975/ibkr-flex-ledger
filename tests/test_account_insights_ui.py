@@ -47,3 +47,15 @@ def test_account_ui_error_empty_and_retry():
         pass
     assert "NAV section unavailable" in ctx.eval("JSON.stringify(nodes.content)")
     assert "Loaded" in ctx.eval("nodes.status.textContent")
+
+
+def test_income_ui_keeps_pending_and_paid_separate():
+    from app.analytics.account_income import account_income
+    from test_account_income import accrual
+    report = AccountInsights([], []).build()
+    report['income'] = account_income([accrual()], [accrual()], [])
+    ctx = context(report)
+    rendered = ctx.eval('JSON.stringify(nodes.content)')
+    assert 'Expected net' in rendered
+    assert 'USD 8.00' in rendered
+    assert 'not comparable' in rendered
