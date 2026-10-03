@@ -9,7 +9,7 @@ from .fifo_engine import (
 	fifo_compute_instrument,
 )
 from .snapshot_dates import snapshot_resolve_report_date_local
-from .snapshot_service import SnapshotBuildResult, StockLedgerSnapshotService
+from .snapshot_service import SnapshotBuildResult, SnapshotRebuildScope, SnapshotScopeMode, StockLedgerSnapshotService
 
 __all__ = [
 	"LedgerComputationResult",
@@ -21,5 +21,7 @@ __all__ = [
 	"fifo_compute_instrument",
 	"snapshot_resolve_report_date_local",
 	"SnapshotBuildResult",
+	"SnapshotRebuildScope",
+	"SnapshotScopeMode",
 	"StockLedgerSnapshotService",
 ]

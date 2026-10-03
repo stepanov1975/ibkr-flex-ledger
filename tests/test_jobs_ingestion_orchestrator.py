@@ -34,7 +34,7 @@ from app.db.interfaces import (
 )
 from app.jobs import IngestionJobOrchestrator, IngestionOrchestratorConfig
 import app.jobs.ingestion_orchestrator as ingestion_module
-from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService
+from app.ledger import SnapshotBuildResult, SnapshotRebuildScope, SnapshotScopeMode, StockLedgerSnapshotService
 
 
 _ARTIFACT_OWNER_RUN_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -452,6 +452,7 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
         functional_currency: str,
         affected_conids: frozenset[str] | None = None,
         affected_currencies: frozenset[str] | None = None,
+        rebuild_scope: SnapshotRebuildScope | None = None,
     ) -> SnapshotBuildResult:
         """Capture snapshot trigger parameters and return deterministic result.
 
@@ -460,6 +461,9 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             ingestion_run_id: Ingestion run identifier.
             report_date_local: Flex statement business date.
             functional_currency: Functional/base reporting currency code.
+            rebuild_scope: Optional change hints that determine the captured scope
+                and returned rebuild mode and reason; a full-rebuild reason clears
+                the affected security and currency hints.
 
         Returns:
             object: Lightweight snapshot build result.
@@ -468,6 +472,14 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             RuntimeError: This stub does not raise runtime errors.
         """
 
+        full_rebuild_reason = self.full_rebuild_reason
+        if rebuild_scope is not None:
+            full_rebuild_reason = full_rebuild_reason or rebuild_scope.full_rebuild_reason
+            affected_conids = None if full_rebuild_reason else rebuild_scope.conids
+            affected_currencies = None if full_rebuild_reason else rebuild_scope.currencies
+        scope_mode = SnapshotScopeMode.FULL_FALLBACK if affected_conids is None and affected_currencies is None else (
+            SnapshotScopeMode.INCREMENTAL if affected_conids or affected_currencies else SnapshotScopeMode.SKIPPED
+        )
         self.build_calls += 1
         self.affected_conids = affected_conids
         self.affected_currencies = affected_currencies
@@ -490,7 +502,8 @@ class _SnapshotServiceStub(StockLedgerSnapshotService):  # type: ignore[misc]
             broker_position_mismatch_count=1,
             broker_only_position_count=1,
             broker_absent_nonzero_fifo_count=1,
-            full_rebuild_reason=self.full_rebuild_reason,
+            full_rebuild_reason=full_rebuild_reason,
+            scope_mode=scope_mode,
         )
 
 
@@ -870,9 +883,6 @@ class _CanonicalRepositoryStub:
     def db_canonical_mark_valuation_pending(self, account_id: str, ingestion_run_id: str) -> None:
         pass
 
-    def db_canonical_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
-        return False
-
     def __init__(
         self,
         changed_rows: list[RawRecordForCanonicalMapping] | None = None,
@@ -1090,7 +1100,7 @@ def _build_orchestrator(
     ingestion_repository: _RepositoryStub,
     raw: _RawPersistenceStub | None = None,
     canonical: _CanonicalRepositoryStub | None = None,
-    snapshot: _SnapshotServiceStub | None = None,
+    snapshot: StockLedgerSnapshotService | None = None,
 ) -> IngestionJobOrchestrator:
     """Build an orchestrator with all semantic services configured."""
 
@@ -1273,47 +1283,51 @@ def test_distinct_artifact_reads_changed_rows_and_passes_incremental_scope() -> 
     assert _completed_stage_details(repository)["snapshot"]["snapshot_scope_mode"] == "incremental"
 
 
-def test_missing_report_date_baseline_is_reported_as_full_fallback() -> None:
-    """Expose a service-widened first-date build in ingestion diagnostics."""
+@pytest.mark.parametrize(
+    ("has_changes", "baseline", "mode", "reason"),
+    [(False, 0, "full_fallback", "missing_report_date_baseline"),
+     (True, 0, "full_fallback", "missing_report_date_baseline"),
+     (False, 1, "skipped", None),
+     (True, 1, "incremental", None)],
+)
+def test_ingestion_records_actual_snapshot_scope(
+    has_changes: bool,
+    baseline: int,
+    mode: str,
+    reason: str | None,
+) -> None:
+    """Run real rebuild policy so ingestion diagnostics agree with persisted P&L."""
+    from decimal import Decimal
+    from test_ledger_snapshot_service_strict import _RepositoryStub as SnapshotRepositoryStub
+    from test_ledger_snapshot_service_strict import _snapshot_service, _trade
 
+    instrument_id = uuid4()
+    snapshot_repository = SnapshotRepositoryStub(
+        trades=[_trade(instrument_id, "BUY", "1", "50"),
+                _trade(instrument_id, "SELL", "1", "60", minute=1)],
+        valuations=[], scope_ids=[str(instrument_id)], existing_snapshot_count=baseline,
+    )
     repository = _RepositoryStub()
     canonical = _CanonicalRepositoryStub(
-        changed_rows=[_raw_row("Trades", {"conid": "100"})]
-    )
-    snapshot = _SnapshotServiceStub(
-        full_rebuild_reason="missing_report_date_baseline"
+        changed_rows=[_raw_row("OpenPositions", {"conid": "100"})] if has_changes else [],
     )
 
-    _build_orchestrator(
-        repository,
-        canonical=canonical,
-        snapshot=snapshot,
+    result = _build_orchestrator(
+        repository, canonical=canonical, snapshot=_snapshot_service(snapshot_repository),
     ).job_execute("ingestion_run")
 
+    assert result.status == "success"
     details = _completed_stage_details(repository)["snapshot"]
-    assert details["snapshot_scope_mode"] == "full_fallback"
-    assert details["snapshot_full_rebuild_reason"] == "missing_report_date_baseline"
-
-
-def test_empty_delta_can_report_missing_baseline_full_fallback() -> None:
-    """Let the snapshot service decide whether an empty delta needs a baseline."""
-
-    repository = _RepositoryStub()
-    canonical = _CanonicalRepositoryStub(changed_rows=[])
-    snapshot = _SnapshotServiceStub(
-        full_rebuild_reason="missing_report_date_baseline"
-    )
-
-    _build_orchestrator(
-        repository,
-        canonical=canonical,
-        snapshot=snapshot,
-    ).job_execute("ingestion_run")
-
-    details = _completed_stage_details(repository)["snapshot"]
-    assert snapshot.build_calls == 1
-    assert details["snapshot_scope_mode"] == "full_fallback"
-    assert details["snapshot_full_rebuild_reason"] == "missing_report_date_baseline"
+    assert type(details["snapshot_scope_mode"]) is str
+    assert details["snapshot_scope_mode"] == mode
+    assert details.get("snapshot_full_rebuild_reason") == reason
+    assert "snapshot_skip_reason" not in details
+    if mode == "skipped":
+        assert details["snapshot_row_count"] == 0
+        assert snapshot_repository.snapshot_requests.requests == []
+    else:
+        assert details["snapshot_row_count"] == 1
+        assert Decimal(snapshot_repository.snapshot_requests.requests[0].realized_pnl) == Decimal("10")
 
 
 def test_unscopable_changed_row_falls_back_to_full_snapshot() -> None:

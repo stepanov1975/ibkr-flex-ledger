@@ -5,6 +5,14 @@ and profit or loss.
 
 ## Language
 
+**Snapshot**:
+A dated record of an instrument's holdings, cost basis, and realized and unrealized
+profit or loss, expressed in the reporting currency.
+
+**Snapshot rebuild scope**:
+The instruments whose snapshots must be recalculated for an account and report date
+after changes to its accounting evidence.
+
 **Corporate-action accounting revision**:
 A change to a corporate action's accounting effect and the resulting holdings,
 cost basis, and profit or loss. It can follow a verified treatment or revised

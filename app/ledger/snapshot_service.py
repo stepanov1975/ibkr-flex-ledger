@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from uuid import NAMESPACE_URL, uuid5
 
 from app.domain.fx_rates import select_conversion_rate
@@ -27,6 +28,23 @@ from .fifo_engine import (
 )
 
 
+class SnapshotScopeMode(str, Enum):
+    """Rebuild classifications recorded in ingestion diagnostics."""
+
+    FULL_FALLBACK = "full_fallback"
+    INCREMENTAL = "incremental"
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class SnapshotRebuildScope:
+    """Changed security and currency hints, or a reason they cannot scope a rebuild."""
+
+    conids: frozenset[str] = frozenset()
+    currencies: frozenset[str] = frozenset()
+    full_rebuild_reason: str | None = None
+
+
 @dataclass(frozen=True)
 class SnapshotBuildResult:
     """Result payload for Task 7 snapshot build workflow.
@@ -41,6 +59,7 @@ class SnapshotBuildResult:
         broker_only_position_count: Broker rows without canonical trade or cashflow history.
         broker_absent_nonzero_fifo_count: Nonzero FIFO positions absent from broker rows.
         full_rebuild_reason: Reason an incremental request was widened to a full build.
+        scope_mode: Rebuild classification used by ingestion diagnostics.
     """
 
     report_date_local: str
@@ -52,6 +71,7 @@ class SnapshotBuildResult:
     broker_only_position_count: int = 0
     broker_absent_nonzero_fifo_count: int = 0
     full_rebuild_reason: str | None = None
+    scope_mode: SnapshotScopeMode = SnapshotScopeMode.FULL_FALLBACK
 
 
 class StockLedgerSnapshotService:
@@ -84,6 +104,7 @@ class StockLedgerSnapshotService:
         affected_currencies: frozenset[str] | None = None,
         reconcile_position_lots: bool = True,
         snapshot_instrument_ids: frozenset[str] | None = None,
+        rebuild_scope: SnapshotRebuildScope | None = None,
     ) -> SnapshotBuildResult:
         """Build and persist day-level snapshots for one account context.
 
@@ -96,6 +117,9 @@ class StockLedgerSnapshotService:
                 the final date when replaying historical snapshots in one transaction.
             snapshot_instrument_ids: Persist only these snapshot rows while processing
                 all connected instruments needed for complete lot accounting.
+            rebuild_scope: Automatic-ingestion change hints; replaces affected_conids
+                and affected_currencies and checks for removed broker holdings.
+                Omit for existing explicit full or incremental rebuild requests.
 
         Returns:
             SnapshotBuildResult: Persistence summary for this snapshot build run.
@@ -118,8 +142,22 @@ class StockLedgerSnapshotService:
             raise ValueError("report_date_local must use YYYY-MM-DD format") from error
         normalized_report_date = parsed_report_date.isoformat()
 
-        is_full_build = affected_conids is None and affected_currencies is None
         full_rebuild_reason: str | None = None
+        if rebuild_scope is not None:
+            affected_conids = rebuild_scope.conids
+            affected_currencies = rebuild_scope.currencies
+            full_rebuild_reason = rebuild_scope.full_rebuild_reason
+            # Missing canonical wiring supplies no current broker-position evidence.
+            if (full_rebuild_reason != "canonical_repository_not_configured"
+                    and ingestion_run_id is not None
+                    and self._repository.db_ledger_has_removed_positions(
+                        normalized_account_id, ingestion_run_id, normalized_report_date,
+                    )):
+                full_rebuild_reason = "removed_broker_positions"
+            if full_rebuild_reason is not None:
+                affected_conids = affected_currencies = None
+
+        is_full_build = affected_conids is None and affected_currencies is None
         if not is_full_build and self._repository.db_pnl_snapshot_daily_count(
             account_id=normalized_account_id,
             report_date_from=normalized_report_date,
@@ -133,8 +171,12 @@ class StockLedgerSnapshotService:
                 snapshot_row_count=0,
                 position_lot_row_count=0,
                 missing_solid_valuation_count=0,
+                scope_mode=SnapshotScopeMode.SKIPPED,
             )
 
+        scope_mode = (
+            SnapshotScopeMode.FULL_FALLBACK if is_full_build else SnapshotScopeMode.INCREMENTAL
+        )
         movement_reader = getattr(self._repository, "db_ledger_security_movement_list_for_account", None)
         movement_rows = [row for row in (
             movement_reader(account_id=normalized_account_id, through_report_date_local=normalized_report_date)
@@ -168,6 +210,7 @@ class StockLedgerSnapshotService:
                     snapshot_row_count=0,
                     position_lot_row_count=0,
                     missing_solid_valuation_count=0,
+                    scope_mode=scope_mode,
                 )
 
         trade_rows = self._repository.db_ledger_trade_fill_list_for_account(
@@ -652,6 +695,7 @@ class StockLedgerSnapshotService:
             broker_only_position_count=broker_only_position_count,
             broker_absent_nonzero_fifo_count=broker_absent_nonzero_fifo_count,
             full_rebuild_reason=full_rebuild_reason,
+            scope_mode=scope_mode,
         )
 
     def _build_open_position_valuation_map(

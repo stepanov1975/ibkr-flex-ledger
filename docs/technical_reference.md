@@ -411,6 +411,14 @@ milliseconds. Exact-duplicate skips and full-fallback stages include their
 reason. An empty affected scope is reported as `snapshot_scope_mode="skipped"`;
 it does not carry a separate skip reason.
 
+Ingestion interprets changed raw rows into a `SnapshotRebuildScope` request and
+records the snapshot module's resulting scope mode and reason. The snapshot module
+owns full-rebuild fallback, removed-holding detection, missing-baseline widening,
+and security-movement scope expansion. Removed-holding evidence is read through
+the snapshot database adapter in the workflow's transaction. Existing explicit
+replay and corporate-action rebuild requests retain their full or historical
+scope, and the workflows retain lock and transaction ownership.
+
 CLI trigger command additions:
 
 ```bash

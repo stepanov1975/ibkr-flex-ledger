@@ -159,6 +159,25 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("prior broker holdings read failed") from error
 
+    def db_ledger_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
+        """Detect deletions that cannot appear in the changed-current-row scope."""
+        try:
+            with self._connection_scope() as connection:
+                return bool(connection.scalar(text(
+                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
+                    "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
+                    "ORDER BY instrument_id,report_date_local DESC) "
+                    "SELECT EXISTS(SELECT 1 FROM latest s JOIN instrument i USING(instrument_id) "
+                    "WHERE s.position_qty<>0 AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH','FX') "
+                    "AND EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
+                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions') "
+                    "AND NOT EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
+                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions' "
+                    "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%' AND r.source_payload->>'conid'=i.conid))"
+                ), {'account_id': account_id, 'run_id': ingestion_run_id, 'day': report_date_local}))
+        except SQLAlchemyError as error:
+            raise RuntimeError("removed broker position check failed") from error
+
     def db_ledger_instrument_ids_for_scope(
         self,
         account_id: str,

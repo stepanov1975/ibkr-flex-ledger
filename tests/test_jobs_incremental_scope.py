@@ -4,7 +4,8 @@ from datetime import date
 from uuid import uuid4
 
 from app.db.interfaces import RawRecordForCanonicalMapping
-from app.jobs.incremental_scope import IncrementalSnapshotScope, job_build_incremental_snapshot_scope
+from app.jobs.incremental_scope import job_build_incremental_snapshot_scope
+from app.ledger import SnapshotRebuildScope
 
 
 def _raw_row(section_name: str, source_payload: dict[str, object]) -> RawRecordForCanonicalMapping:
@@ -42,18 +43,18 @@ def test_scope_requests_full_rebuild_when_relevant_key_is_missing() -> None:
 
 def test_scope_requests_full_rebuild_when_conid_is_not_a_string() -> None:
     scope = job_build_incremental_snapshot_scope([_raw_row("Trades", {"conid": None})])
-    assert scope == IncrementalSnapshotScope(
+    assert scope == SnapshotRebuildScope(
         frozenset(), frozenset(), "unscopable_changed_row:Trades:missing_conid"
     )
 
 
 def test_scope_requests_full_rebuild_when_fx_source_currency_is_not_a_string() -> None:
     scope = job_build_incremental_snapshot_scope([_raw_row("ConversionRates", {"fromCurrency": None})])
-    assert scope == IncrementalSnapshotScope(
+    assert scope == SnapshotRebuildScope(
         frozenset(), frozenset(), "unscopable_changed_row:ConversionRates:missing_fromCurrency"
     )
 
 
 def test_scope_is_empty_for_snapshot_irrelevant_sections() -> None:
     scope = job_build_incremental_snapshot_scope([_raw_row("AccountInformation", {"accountId": "U1"})])
-    assert scope == IncrementalSnapshotScope(frozenset(), frozenset(), None)
+    assert scope == SnapshotRebuildScope(frozenset(), frozenset(), None)

@@ -32,7 +32,13 @@ from app.db import (
     IngestionRunRecord,
 )
 from app.domain import domain_build_stage_event
-from app.ledger import SnapshotBuildResult, StockLedgerSnapshotService, snapshot_resolve_report_date_local
+from app.ledger import (
+    SnapshotBuildResult,
+    SnapshotRebuildScope,
+    SnapshotScopeMode,
+    StockLedgerSnapshotService,
+    snapshot_resolve_report_date_local,
+)
 
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import RawPayloadExtractionResult, job_raw_extract_payload_rows
@@ -555,7 +561,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                     status="completed",
                     details={
                         "snapshot_skip_reason": "snapshot_service_not_configured",
-                        "snapshot_scope_mode": "skipped",
+                        "snapshot_scope_mode": SnapshotScopeMode.SKIPPED.value,
                         "snapshot_duration_ms": 0,
                         "broker_position_match_count": 0,
                         "broker_position_mismatch_count": 0,
@@ -567,78 +573,31 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             return
 
         snapshot_skip_reason: str | None = None
-        snapshot_full_rebuild_reason: str | None = None
-        removed_positions = (
-            duplicate_skip_reason is None and self._canonical_repository is not None
-            and self._canonical_repository.db_canonical_has_removed_positions(
-                self._config.account_id, run_record_id, report_date_local,
-            )
-        )
         if duplicate_skip_reason is not None:
             snapshot_result = SnapshotBuildResult(
                 report_date_local=report_date_local,
                 snapshot_row_count=0,
                 position_lot_row_count=0,
                 missing_solid_valuation_count=0,
+                scope_mode=SnapshotScopeMode.SKIPPED,
             )
-            snapshot_scope_mode = "skipped"
             snapshot_duration_ms = 0
             snapshot_skip_reason = duplicate_skip_reason
-        elif canonical_raw_rows is None or removed_positions:
+        else:
+            scope = (
+                SnapshotRebuildScope(full_rebuild_reason="canonical_repository_not_configured")
+                if canonical_raw_rows is None else
+                job_build_incremental_snapshot_scope(canonical_raw_rows)
+            )
             snapshot_started_ns = perf_counter_ns()
             snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
                 account_id=self._config.account_id,
                 ingestion_run_id=run_record_id,
                 report_date_local=report_date_local,
                 functional_currency=self._config.functional_currency,
+                rebuild_scope=scope,
             )
             snapshot_duration_ms = _duration_ms(snapshot_started_ns)
-            snapshot_scope_mode = "full_fallback"
-            snapshot_full_rebuild_reason = (
-                "removed_broker_positions" if removed_positions else
-                "canonical_repository_not_configured"
-            )
-        else:
-            scope = job_build_incremental_snapshot_scope(canonical_raw_rows)
-            if scope.full_rebuild_reason is not None:
-                snapshot_started_ns = perf_counter_ns()
-                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
-                    account_id=self._config.account_id,
-                    ingestion_run_id=run_record_id,
-                    report_date_local=report_date_local,
-                    functional_currency=self._config.functional_currency,
-                )
-                snapshot_duration_ms = _duration_ms(snapshot_started_ns)
-                snapshot_scope_mode = "full_fallback"
-                snapshot_full_rebuild_reason = scope.full_rebuild_reason
-            elif not scope.conids and not scope.currencies:
-                snapshot_started_ns = perf_counter_ns()
-                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
-                    account_id=self._config.account_id,
-                    ingestion_run_id=run_record_id,
-                    report_date_local=report_date_local,
-                    functional_currency=self._config.functional_currency,
-                    affected_conids=scope.conids,
-                    affected_currencies=scope.currencies,
-                )
-                snapshot_duration_ms = _duration_ms(snapshot_started_ns)
-                snapshot_scope_mode = "skipped"
-            else:
-                snapshot_started_ns = perf_counter_ns()
-                snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
-                    account_id=self._config.account_id,
-                    ingestion_run_id=run_record_id,
-                    report_date_local=report_date_local,
-                    functional_currency=self._config.functional_currency,
-                    affected_conids=scope.conids,
-                    affected_currencies=scope.currencies,
-                )
-                snapshot_duration_ms = _duration_ms(snapshot_started_ns)
-                snapshot_scope_mode = "incremental"
-
-        if snapshot_result.full_rebuild_reason is not None:
-            snapshot_scope_mode = "full_fallback"
-            snapshot_full_rebuild_reason = snapshot_result.full_rebuild_reason
 
         snapshot_details: dict[str, object] = {
             "report_date_local": snapshot_result.report_date_local,
@@ -650,12 +609,12 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             "broker_only_position_count": snapshot_result.broker_only_position_count,
             "broker_absent_nonzero_fifo_count": snapshot_result.broker_absent_nonzero_fifo_count,
             "snapshot_duration_ms": snapshot_duration_ms,
-            "snapshot_scope_mode": snapshot_scope_mode,
+            "snapshot_scope_mode": snapshot_result.scope_mode.value,
         }
         if snapshot_skip_reason is not None:
             snapshot_details["snapshot_skip_reason"] = snapshot_skip_reason
-        if snapshot_full_rebuild_reason is not None:
-            snapshot_details["snapshot_full_rebuild_reason"] = snapshot_full_rebuild_reason
+        if snapshot_result.full_rebuild_reason is not None:
+            snapshot_details["snapshot_full_rebuild_reason"] = snapshot_result.full_rebuild_reason
         timeline.append(
             domain_build_stage_event(
                 stage="snapshot",

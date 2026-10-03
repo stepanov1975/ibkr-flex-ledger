@@ -21,7 +21,7 @@ from app.db.interfaces import (
     PnlSnapshotDailyUpsertRequest,
     PositionLotUpsertRequest,
 )
-from app.ledger.snapshot_service import StockLedgerSnapshotService
+from app.ledger.snapshot_service import SnapshotRebuildScope, SnapshotScopeMode, StockLedgerSnapshotService
 
 
 _RequestT = TypeVar("_RequestT")
@@ -46,6 +46,7 @@ class _RepositoryStub:
         instrument_currencies: list[str] | None = None,
         instrument_asset_categories: dict[str, str] | None = None,
         existing_snapshot_count: int = 1,
+        removed_positions: bool = False,
     ) -> None:
         self._trades = trades
         self._valuations = valuations
@@ -56,6 +57,8 @@ class _RepositoryStub:
         self._instrument_currencies = list(instrument_currencies or [])
         self._instrument_asset_categories = dict(instrument_asset_categories or {})
         self._existing_snapshot_count = existing_snapshot_count
+        self._removed_positions = removed_positions
+        self.removed_position_checks = 0
         self.position_requests: _SnapshotCapture[PositionLotUpsertRequest] = _SnapshotCapture(requests=[])
         self.snapshot_requests: _SnapshotCapture[PnlSnapshotDailyUpsertRequest] = _SnapshotCapture(requests=[])
         self.reconcile_call_count = 0
@@ -67,6 +70,10 @@ class _RepositoryStub:
         self.fx_currencies: tuple[str, ...] | None = None
         self.asset_category_instrument_ids: tuple[str, ...] | None = None
         self.read_call_count = 0
+
+    def db_ledger_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
+        self.removed_position_checks += 1
+        return self._removed_positions
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
         self.read_call_count += 1
@@ -601,8 +608,7 @@ def test_snapshot_build_limits_reads_and_writes_to_resolved_scope() -> None:
         ingestion_run_id="00000000-0000-0000-0000-000000000001",
         report_date_local="2026-08-21",
         functional_currency="USD",
-        affected_conids=frozenset({"100"}),
-        affected_currencies=frozenset({"AUD"}),
+        rebuild_scope=SnapshotRebuildScope(frozenset({"100"}), frozenset({"AUD"})),
     )
 
     expected = (instrument_id,)
@@ -790,6 +796,52 @@ def test_snapshot_build_none_scope_retains_full_reads() -> None:
     assert repository.open_position_instrument_ids is None
     assert repository.reconciled_instrument_ids is None
     assert repository.fx_currencies is None
+
+
+@pytest.mark.parametrize(
+    ("scope", "baseline", "removed", "mode", "reason", "checks"),
+    [
+        (SnapshotRebuildScope(), 0, False, SnapshotScopeMode.FULL_FALLBACK, "missing_report_date_baseline", 1),
+        (SnapshotRebuildScope(), 1, False, SnapshotScopeMode.SKIPPED, None, 1),
+        (SnapshotRebuildScope(), 1, True, SnapshotScopeMode.FULL_FALLBACK, "removed_broker_positions", 1),
+        (SnapshotRebuildScope(full_rebuild_reason="unscopable_changed_row:Trades:missing_conid"),
+         0, False, SnapshotScopeMode.FULL_FALLBACK, "unscopable_changed_row:Trades:missing_conid", 1),
+        (SnapshotRebuildScope(full_rebuild_reason="unscopable_changed_row:Trades:missing_conid"),
+         0, True, SnapshotScopeMode.FULL_FALLBACK, "removed_broker_positions", 1),
+        (SnapshotRebuildScope(full_rebuild_reason="canonical_repository_not_configured"),
+         0, True, SnapshotScopeMode.FULL_FALLBACK, "canonical_repository_not_configured", 0),
+        (SnapshotRebuildScope(conids=frozenset({"unknown"})), 1, False, SnapshotScopeMode.INCREMENTAL, None, 1),
+    ],
+)
+def test_snapshot_rebuild_scope_preserves_policy_precedence(
+    scope: SnapshotRebuildScope,
+    baseline: int,
+    removed: bool,
+    mode: SnapshotScopeMode,
+    reason: str | None,
+    checks: int,
+) -> None:
+    """Scope decisions and diagnostics use the same accounting evidence."""
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[_trade(instrument_id, "BUY", "1", "50"),
+                _trade(instrument_id, "SELL", "1", "60", minute=1)],
+        valuations=[], existing_snapshot_count=baseline, removed_positions=removed,
+    )
+
+    result = _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U1", str(uuid4()), "2026-08-21", "USD", rebuild_scope=scope,
+    )
+
+    assert result.scope_mode is mode
+    assert result.full_rebuild_reason == reason
+    assert repository.removed_position_checks == checks
+    if mode is SnapshotScopeMode.FULL_FALLBACK:
+        assert Decimal(repository.snapshot_requests.requests[0].realized_pnl) == Decimal("10")
+        assert repository.reconciled_instrument_ids is None
+    else:
+        assert repository.snapshot_requests.requests == []
+        assert repository.reconcile_call_count == 0
 
 
 def test_snapshot_uses_broker_quantity_and_cost_when_fifo_mismatches() -> None:
@@ -1275,7 +1327,7 @@ def test_snapshot_security_transfer_expands_scope_and_preserves_lot_origin():
     repository = _RepositoryStub(trades=[opening, sale], valuations=[], scope_ids=[str(new)])
     repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [movement]
     _snapshot_service(repository).ledger_snapshot_build_and_persist(
-        "U_TEST", None, "2026-08-21", "USD", affected_conids=frozenset({"new"}),
+        "U_TEST", None, "2026-08-21", "USD", rebuild_scope=SnapshotRebuildScope(conids=frozenset({"new"})),
     )
     assert set(repository.trade_instrument_ids) == {str(old), str(new)}
     assert set(repository.reconciled_instrument_ids) == {str(old), str(new)}
