@@ -84,6 +84,20 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
             raise ValueError("engine must not be None")
         self._engine = engine
 
+    def db_correction_account_lock(self, connection: Connection, account_id: str) -> None:
+        """Hold the caller's transaction lock while applying accounting corrections."""
+        from app.db.corporate_action_accounting import SplitCorrectionConflict
+
+        # Use the ingestion start lock and check its durable active-run marker.
+        # Holding this transaction lock prevents a new ingestion from starting.
+        key_1, key_2 = self._build_advisory_lock_keys(account_id)
+        locked = connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2)"), {"key_1": key_1, "key_2": key_2})
+        active = connection.scalar(text(
+            "SELECT EXISTS(SELECT 1 FROM ingestion_run WHERE account_id=:account_id AND status='started')"
+        ), {"account_id": account_id})
+        if not locked or active:
+            raise SplitCorrectionConflict("Ingestion or another correction is running. Try again after it finishes.")
+
     @contextmanager
     def db_ingestion_run_guard(self, account_id: str) -> Iterator[None]:
         """Own an atomic workflow until exit; recover rows only without a live owner."""

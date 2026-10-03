@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import CorporateActionManualCaseRecord, PortfolioRepositoryPort
-from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService, SplitCorrectionConflict
+from app.db.corporate_action_accounting import SplitCorrectionConflict
+from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
 from app.db.corporate_action_resolution import SQLAlchemyCorporateActionResolutionService
 
 

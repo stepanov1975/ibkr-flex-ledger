@@ -9,12 +9,8 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, text
 
 from app.db.ingestion_run import SQLAlchemyIngestionRunService
-from app.db.ledger_snapshot import SQLAlchemyLedgerSnapshotService
-from app.ledger import StockLedgerSnapshotService
-
-
-class SplitCorrectionConflict(ValueError):
-    """The case or accounting inputs changed, or ingestion is still running."""
+from app.db.corporate_action_accounting import CorporateActionAccountingRevision, SplitCorrectionConflict
+from app.db.corporate_action_evidence import accounting_inputs, split_snapshot_rows
 
 
 class SQLAlchemySplitCorrectionService:
@@ -27,8 +23,6 @@ class SQLAlchemySplitCorrectionService:
         note: str, preview_token: str | None = None,
     ) -> dict[str, Any]:
         """Rebuild in one transaction; commit only an unchanged, accepted preview."""
-        from app.db.corporate_action_resolution import _accounting_inputs, refresh_security_resolutions
-
         if not all(value.is_finite() and value > 0 for value in (new_shares, old_shares)):
             raise ValueError("New and old share quantities must be positive finite numbers.")
         if not note.strip():
@@ -36,7 +30,7 @@ class SQLAlchemySplitCorrectionService:
         factor = new_shares / old_shares
         with self._engine.connect() as connection:
             with connection.begin() as transaction:
-                self._lock_account(connection)
+                SQLAlchemyIngestionRunService(self._engine).db_correction_account_lock(connection, self._account_id)
                 params = {"case_id": case_id, "account_id": self._account_id}
                 case = connection.execute(text(
                     "SELECT c.*, e.reorg_code, e.conid, e.report_date_local, e.source_raw_record_id, "
@@ -62,7 +56,7 @@ class SQLAlchemySplitCorrectionService:
                 ):
                     raise ValueError("The ratio must match the split direction: new/old above 1 for a forward split, below 1 for a reverse split.")
                 params.update(instrument_id=case["instrument_id"], start_date=case["report_date_local"])
-                before = self._snapshots(connection, params)
+                before = split_snapshot_rows(connection, params)
                 if not any(snapshot["report_date_local"] >= case["report_date_local"] for snapshot in before):
                     raise SplitCorrectionConflict("No affected snapshots are available. Ingest the broker statement before correcting this case.")
                 newer_activity = connection.scalar(text(
@@ -75,45 +69,23 @@ class SQLAlchemySplitCorrectionService:
                 ), {**params, "last_snapshot_date": before[-1]["report_date_local"]})
                 if newer_activity:
                     raise SplitCorrectionConflict("Newer canonical activity has no snapshot. Reprocess the failed ingestion before correcting this case.")
-                accounting_inputs = self._accounting_inputs(connection, {
+                preview_inputs = self._accounting_inputs(connection, {
                     **params, "last_date": before[-1]["report_date_local"], "conid": case["conid"],
                     "run_ids": [str(snapshot["ingestion_run_id"]) for snapshot in before if snapshot["ingestion_run_id"] is not None],
                 })
-                accounting_inputs["security_resolutions"] = _accounting_inputs(connection, self._account_id)
+                preview_inputs["security_resolutions"] = accounting_inputs(connection, self._account_id)
                 lots_before = self._lots(connection, params)
-                connection.execute(text(
-                    "UPDATE corporate_action_manual_case SET split_factor=:factor, "
-                    "resolution_source_raw_record_id=:source_id, resolution_report_date_local=:start_date, action_type=:action_type, status='resolved', resolution_note=:note, "
-                    "resolved_at_utc=now(), updated_at_utc=now() WHERE case_id=:case_id"
-                ), {**params, "factor": factor, "source_id": case["source_raw_record_id"], "action_type": case["reorg_code"], "note": note.strip()})
-                connection.execute(text(
-                    "UPDATE event_corp_action SET requires_manual=false, provisional=false "
-                    "WHERE event_corp_action_id=:event_id"
-                ), {"event_id": case["event_corp_action_id"]})
-                refreshed_instrument_ids = refresh_security_resolutions(connection, self._engine, [], [self._account_id])
-                ledger = StockLedgerSnapshotService(SQLAlchemyLedgerSnapshotService(self._engine, connection=connection))
-                for snapshot in before:
-                    if str(case["instrument_id"]) in refreshed_instrument_ids or snapshot["report_date_local"] < case["report_date_local"]:
-                        continue
-                    ledger.ledger_snapshot_build_and_persist(
-                        account_id=self._account_id,
-                        ingestion_run_id=None if snapshot["ingestion_run_id"] is None else str(snapshot["ingestion_run_id"]),
-                        report_date_local=str(snapshot["report_date_local"]),
-                        functional_currency=snapshot["currency"],
-                        affected_conids=frozenset({case["conid"]}),
-                        affected_currencies=frozenset(),
-                        reconcile_position_lots=snapshot["report_date_local"] == before[-1]["report_date_local"],
-                    )
-                # A manual case previously marked every date for this instrument
-                # provisional. Clear that cause on earlier dates without changing
-                # their pre-action quantities or P&L, retaining other uncertainty.
-                connection.execute(text(
-                    "UPDATE pnl_snapshot_daily SET provisional=calculation_provisional OR EXISTS "
-                    "(SELECT 1 FROM corporate_action_manual_case c WHERE c.instrument_id=:instrument_id AND c.status='open') "
-                    "OR EXISTS (SELECT 1 FROM event_corp_action e WHERE e.instrument_id=:instrument_id AND e.requires_manual) "
-                    "WHERE account_id=:account_id AND instrument_id=:instrument_id AND report_date_local<:start_date"
-                ), params)
-                after = self._snapshots(connection, params)
+                with CorporateActionAccountingRevision(connection).split_revision(self._account_id, case["event_corp_action_id"]):
+                    connection.execute(text(
+                        "UPDATE corporate_action_manual_case SET split_factor=:factor, "
+                        "resolution_source_raw_record_id=:source_id, resolution_report_date_local=:start_date, action_type=:action_type, status='resolved', resolution_note=:note, "
+                        "resolved_at_utc=now(), updated_at_utc=now() WHERE case_id=:case_id"
+                    ), {**params, "factor": factor, "source_id": case["source_raw_record_id"], "action_type": case["reorg_code"], "note": note.strip()})
+                    connection.execute(text(
+                        "UPDATE event_corp_action SET requires_manual=false, provisional=false "
+                        "WHERE event_corp_action_id=:event_id"
+                    ), {"event_id": case["event_corp_action_id"]})
+                after = split_snapshot_rows(connection, params)
                 fields = ("position_qty", "cost_basis", "realized_pnl", "unrealized_pnl", "total_pnl", "provisional")
                 result = {
                     "case_id": str(case_id), "symbol": case["symbol"], "factor": str(factor),
@@ -127,7 +99,7 @@ class SQLAlchemySplitCorrectionService:
                 }
                 result = json.loads(json.dumps(result, default=str))
                 fingerprint = hashlib.sha256(json.dumps(
-                    {"result": result, "before": before, "accounting_inputs": accounting_inputs, "source": case["source_payload"],
+                    {"result": result, "before": before, "accounting_inputs": preview_inputs, "source": case["source_payload"],
                      "case_updated": case["updated_at_utc"], "note": note.strip()},
                     default=str, sort_keys=True,
                 ).encode()).hexdigest()
@@ -138,26 +110,6 @@ class SQLAlchemySplitCorrectionService:
                 if preview_token is None:
                     transaction.rollback()
                 return result
-
-    def _lock_account(self, connection: Connection) -> None:
-        # Use the ingestion start lock and check its durable active-run marker.
-        # Holding this transaction lock prevents a new ingestion from starting.
-        key_1, key_2 = SQLAlchemyIngestionRunService(self._engine)._build_advisory_lock_keys(self._account_id)
-        locked = connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key_1, :key_2)"), {"key_1": key_1, "key_2": key_2})
-        active = connection.scalar(text(
-            "SELECT EXISTS(SELECT 1 FROM ingestion_run WHERE account_id=:account_id AND status='started')"
-        ), {"account_id": self._account_id})
-        if not locked or active:
-            raise SplitCorrectionConflict("Ingestion or another correction is running. Try again after it finishes.")
-
-    @staticmethod
-    def _snapshots(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
-        return [dict(row) for row in connection.execute(text(
-            "SELECT report_date_local, ingestion_run_id, currency, position_qty, cost_basis, "
-            "realized_pnl, unrealized_pnl, total_pnl, provisional FROM pnl_snapshot_daily "
-            "WHERE account_id=:account_id AND instrument_id=:instrument_id "
-            "ORDER BY report_date_local"
-        ), params).mappings()]
 
     @staticmethod
     def _lots(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:

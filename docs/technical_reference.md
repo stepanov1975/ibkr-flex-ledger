@@ -590,7 +590,24 @@ endpoint only records acknowledgement; it cannot correct accounting or clear ind
 calculation uncertainty.
 The API and persistence workflow are implemented in
 `app/api/routers/corporate_actions.py`, `app/domain/corporate_actions.py`, and
-`app/db/corporate_action_correction.py`.
+`app/db/corporate_action_correction.py` / `app/db/corporate_action_resolution.py`.
+
+Corporate-action accounting revisions live in `app/db/corporate_action_accounting.py`.
+Its named split, movement, and canonical revision contexts use an explicit caller-owned
+SQLAlchemy connection. Workflows retain treatment validation, evidence writes, preview
+formatting/fingerprints, account locks, and commit/rollback decisions. Context entry
+captures affected holdings and historical valuation contexts; successful exit repairs
+accounting. Body failures skip repair, and repair failures propagate to the enclosing
+transaction. The revision module never opens or completes a transaction.
+
+Canonical revisions preserve saved split approvals and invalidate old/new instrument
+history before replacing source events. After the writes, they recheck saved movements,
+synchronize manual cases, rebuild dirty history, and refresh provisional flags, in that
+order. Instrument-only revisions also recheck saved treatments. Movement revisions
+preserve each date/run/currency valuation context and reconcile lots only in the final
+context. Split revisions first recheck saved movements, rebuild affected split dates
+through the latest existing snapshot, and clear only manual-case uncertainty on earlier
+dates. Canonical history rebuilds retain the ledger's existing lot horizon guard.
 
 ## Labels and notes (Task 9)
 

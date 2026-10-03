@@ -95,32 +95,30 @@ def test_lost_lock_connection_cannot_publish_semantics(database):
 
 
 def test_import_guard_and_manual_split_lock_exclude_each_other(database):
-    from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService, SplitCorrectionConflict
+    from app.db.corporate_action_accounting import SplitCorrectionConflict
 
     runs = SQLAlchemyIngestionRunService(database)
-    correction = SQLAlchemySplitCorrectionService(database, 'LOCKED')
     with runs.db_ingestion_run_guard('LOCKED'):
         with database.begin() as connection:
             with pytest.raises(SplitCorrectionConflict):
-                correction._lock_account(connection)
+                runs.db_correction_account_lock(connection, 'LOCKED')
     with database.begin() as connection:
-        correction._lock_account(connection)
+        runs.db_correction_account_lock(connection, 'LOCKED')
         with pytest.raises(IngestionRunAlreadyActiveError):
             with runs.db_ingestion_run_guard('LOCKED'):
                 pytest.fail('import started during a manual split correction')
 
 
 def test_replay_respects_manual_split_lock_and_records_success_after_release(database):
-    from app.db.corporate_action_correction import SQLAlchemySplitCorrectionService
     from test_ingestion_integrity_regressions import _replay
 
     harness = _harness(database)
     assert harness[0].job_execute('ingestion_run').status == 'success'
     with database.connect() as connection:
         period = connection.scalar(text('SELECT period_key FROM raw_artifact LIMIT 1'))
-    correction = SQLAlchemySplitCorrectionService(database, 'INTEGRITY')
+    runs = SQLAlchemyIngestionRunService(database)
     with database.begin() as connection:
-        correction._lock_account(connection)
+        runs.db_correction_account_lock(connection, 'INTEGRITY')
         with pytest.raises(IngestionRunAlreadyActiveError):
             _replay(harness, period)
         assert connection.scalar(text('SELECT count(*) FROM ingestion_run')) == 1

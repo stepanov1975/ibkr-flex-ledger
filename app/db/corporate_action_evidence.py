@@ -106,3 +106,53 @@ def _date(value: Any) -> str | None:
         return date.fromisoformat(str(value)).isoformat()
     except ValueError:
         return None
+
+
+def accounting_snapshot_rows(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(text(
+        'SELECT p.*,i.symbol,COALESCE(r.started_at_utc,p.calculated_at_utc,p.created_at_utc) AS valuation_created_at_utc '
+        'FROM pnl_snapshot_daily p JOIN instrument i USING(instrument_id) LEFT JOIN ingestion_run r USING(ingestion_run_id) '
+        'WHERE p.account_id=:account_id AND p.instrument_id=ANY(CAST(:ids AS uuid[])) ORDER BY p.report_date_local,p.instrument_id,p.currency'
+    ), params).mappings()]
+
+
+def accounting_lot_rows(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(text(
+        'SELECT i.symbol,l.open_event_trade_fill_id,l.open_event_corp_action_id,l.opened_at_utc,l.remaining_quantity,l.cost_basis_remaining, '
+        '(SELECT p.currency FROM pnl_snapshot_daily p WHERE p.account_id=l.account_id AND p.instrument_id=l.instrument_id '
+        'ORDER BY p.report_date_local DESC LIMIT 1) AS currency '
+        'FROM position_lot l JOIN instrument i USING(instrument_id) WHERE l.account_id=:account_id '
+        'AND l.instrument_id=ANY(CAST(:ids AS uuid[])) ORDER BY l.instrument_id,l.opened_at_utc,l.position_lot_id'
+    ), params).mappings()]
+
+
+def accounting_inputs(connection: Connection, account_id: str) -> dict[str, Any]:
+    """Bind the exact account inputs, including the unused side of a paired action."""
+    result = {}
+    for table in ('event_trade_fill', 'event_cashflow', 'event_corp_action', 'event_fx', 'instrument', 'pnl_snapshot_daily', 'position_lot'):
+        result[table] = connection.execute(text(f'SELECT to_jsonb(t)::text FROM {table} t WHERE account_id=:account_id ORDER BY 1'),
+                                           {'account_id': account_id}).scalars().all()
+    for table in ('corporate_action_manual_case', 'corporate_action_resolution'):
+        result[table] = connection.execute(text(f'SELECT to_jsonb(t)::text FROM {table} t JOIN event_corp_action e USING(event_corp_action_id) '
+                                                'WHERE e.account_id=:account_id ORDER BY 1'), {'account_id': account_id}).scalars().all()
+    # Failed imports retain raw rows but cannot change the committed accounting preview.
+    result['sources'] = connection.execute(text(
+        "SELECT r.raw_record_id,r.source_payload::text FROM raw_record r WHERE r.account_id=:account_id AND ("
+        "(r.section_name='OpenPositions' AND r.ingestion_run_id IN "
+        "(SELECT ingestion_run_id FROM pnl_snapshot_daily WHERE account_id=:account_id)) OR r.raw_record_id IN "
+        "(SELECT source_raw_record_id FROM event_trade_fill WHERE account_id=:account_id UNION "
+        "SELECT source_raw_record_id FROM event_fx WHERE account_id=:account_id) OR "
+        "(r.section_name='CorporateActions' AND r.raw_artifact_id IN "
+        "(SELECT source.raw_artifact_id FROM event_corp_action e JOIN raw_record source "
+        "ON source.raw_record_id=e.source_raw_record_id WHERE e.account_id=:account_id))) ORDER BY r.raw_record_id"
+    ), {'account_id': account_id}).all()
+    return result
+
+
+def split_snapshot_rows(connection: Connection, params: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(text(
+        "SELECT report_date_local, ingestion_run_id, currency, position_qty, cost_basis, "
+        "realized_pnl, unrealized_pnl, total_pnl, provisional FROM pnl_snapshot_daily "
+        "WHERE account_id=:account_id AND instrument_id=:instrument_id "
+        "ORDER BY report_date_local"
+    ), params).mappings()]

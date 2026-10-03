@@ -658,12 +658,12 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         self, account_id: str, through_report_date_local: str,
     ) -> list[LedgerSecurityMovementRecord]:
         """Read active source-bound resolutions before determining ledger scope."""
-        from .corporate_action_resolution import read_security_movements
+        from .corporate_action_accounting import CorporateActionAccountingRevision
 
         normalized_account_id = self._db_ledger_validate_non_empty_text(account_id, "account_id")
         through_date = self._db_ledger_validate_date_text(through_report_date_local, "through_report_date_local")
         with self._connection_scope() as connection:
-            return read_security_movements(connection, normalized_account_id, through_date)
+            return CorporateActionAccountingRevision(connection).security_movements(normalized_account_id, through_date)
 
     def db_position_lot_upsert_many(self, requests: list[PositionLotUpsertRequest]) -> None:
         """UPSERT deterministic position-lot rows in one batch operation.
