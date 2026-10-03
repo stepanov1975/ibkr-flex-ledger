@@ -69,3 +69,17 @@ User-facing features and deployment instructions belong in [README.md](README.md
 
 Use the [documentation index](docs/README.md) to find maintained guides and historical
 records. Archived plans and dated decision-log entries do not define current scope.
+
+## Agent skills
+
+### Issue tracker
+
+Use GitHub Issues. Before ticket operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-role vocabulary. Before triage, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout. Before domain exploration, read `docs/agents/domain.md`.
