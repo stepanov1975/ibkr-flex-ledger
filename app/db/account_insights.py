@@ -9,45 +9,37 @@ from app.analytics.account_holdings import account_lending, account_settled_cash
 from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
 from .account_insight_evidence import db_account_insight_evidence
+from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
 from app.analytics.account_insights import AccountInsights, InsightRow
 
 _SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV",
              "FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase",
              "OpenDividendAccruals", "ChangeInDividendAccruals", "InterestAccruals", "NetStockPositionSummary", "OptionEAE", "UnbundledCommissionDetails")
-_ELIGIBLE = """
-SELECT a.* FROM raw_artifact a
-JOIN ingestion_run owner ON owner.ingestion_run_id=a.ingestion_run_id
-LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=a.completed_ingestion_run_id
-WHERE a.account_id=:account_id AND a.report_date_local IS NOT NULL
-AND (completion.status='success' OR (a.completed_ingestion_run_id IS NULL AND owner.status='success'))
-"""
 
 
 def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
     """Read coherent successful sources; failed reports never replace published data."""
     with engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
+        latest_sources = db_published_flex_sections_latest(account_id, _SECTIONS).cte("published_sections")
         rows = connection.execute(text("""
-            WITH eligible AS (""" + _ELIGIBLE + """), versions AS (
-              SELECT DISTINCT ON (r.section_name) r.section_name,a.raw_artifact_id
-              FROM eligible a JOIN raw_record r USING(raw_artifact_id)
-              WHERE r.section_name=ANY(:sections)
-              ORDER BY r.section_name,a.report_date_local DESC,a.created_at_utc DESC,a.raw_artifact_id DESC)
             SELECT r.section_name AS section,r.source_payload AS payload,r.raw_record_id::text AS raw_id,
                    a.raw_artifact_id::text AS artifact_id,a.report_date_local AS report_date
-            FROM versions v JOIN eligible a USING(raw_artifact_id)
-            JOIN raw_record r ON r.raw_artifact_id=v.raw_artifact_id AND r.section_name=v.section_name
+            FROM published_sections a
+            JOIN raw_record r ON r.raw_artifact_id=a.raw_artifact_id AND r.section_name=a.section_name
             ORDER BY r.section_name,r.source_row_ref,r.raw_record_id
-        """), {"account_id": account_id, "sections": list(_SECTIONS)}).mappings().all()
+        """).columns().add_cte(latest_sources)).mappings().all()
+        historical_sources = db_published_flex_sections_history(
+            account_id, ("EquitySummaryInBase", "OpenDividendAccruals"),
+        ).cte("published_sections")
         history = connection.execute(text("""
-            WITH eligible AS (""" + _ELIGIBLE + """)
             SELECT
                 r.section_name AS section,r.source_payload AS payload,r.raw_record_id::text AS raw_id,
                 a.raw_artifact_id::text AS artifact_id,a.report_date_local AS report_date
-            FROM eligible a JOIN raw_record r USING(raw_artifact_id)
-            WHERE r.section_name IN ('EquitySummaryInBase','OpenDividendAccruals')
+            FROM published_sections a
+            JOIN raw_record r ON r.raw_artifact_id=a.raw_artifact_id AND r.section_name=a.section_name
             ORDER BY a.report_date_local DESC,a.created_at_utc DESC,
                      a.raw_artifact_id DESC,r.raw_record_id DESC
-        """), {"account_id": account_id}).mappings().all()
+        """).columns().add_cte(historical_sources)).mappings().all()
         sources = [InsightRow(**dict(row)) for row in rows]
         historical = [InsightRow(**dict(row)) for row in history]
         report = AccountInsights(sources, [r for r in historical if r.section == "EquitySummaryInBase"]).build()

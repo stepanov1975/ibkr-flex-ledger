@@ -8,10 +8,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Boolean, Date, Engine, Integer, Numeric, String, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .stock_history import db_stock_history
+from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
 from .corporate_action_evidence import action_evidence
 
 from .portfolio_interfaces import (
@@ -469,20 +470,10 @@ class SQLAlchemyPortfolioService:
         ], total)
 
     def db_report_portfolio_summary(self, account_id: str) -> PortfolioSummaryReportRecord:
-        eligible_artifacts = (
-            "SELECT artifact.* FROM raw_artifact artifact "
-            "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
-            "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
-            "WHERE artifact.account_id=:account_id AND ((artifact.completed_ingestion_run_id IS NOT NULL "
-            "AND completion.status='success') OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success'))"
-        )
-        cash_query = text(
-            "WITH eligible_artifacts AS (" + eligible_artifacts + "), selected_artifact AS ("
-            "SELECT artifact.raw_artifact_id, artifact.report_date_local FROM eligible_artifacts artifact "
-            "WHERE artifact.report_date_local IS NOT NULL AND EXISTS (SELECT 1 FROM raw_record raw "
-            "WHERE raw.raw_artifact_id=artifact.raw_artifact_id AND raw.section_name='CashReport') "
-            "ORDER BY artifact.report_date_local DESC, artifact.created_at_utc DESC, artifact.raw_artifact_id DESC LIMIT 1"
-            "), ranked AS (SELECT UPPER(BTRIM(raw.source_payload->>'currency')) AS currency, "
+        params = {"account_id": self._text(account_id, "account_id")}
+        cash_source = db_published_flex_sections_latest(params["account_id"], ("CashReport",)).cte("selected_artifact")
+        cash_values = text(
+            "WITH ranked AS (SELECT UPPER(BTRIM(raw.source_payload->>'currency')) AS currency, "
             "BTRIM(raw.source_payload->>'endingCash') AS ending_cash, "
             "row_number() OVER (PARTITION BY UPPER(BTRIM(raw.source_payload->>'currency')) "
             "ORDER BY raw.created_at_utc DESC, raw.raw_record_id DESC) AS row_rank "
@@ -491,14 +482,13 @@ class SQLAlchemyPortfolioService:
             "WHERE raw.section_name='CashReport' AND BTRIM(COALESCE(raw.source_payload->>'currency', ''))<>'') "
             "SELECT selected.report_date_local, ranked.currency, ranked.ending_cash FROM selected_artifact selected "
             "LEFT JOIN ranked ON ranked.row_rank=1 ORDER BY ranked.currency NULLS LAST"
-        )
-        position_query = text(
-            "WITH eligible_artifacts AS (" + eligible_artifacts + "), selected_artifact AS ("
-            "SELECT artifact.raw_artifact_id, artifact.report_date_local FROM eligible_artifacts artifact "
-            "WHERE artifact.report_date_local IS NOT NULL AND EXISTS (SELECT 1 FROM raw_record raw "
-            "WHERE raw.raw_artifact_id=artifact.raw_artifact_id AND raw.section_name='OpenPositions') "
-            "ORDER BY artifact.report_date_local DESC, artifact.created_at_utc DESC, artifact.raw_artifact_id DESC LIMIT 1"
-            "), latest_positions AS (SELECT DISTINCT ON (raw.source_payload->>'conid') raw.source_payload "
+        ).columns(report_date_local=Date(), currency=String(), ending_cash=String()).cte("cash_values")
+        cash_query = select(cash_values).add_cte(cash_source).order_by(cash_values.c.currency.nulls_last())
+        position_source = db_published_flex_sections_latest(
+            params["account_id"], ("OpenPositions",),
+        ).cte("selected_artifact")
+        position_values = text(
+            "WITH latest_positions AS (SELECT DISTINCT ON (raw.source_payload->>'conid') raw.source_payload "
             "FROM selected_artifact selected JOIN raw_record raw ON raw.raw_artifact_id=selected.raw_artifact_id "
             "WHERE raw.section_name='OpenPositions' AND BTRIM(COALESCE(raw.source_payload->>'conid', ''))<>'' "
             "AND UPPER(BTRIM(COALESCE(raw.source_payload->>'assetCategory', ''))) NOT IN ('CASH', 'FX') "
@@ -518,7 +508,11 @@ class SQLAlchemyPortfolioService:
             "count(*) FILTER (WHERE row_present=1 AND (position_value IS NULL OR fx_rate IS NULL)) "
             "AS missing_value_count "
             "FROM selected_artifact selected LEFT JOIN valued ON true GROUP BY selected.report_date_local"
-        )
+        ).columns(
+            report_date_local=Date(), open_positions_present=Boolean(),
+            position_value_usd=Numeric(), missing_value_count=Integer(),
+        ).cte("position_values")
+        position_query = select(position_values).add_cte(position_source)
         transfer_query = text(
             "SELECT event.report_date_local, event.amount, event.amount_in_base, "
             "UPPER(BTRIM(event.currency)) AS currency, UPPER(BTRIM(event.functional_currency)) AS functional_currency, "
@@ -528,8 +522,11 @@ class SQLAlchemyPortfolioService:
             "WHERE event.account_id=:account_id AND event.cash_action='Deposits/Withdrawals' "
             "ORDER BY event.report_date_local DESC, event.event_cashflow_id DESC"
         )
-        cost_query = text(
-            "WITH eligible_artifacts AS (" + eligible_artifacts + "), trade_cost_events AS ("
+        tax_sources = db_published_flex_sections_history(
+            params["account_id"], ("TransactionTaxes",), include_undated=True,
+        ).cte("published_sections")
+        cost_values = text(
+            "WITH trade_cost_events AS ("
             "SELECT CASE WHEN UPPER(BTRIM(instrument.asset_category)) IN ('CASH', 'FX') "
             "THEN 'FX conversion commissions' ELSE 'Securities commissions' END AS category, "
             "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
@@ -574,7 +571,7 @@ class SQLAlchemyPortfolioService:
             "COALESCE(NULLIF(BTRIM(raw.source_payload->>'tradeId'), ''), "
             "NULLIF(BTRIM(raw.source_payload->>'tradeID'), ''), "
             "(raw.source_payload-'reportDate')::text) ORDER BY raw.source_row_ref, raw.raw_record_id) "
-            "AS event_occurrence FROM eligible_artifacts artifact JOIN raw_record raw "
+            "AS event_occurrence FROM published_sections artifact JOIN raw_record raw "
             "ON raw.raw_artifact_id=artifact.raw_artifact_id WHERE raw.section_name='TransactionTaxes'"
             " AND raw.source_row_ref NOT LIKE 'TransactionTaxes:section:%'"
             "), ranked_transaction_taxes AS ("
@@ -601,7 +598,11 @@ class SQLAlchemyPortfolioService:
             "count(*) FILTER (WHERE net_cost_usd IS NULL) AS missing_value_count, "
             "min(activity_date) AS activity_date_from, max(activity_date) AS activity_date_to "
             "FROM cost_events GROUP BY category, included_in_instrument_pnl ORDER BY category"
-        )
+        ).columns(
+            category=String(), net_cost_usd=Numeric(), included_in_instrument_pnl=Boolean(),
+            missing_value_count=Integer(), activity_date_from=Date(), activity_date_to=Date(),
+        ).cte("cost_values")
+        cost_query = select(cost_values).add_cte(tax_sources).order_by(cost_values.c.category)
         dividend_query = text(
             "WITH dividend_events AS (SELECT event.cash_action, event.report_date_local AS activity_date, "
             "CASE WHEN UPPER(BTRIM(event.functional_currency))<>'USD' THEN NULL "
@@ -657,7 +658,6 @@ class SQLAlchemyPortfolioService:
             ") SELECT * FROM grouped UNION ALL SELECT * FROM overall "
             "ORDER BY is_total, instrument_type, side"
         )
-        params = {"account_id": self._text(account_id, "account_id")}
         try:
             with self._engine.connect() as connection:
                 cash_rows = connection.execute(cash_query, params).mappings().all()

@@ -690,6 +690,15 @@ dates; summary positions exclude lot detail. Missing inputs remain unknown.
 MTM and realized/change-in-unrealized are alternative modes; TWR is never added
 to money. Existing portfolio profit and return-on-net-transfers remain unchanged.
 
+Published Flex section selection lives in `app/db/published_flex_sections.py`.
+Its latest and history relation builders own account isolation, publication
+eligibility, whole-section presence and latest-version ordering. Portfolio summary
+and account insights compose these relations into their existing calculation
+statements on caller-owned connections; the builders perform no database I/O or
+transaction management. Latest sections and account-insights history require a
+statement date, while transaction-tax history explicitly includes undated sources.
+Explicit empty section markers supersede older sources; omitted sections do not.
+
 `GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
 frozen tolerance matrix in [contracts](contracts.md). JSON and `format=csv` outputs include
 absolute/relative differences, tolerances, pass/fail state, provisional state, and source

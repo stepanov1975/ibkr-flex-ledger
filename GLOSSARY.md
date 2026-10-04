@@ -5,6 +5,10 @@ and profit or loss.
 
 ## Language
 
+**Published Flex section**:
+A whole named section from a successfully imported Flex report. It may be
+explicitly empty, while an omitted section is absent.
+
 **Snapshot**:
 A dated record of an instrument's holdings, cost basis, and realized and unrealized
 profit or loss, expressed in the reporting currency.

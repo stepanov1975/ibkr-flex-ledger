@@ -8,6 +8,8 @@ from types import TracebackType
 from typing import Literal, cast
 
 from sqlalchemy import Engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql import ClauseElement
 
 from app.db import (
     CashBalanceReportRecord,
@@ -59,9 +61,9 @@ class _ConnectionStub:
         _ = (exc_type, exc_value, traceback)
         return False
 
-    def execute(self, statement: object, parameters: dict[str, object]) -> _ResultStub:
+    def execute(self, statement: ClauseElement, parameters: dict[str, object]) -> _ResultStub:
         assert parameters == {"account_id": "U1"}
-        query = str(statement)
+        query = str(statement.compile(dialect=postgresql.dialect()))
         self.executed_queries.append(query)
         if "section_name='OpenPositions'" in query:
             return _ResultStub(self._position_rows)
