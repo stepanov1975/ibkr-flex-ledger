@@ -74,18 +74,29 @@ def test_account_nav_requires_summary_for_every_security(database):
     assert "900099" in nav["check"]["reason"]
 
 
-@pytest.mark.parametrize("missing_input", ["markPrice", "multiplier", "fxRateToBase", None])
-def test_last_day_value_requires_market_inputs(database, missing_input):
-    orchestrator, adapter, *_ = _harness(database)
+@pytest.mark.parametrize("broker_valuation,missing_input", [
+    (True, "markPrice"), (True, "multiplier"), (True, "fxRateToBase"),
+    (True, "commission_fx"), (True, None),
+    (False, "fxRateToBase"), (False, "commission_fx"), (False, None),
+])
+def test_last_day_value_requires_market_inputs(database, broker_valuation, missing_input):
+    orchestrator, adapter, _, _, service, *_ = _harness(database)
     report = ET.fromstring(_SEEDED_PAYLOAD)
+    trade = report.find(".//Trade")
     position = report.find(".//OpenPosition")
     position.set("multiplier", "1")
-    if missing_input is not None:
+    if missing_input == "commission_fx":
+        trade.set("ibCommissionCurrency", "GBP")
+    elif missing_input is not None:
         position.attrib.pop(missing_input)
     if missing_input == "fxRateToBase":
         position.set("currency", "EUR")
+        if not broker_valuation:
+            trade.set("currency", "EUR")
     adapter.payload_bytes = ET.tostring(report)
     assert orchestrator.job_execute("ingestion_run").status == "success"
+    if not broker_valuation:
+        service.ledger_snapshot_build_and_persist("INTEGRITY", None, "2026-08-21", "USD")
     app = FastAPI()
     settings = AppSettings(_env_file=None, account_id="INTEGRITY", ibkr_flex_token="test", ibkr_flex_query_id="test")
     app.include_router(api_create_reports_router(settings, SQLAlchemyPortfolioService(database)))
@@ -93,9 +104,9 @@ def test_last_day_value_requires_market_inputs(database, missing_input):
         response = client.get("/reports/pnl/by-instrument")
     assert response.status_code == 200
     item, = response.json()["items"]
-    assert Decimal(item["total_cost"]) == Decimal("201")
+    assert Decimal(item["total_cost"]) == Decimal("200" if missing_input == "commission_fx" else "201")
     assert item["provisional"] is (missing_input is not None)
-    if missing_input is None:
+    if missing_input in (None, "commission_fx"):
         assert Decimal(item["last_day_value"]) == Decimal("220")
     else:
         assert item["last_day_value"] is None

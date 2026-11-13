@@ -488,6 +488,7 @@ class StockLedgerSnapshotService:
                     fx_sources.add(mark_fx_source)
                     if mark_fx_rate is None:
                         missing_fx = True
+                        valuation_source = "FX_RATE_MISSING_ALL_SOURCES"
                     else:
                         mark_price_base = local_mark_price * mark_fx_rate
                 unrealized_pnl = mark_price_base * fifo_result.position_quantity - sum(

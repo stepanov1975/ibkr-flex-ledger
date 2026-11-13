@@ -285,14 +285,10 @@ def _instrument_json(row: InstrumentPnlReportRecord) -> dict[str, object]:
         payload.update({"average_cost": None, "total_cost": None, "last_day_value": None})
     else:
         total_cost = Decimal(row.cost_basis)
-        valuation_available = (
-            row.valuation_source in {
-                "openpositions_mark_price", "openpositions_unrealized_pnl",
-                "trades_close_price", "trades_last_trade_price",
-            }
-            and row.fx_source is not None
-            and "FX_RATE_MISSING_ALL_SOURCES" not in row.fx_source
-        )
+        valuation_available = row.valuation_source in {
+            "openpositions_mark_price", "openpositions_unrealized_pnl",
+            "trades_close_price", "trades_last_trade_price",
+        }
         payload.update({
             "average_cost": str(total_cost / position),
             "total_cost": str(total_cost),

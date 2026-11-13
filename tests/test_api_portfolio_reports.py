@@ -56,25 +56,25 @@ class _Portfolio:
                 report_date_local=date(2026, 8, 21), instrument_id=self.instrument_id, conid="123", symbol="TEST",
                 currency="USD", position_qty="2", cost_basis="100", realized_pnl="10", unrealized_pnl="5",
                 total_pnl="15", provisional=False, unresolved_case_count=0, asset_category="STK",
-                valuation_source="openpositions_mark_price", fx_source="base_currency",
+                valuation_source="openpositions_mark_price",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.short_instrument_id, conid="124",
                 symbol="SHORT", currency="USD", position_qty="-2", cost_basis="-100", realized_pnl="0",
                 unrealized_pnl="-5", total_pnl="-5", provisional=False, unresolved_case_count=0, asset_category="OPT",
-                valuation_source="openpositions_mark_price", fx_source="base_currency",
+                valuation_source="openpositions_mark_price",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.closed_instrument_id, conid="125",
                 symbol="CLOSED", currency="USD", position_qty="0", cost_basis="0", realized_pnl="20",
                 unrealized_pnl="0", total_pnl="20", provisional=False, unresolved_case_count=0, asset_category="STK",
-                valuation_source="no_open_position", fx_source="base_currency",
+                valuation_source="no_open_position",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.missing_cost_instrument_id, conid="126",
                 symbol="MISSING", currency="USD", position_qty="3", cost_basis=None, realized_pnl="0",
                 unrealized_pnl="0", total_pnl="0", provisional=True, unresolved_case_count=0, asset_category="STK",
-                valuation_source="EOD_MARK_MISSING_ALL_SOURCES", fx_source="base_currency",
+                valuation_source="EOD_MARK_MISSING_ALL_SOURCES",
             ),
         ]
 
@@ -224,17 +224,17 @@ def test_pnl_json_derives_cost_and_last_day_value_for_open_positions() -> None:
     ]
 
 
-@pytest.mark.parametrize("valuation_source,fx_source,expected", [
-    ("openpositions_mark_price", "base_currency", "105"),
-    ("openpositions_unrealized_pnl", "openpositions_fx_rate_to_base", "105"),
-    ("trades_last_trade_price", "conversion_rates_previous", "105"),
-    ("trades_close_price", "FX_RATE_MISSING_ALL_SOURCES,trade_fx_rate_to_base", None),
-    (None, None, None),
+@pytest.mark.parametrize("valuation_source,expected", [
+    ("openpositions_mark_price", "105"),
+    ("openpositions_unrealized_pnl", "105"),
+    ("trades_last_trade_price", "105"),
+    ("FX_RATE_MISSING_ALL_SOURCES", None),
+    (None, None),
 ])
-def test_last_day_value_uses_provenance_not_provisional_flag(monkeypatch, valuation_source, fx_source, expected):
+def test_last_day_value_uses_provenance_not_provisional_flag(monkeypatch, valuation_source, expected):
     repository = _Portfolio()
     original = repository.db_report_pnl_by_instrument("U1", None, None, None)[0]
-    record = replace(original, provisional=True, valuation_source=valuation_source, fx_source=fx_source)
+    record = replace(original, provisional=True, valuation_source=valuation_source)
     monkeypatch.setattr(repository, "db_report_pnl_by_instrument", lambda *_: [record])
     item, = _client(repository).get("/reports/pnl/by-instrument").json()["items"]
     assert item["last_day_value"] == expected
