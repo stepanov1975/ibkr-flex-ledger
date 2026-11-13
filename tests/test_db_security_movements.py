@@ -42,7 +42,7 @@ def test_transfer_persists_realized_attribution_fifo_origin_and_scoped_replay(da
     harness = ingestion_tests._harness(database)
     payload = _payload().replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260823">')
     payload = payload.replace(b'buySell="BUY" quantity="2"', b'buySell="BUY" quantity="3"').replace(
-        b'ibCommission="1" commission="1"', b'ibCommission="0" commission="0"',
+        b'ibCommission="-1" commission="-1"', b'ibCommission="0" commission="0"',
     ).replace(b'</Trades>',
         b'<Trade transactionID="BEFORE" ibExecID="BEFORE" conid="900001" symbol="SEED" assetCategory="STK" '
         b'buySell="SELL" quantity="1" tradePrice="120" currency="USD" reportDate="20260820" dateTime="20260820;130000" />'

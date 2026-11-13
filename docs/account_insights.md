@@ -23,6 +23,9 @@ report. Missing sections or fields are unavailable, not zero.
 NAV and ChangeInNAV checks require all recognized components for the selected
 calculation mode, including explicit zeroes. Missing component names appear in
 the check explanation. Cash and MTM checks also run when OpenPositions is absent.
+The account-value comparison requires one summary row for every reported security.
+A security with only lot detail makes the calculated value unavailable and the check
+not comparable, even when other securities have summaries.
 
 ## Understanding checks
 

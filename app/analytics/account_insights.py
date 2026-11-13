@@ -128,12 +128,14 @@ class AccountInsights:
         valid_dates = (day is not None and currency == "USD" and len(cash) == 1 and
                        cash[0].report_date == day and bool(positions) and positions[0].report_date == day)
         amounts: list[Decimal | None] = []
+        reported: set[str] = set()
         seen: set[str] = set()
         for item in positions:
             p = item.payload
             if not p.get("conid") or p.get("assetCategory") in ("CASH", "FX"):
                 continue
             conid = str(p["conid"])
+            reported.add(conid)
             if p.get("levelOfDetail", "SUMMARY") != "SUMMARY":
                 continue
             if conid in seen:
@@ -143,7 +145,8 @@ class AccountInsights:
             if p.get("currency") == currency:
                 rate = Decimal("1")
             amounts.append(value * rate if value is not None and rate is not None and rate > 0 else None)
-        if any(item.payload.get("conid") for item in positions) and not seen:
+        missing_summaries = reported - seen
+        if missing_summaries:
             valid_dates = False
         estimate = insight_sum([insight_decimal(cash[0].payload.get("endingCash")), insight_sum(amounts)]) if valid_dates else None
         extras = insight_sum([entry["amount"] for entry in components if entry["field"] not in ("cash", "stock", "options", "bonds", "funds", "notes", "commodities", "crypto", "physDel")])
@@ -153,7 +156,8 @@ class AccountInsights:
                 "additional_components": extras,
                 "check": insight_check("Account value including accruals and other components",
                                        insight_decimal(payload.get("total")), explained,
-                                       "Missing NAV components: " + ", ".join(missing) if missing else
+                                       "Missing position summaries for conids: " + ", ".join(sorted(missing_summaries))
+                                       if missing_summaries else "Missing NAV components: " + ", ".join(missing) if missing else
                                        "Same-date cash and positions plus reported additional NAV components; missing inputs remain unknown.")}
 
     def change_in_nav(self) -> dict[str, Any] | None:

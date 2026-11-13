@@ -444,7 +444,7 @@ def test_reconciliation_sources_use_snapshot_lineage_and_functional_currency() -
 
     executed_query = connection.executed_queries[0]
     assert "raw.ingestion_run_id=s.ingestion_run_id" in executed_query
-    assert "ABS(event.commission)" in executed_query
+    assert "-event.commission" in executed_query
     assert "FROM event_trade_fill event JOIN raw_record raw" in executed_query
     assert "event.report_date_local<=s.report_date_local" in executed_query
     assert "raw.source_payload->>'commission'" not in executed_query

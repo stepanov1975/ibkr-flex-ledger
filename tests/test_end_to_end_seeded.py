@@ -48,7 +48,7 @@ _SEEDED_PAYLOAD = b"""<FlexQueryResponse><FlexStatements count="1">
   <Trades><Trade transactionID="9001" ibExecID="SEED-EXEC-1" conid="900001" symbol="SEED"
     assetCategory="STK" buySell="BUY" quantity="2" tradePrice="100" closePrice="110"
     currency="USD" reportDate="20260821" dateTime="20260821;120000"
-    ibCommission="1" commission="1" fees="0" fifoPnlRealized="0" fxRateToBase="1" /></Trades>
+    ibCommission="-1" commission="-1" fees="0" fifoPnlRealized="0" fxRateToBase="1" /></Trades>
   <OpenPositions><OpenPosition conid="900001" symbol="SEED" assetCategory="STK" currency="USD"
     reportDate="20260821" position="2" markPrice="110" positionValue="220" fxRateToBase="1"
     fifoPnlUnrealized="20" /></OpenPositions>

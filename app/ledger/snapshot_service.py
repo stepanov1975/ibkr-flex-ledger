@@ -324,7 +324,7 @@ class StockLedgerSnapshotService:
                 if trade_fx_rate is None:
                     input_missing_fx = True
                     trade_fx_rate = Decimal("0")
-                commission = abs(Decimal(trade.commission or "0"))
+                commission = -Decimal(trade.commission or "0")
                 commission_fx_rate = trade_fx_rate
                 commission_currency = (trade.commission_currency or trade.currency).strip().upper()
                 if commission and commission_currency != trade.currency.strip().upper():
@@ -488,6 +488,7 @@ class StockLedgerSnapshotService:
                     fx_sources.add(mark_fx_source)
                     if mark_fx_rate is None:
                         missing_fx = True
+                        valuation_source = "FX_RATE_MISSING_ALL_SOURCES"
                     else:
                         mark_price_base = local_mark_price * mark_fx_rate
                 unrealized_pnl = mark_price_base * fifo_result.position_quantity - sum(

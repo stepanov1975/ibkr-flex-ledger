@@ -76,6 +76,7 @@ class InstrumentPnlReportRecord:
     total_pnl: str
     provisional: bool
     unresolved_case_count: int
+    valuation_source: str | None
 
 
 @dataclass(frozen=True)
