@@ -454,7 +454,9 @@ is available and deterministic fallbacks outside that authority:
 - Same-day `Trades.closePrice` and last known trade price are fallback marks only when
   completed broker-position authority is not being applied.
 - Execution FX: `Trades.fxRateToBase` -> derived net-cash ratio -> exact/nearest-previous `ConversionRates`
-- Signed IBKR trade commissions and fees are normalized to positive FIFO cost impacts.
+- IBKR trade commissions retain their signs: negative charges become positive FIFO costs,
+  while positive rebates reduce cost basis or increase realized P&L. Reconciliation uses
+  the same signed commission costs. Trade fees retain magnitude-based cost normalization.
 - Base-currency events use `1.0`; missing non-base FX marks the snapshot provisional rather than labeling native amounts as USD
 - Flex statement `reportDate` drives the snapshot business date, including delayed imports
 
@@ -645,8 +647,16 @@ reported values to canonical events, raw-record identities, section names, and i
 source payloads. Instrument PnL JSON also exposes average cost per position unit, total cost,
 and last-day value for open positions. These values use the snapshot's functional currency;
 closed positions or positions without a cost basis return `null` for all three fields.
+Last-day value also returns `null` when stored valuation provenance is unknown or
+required market or FX inputs are missing; available cost fields remain visible. A
+provisional flag alone does not hide an otherwise available valuation.
 Instrument PnL excludes `CASH` and `FX` pseudo-instruments; currency cash balances remain
 available through the portfolio-summary report.
+
+Existing snapshots and FIFO lots calculated with commission rebates as expenses need
+explicit reprocessing after this accounting fix. Replay the affected stored-report
+scopes through `POST /ingestion/reprocess?period_key=...&flex_query_id=...`; identical
+report ingestion alone takes the duplicate fast path and does not rebuild them.
 
 The portfolio-summary report supplies the `/ui` overview with the latest broker cash
 balance per currency, all canonical deposits and withdrawals in their original currency,

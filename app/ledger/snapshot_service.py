@@ -324,7 +324,7 @@ class StockLedgerSnapshotService:
                 if trade_fx_rate is None:
                     input_missing_fx = True
                     trade_fx_rate = Decimal("0")
-                commission = abs(Decimal(trade.commission or "0"))
+                commission = -Decimal(trade.commission or "0")
                 commission_fx_rate = trade_fx_rate
                 commission_currency = (trade.commission_currency or trade.currency).strip().upper()
                 if commission and commission_currency != trade.currency.strip().upper():

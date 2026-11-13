@@ -1,10 +1,12 @@
 """Portfolio workflow and frozen CSV endpoint tests."""
 
 from datetime import date, datetime, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.api.application import create_api_application
 from app.config import AppSettings
@@ -54,21 +56,25 @@ class _Portfolio:
                 report_date_local=date(2026, 8, 21), instrument_id=self.instrument_id, conid="123", symbol="TEST",
                 currency="USD", position_qty="2", cost_basis="100", realized_pnl="10", unrealized_pnl="5",
                 total_pnl="15", provisional=False, unresolved_case_count=0, asset_category="STK",
+                valuation_source="openpositions_mark_price", fx_source="base_currency",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.short_instrument_id, conid="124",
                 symbol="SHORT", currency="USD", position_qty="-2", cost_basis="-100", realized_pnl="0",
                 unrealized_pnl="-5", total_pnl="-5", provisional=False, unresolved_case_count=0, asset_category="OPT",
+                valuation_source="openpositions_mark_price", fx_source="base_currency",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.closed_instrument_id, conid="125",
                 symbol="CLOSED", currency="USD", position_qty="0", cost_basis="0", realized_pnl="20",
                 unrealized_pnl="0", total_pnl="20", provisional=False, unresolved_case_count=0, asset_category="STK",
+                valuation_source="no_open_position", fx_source="base_currency",
             ),
             InstrumentPnlReportRecord(
                 report_date_local=date(2026, 8, 21), instrument_id=self.missing_cost_instrument_id, conid="126",
                 symbol="MISSING", currency="USD", position_qty="3", cost_basis=None, realized_pnl="0",
                 unrealized_pnl="0", total_pnl="0", provisional=True, unresolved_case_count=0, asset_category="STK",
+                valuation_source="EOD_MARK_MISSING_ALL_SOURCES", fx_source="base_currency",
             ),
         ]
 
@@ -216,6 +222,25 @@ def test_pnl_json_derives_cost_and_last_day_value_for_open_positions() -> None:
         {"symbol": "CLOSED", "average_cost": None, "total_cost": None, "last_day_value": None},
         {"symbol": "MISSING", "average_cost": None, "total_cost": None, "last_day_value": None},
     ]
+
+
+@pytest.mark.parametrize("valuation_source,fx_source,expected", [
+    ("openpositions_mark_price", "base_currency", "105"),
+    ("openpositions_unrealized_pnl", "openpositions_fx_rate_to_base", "105"),
+    ("trades_last_trade_price", "conversion_rates_previous", "105"),
+    ("trades_close_price", "FX_RATE_MISSING_ALL_SOURCES,trade_fx_rate_to_base", None),
+    (None, None, None),
+])
+def test_last_day_value_uses_provenance_not_provisional_flag(monkeypatch, valuation_source, fx_source, expected):
+    repository = _Portfolio()
+    original = repository.db_report_pnl_by_instrument("U1", None, None, None)[0]
+    record = replace(original, provisional=True, valuation_source=valuation_source, fx_source=fx_source)
+    monkeypatch.setattr(repository, "db_report_pnl_by_instrument", lambda *_: [record])
+    item, = _client(repository).get("/reports/pnl/by-instrument").json()["items"]
+    assert item["last_day_value"] == expected
+    assert item["average_cost"] == "50"
+    assert item["total_cost"] == "100"
+    assert item["provisional"] is True
 
 
 def test_portfolio_summary_exposes_cash_transfers_and_profit_contract() -> None:

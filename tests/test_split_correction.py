@@ -63,7 +63,7 @@ def split_case(database, request):
     if getattr(request, "param", None) == "partial_tiny":
         harness[1].payload_bytes = harness[1].payload_bytes.replace(b'type="FS"', b'type="RS"').replace(
             b'buySell="BUY" quantity="2"', b'buySell="BUY" quantity="10"',
-        ).replace(b'ibCommission="1" commission="1"', b'ibCommission="0" commission="0"').replace(
+        ).replace(b'ibCommission="-1" commission="-1"', b'ibCommission="0" commission="0"').replace(
             b'position="3"', b'position="0.5"',
         ).replace(b'costBasisMoney="201"', b'costBasisMoney="501"').replace(
             b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="-446"',
@@ -636,7 +636,7 @@ def test_correction_rewrites_sale_closed_lot_history(database, split_case, short
     ).replace(b'fifoPnlUnrealized="129"', b'fifoPnlUnrealized="0"').replace(
         b'</Trades>', b'<Trade transactionID="CLOSE" ibExecID="CLOSE" conid="900001" symbol="SEED" '
         b'assetCategory="STK" buySell="' + closing_side + b'" quantity="3" tradePrice="120" currency="USD" '
-        b'reportDate="20260822" dateTime="20260822;120000" ibCommission="' + str(closing_fees).encode() + b'" fxRateToBase="1" /></Trades>',
+        b'reportDate="20260822" dateTime="20260822;120000" ibCommission="' + str(-closing_fees).encode() + b'" fxRateToBase="1" /></Trades>',
     )
     assert harness[0].job_execute("ingestion_run").status == "success"
     with database.connect() as c:

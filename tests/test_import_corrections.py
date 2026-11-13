@@ -46,7 +46,7 @@ def test_trade_derived_fx_values_can_refresh(database, direct_rate):
             "net_cash_in_base, fx_rate_to_base FROM event_trade_fill"
         )).one()
         assert (trade.ingestion_run_id, trade.source_raw_record_id) == tuple(origin)
-        assert trade.commission == Decimal("1")
+        assert trade.commission == Decimal("-1")
         assert trade.net_cash == Decimal("-201")
         assert trade.net_cash_in_base == Decimal("-241.20" if direct_rate else "-231.15")
         assert trade.fx_rate_to_base == (Decimal("1.2") if direct_rate else None)
