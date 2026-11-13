@@ -79,6 +79,10 @@ class _ConnectionStub:
             return _ResultStub(self._commission_rows)
         raise AssertionError(f"Unexpected portfolio-summary query: {query}")
 
+    def execution_options(self, *, isolation_level: str) -> _ConnectionStub:
+        assert isolation_level == "REPEATABLE READ"
+        return self
+
 
 class _EngineStub:
     def __init__(self, connection: _ConnectionStub) -> None:

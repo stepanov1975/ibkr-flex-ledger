@@ -366,7 +366,7 @@ def test_open_position_query_normalizes_flex_numeric_text() -> None:
     query = connection.executed_queries[0]
     assert (
         "REPLACE(BTRIM(COALESCE(rr.source_payload->>'position', '')), ',', '')::numeric "
-        "AS position_qty"
+        "END AS position_qty"
     ) in query
     for field in (
         "markPrice",

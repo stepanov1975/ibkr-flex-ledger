@@ -12,6 +12,7 @@ from sqlalchemy import Boolean, Date, Engine, Integer, Numeric, String, select, 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .stock_history import db_stock_history
+from .open_positions import db_open_position_is_summary
 from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
 from .corporate_action_evidence import action_evidence
 
@@ -488,12 +489,15 @@ class SQLAlchemyPortfolioService:
             params["account_id"], ("OpenPositions",),
         ).cte("selected_artifact")
         position_values = text(
-            "WITH latest_positions AS (SELECT DISTINCT ON (raw.source_payload->>'conid') raw.source_payload "
+            "WITH latest_positions AS (SELECT DISTINCT ON (raw.source_payload->>'conid') raw.source_payload, "
+            f"count(*) FILTER (WHERE {db_open_position_is_summary('raw')}) "
+            "OVER (PARTITION BY raw.source_payload->>'conid') AS summary_count "
             "FROM selected_artifact selected JOIN raw_record raw ON raw.raw_artifact_id=selected.raw_artifact_id "
             "WHERE raw.section_name='OpenPositions' AND BTRIM(COALESCE(raw.source_payload->>'conid', ''))<>'' "
             "AND UPPER(BTRIM(COALESCE(raw.source_payload->>'assetCategory', ''))) NOT IN ('CASH', 'FX') "
-            "ORDER BY raw.source_payload->>'conid', raw.created_at_utc DESC, raw.raw_record_id DESC), normalized AS ("
-            "SELECT REPLACE(BTRIM(source_payload->>'positionValue'), ',', '') AS position_value_text, "
+            f"ORDER BY raw.source_payload->>'conid', ({db_open_position_is_summary('raw')}) DESC, raw.raw_record_id DESC), "
+            "normalized AS (SELECT CASE WHEN summary_count=1 THEN "
+            "REPLACE(BTRIM(source_payload->>'positionValue'), ',', '') END AS position_value_text, "
             "REPLACE(BTRIM(source_payload->>'fxRateToBase'), ',', '') AS fx_rate_text, "
             "UPPER(BTRIM(source_payload->>'currency')) AS currency FROM latest_positions), valued AS ("
             "SELECT CASE WHEN position_value_text ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$' "
@@ -659,7 +663,7 @@ class SQLAlchemyPortfolioService:
             "ORDER BY is_total, instrument_type, side"
         )
         try:
-            with self._engine.connect() as connection:
+            with self._engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
                 cash_rows = connection.execute(cash_query, params).mappings().all()
                 position_rows = connection.execute(position_query, params).mappings().all()
                 transfer_rows = connection.execute(transfer_query, params).mappings().all()
@@ -699,7 +703,9 @@ class SQLAlchemyPortfolioService:
         transfer_totals: dict[str, dict[str, Decimal]] = {}
         transfers = []
         net_transfers_usd = Decimal("0")
+        net_transfers_at_valuation_usd = Decimal("0")
         transfers_have_usd_values = True
+        valuation_transfers_have_usd_values = True
         for row in transfer_rows:
             amount = Decimal(row["amount"])
             currency = row["currency"]
@@ -720,17 +726,23 @@ class SQLAlchemyPortfolioService:
                 )
             )
 
-            amount_in_base = row["amount_in_base"]
-            if row["functional_currency"] != "USD":
+            amount_usd = None
+            if row["functional_currency"] == "USD":
+                if row["amount_in_base"] is not None:
+                    amount_usd = Decimal(row["amount_in_base"])
+                elif currency == "USD":
+                    amount_usd = amount
+                elif (fx_rate := self._decimal_or_none(row["fx_rate_to_base"])) is not None and fx_rate > 0:
+                    amount_usd = amount * fx_rate
+            if amount_usd is None:
                 transfers_have_usd_values = False
-            elif amount_in_base is not None:
-                net_transfers_usd += Decimal(amount_in_base)
-            elif currency == "USD":
-                net_transfers_usd += amount
-            elif (fx_rate := self._decimal_or_none(row["fx_rate_to_base"])) is not None and fx_rate > 0:
-                net_transfers_usd += amount * fx_rate
             else:
-                transfers_have_usd_values = False
+                net_transfers_usd += amount_usd
+            if report_date_local is not None and row["report_date_local"] <= report_date_local:
+                if amount_usd is None:
+                    valuation_transfers_have_usd_values = False
+                else:
+                    net_transfers_at_valuation_usd += amount_usd
 
         transfer_summaries = tuple(
             TransferSummaryReportRecord(
@@ -855,12 +867,14 @@ class SQLAlchemyPortfolioService:
 
         net_transfers_value = net_transfers_usd if transfers_have_usd_values else None
         total_profit_usd = (
-            None if estimated_nlv_usd is None or net_transfers_value is None
-            else estimated_nlv_usd - net_transfers_value
+            None if estimated_nlv_usd is None or not valuation_transfers_have_usd_values
+            else estimated_nlv_usd - net_transfers_at_valuation_usd
         )
         profit_percent = None
-        if total_profit_usd is not None and net_transfers_value is not None and net_transfers_value > 0:
-            profit_percent = (total_profit_usd / net_transfers_value * Decimal("100")).quantize(Decimal("0.00000001"))
+        if total_profit_usd is not None and net_transfers_at_valuation_usd > 0:
+            profit_percent = (total_profit_usd / net_transfers_at_valuation_usd * Decimal("100")).quantize(
+                Decimal("0.00000001"),
+            )
 
         return PortfolioSummaryReportRecord(
             report_date_local=report_date_local,
@@ -921,13 +935,13 @@ class SQLAlchemyPortfolioService:
             "raw.raw_record_id AS source_raw_record_id, raw.section_name, raw.source_row_ref, "
             "raw.source_payload, raw.raw_artifact_id, raw.ingestion_run_id "
             "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
-            "JOIN LATERAL (SELECT position.* FROM raw_record position "
+            "JOIN LATERAL (SELECT position.*, count(*) OVER () AS summary_count FROM raw_record position "
             "WHERE position.account_id=s.account_id AND position.ingestion_run_id=s.ingestion_run_id "
             "AND position.section_name='OpenPositions' "
             "AND position.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
             "AND position.source_payload->>'conid'=i.conid "
             "AND UPPER(BTRIM(position.source_payload->>'assetCategory')) NOT IN ('CASH', 'FX') "
-            "ORDER BY position.raw_record_id DESC LIMIT 1) raw ON true "
+            f"AND {db_open_position_is_summary('position')}) raw ON raw.summary_count=1 "
             "WHERE s.account_id=:account_id AND s.report_date_local=:report_date "
             "AND s.instrument_id=:instrument_id"
         )
@@ -1052,24 +1066,21 @@ class SQLAlchemyPortfolioService:
         query = text(
             "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, s.currency, s.position_qty, "
             "s.realized_pnl, s.unrealized_pnl, s.fees, s.withholding_tax, s.provisional, "
-            f"COALESCE((SELECT {position} FROM raw_record raw WHERE raw.account_id=s.account_id "
-            "AND raw.ingestion_run_id=s.ingestion_run_id "
-            "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1), "
-            f"{closed_position}) AS broker_position_qty, "
+            f"COALESCE({position}, {closed_position}) AS broker_position_qty, "
             f"({broker_realized}) AS broker_realized_pnl, "
-            f"COALESCE((SELECT ({unrealized}) * ({row_fx_rate}) FROM raw_record raw "
-            "WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
-            "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
-            "AND raw.source_payload->>'conid'=i.conid ORDER BY raw.raw_record_id DESC LIMIT 1), "
-            f"{closed_position}) AS broker_unrealized_pnl, "
+            f"COALESCE(({unrealized}) * ({row_fx_rate}), {closed_position}) AS broker_unrealized_pnl, "
             f"({broker_fees}) AS broker_fees, "
             f"{broker_tax} AS broker_withholding_tax, "
             "(SELECT event_trade_fill_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
             "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_event_id, "
             "(SELECT source_raw_record_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
             "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_raw_record_id "
-            "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) WHERE s.account_id=:account_id "
+            "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
+            "LEFT JOIN LATERAL (SELECT raw.source_payload, count(*) OVER () AS summary_count FROM raw_record raw "
+            "WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
+            "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
+            f"AND raw.source_payload->>'conid'=i.conid AND {db_open_position_is_summary('raw')}) raw ON raw.summary_count=1 "
+            "WHERE s.account_id=:account_id "
             "AND (CAST(:date_from AS date) IS NULL OR s.report_date_local>=:date_from) "
             "AND (CAST(:date_to AS date) IS NULL OR s.report_date_local<=:date_to) "
             "AND (CAST(:instrument_id AS uuid) IS NULL OR s.instrument_id=CAST(:instrument_id AS uuid)) "

@@ -9,7 +9,11 @@ from app.analytics.account_holdings import account_lending, account_settled_cash
 from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
 from .account_insight_evidence import db_account_insight_evidence
-from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
+from .published_flex_sections import (
+    db_published_flex_sections_by_date,
+    db_published_flex_sections_history,
+    db_published_flex_sections_latest,
+)
 from app.analytics.account_insights import AccountInsights, InsightRow
 
 _SECTIONS = ("EquitySummaryInBase", "CashReport", "OpenPositions", "ChangeInNAV",
@@ -28,8 +32,10 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
             JOIN raw_record r ON r.raw_artifact_id=a.raw_artifact_id AND r.section_name=a.section_name
             ORDER BY r.section_name,r.source_row_ref,r.raw_record_id
         """).columns().add_cte(latest_sources)).mappings().all()
-        historical_sources = db_published_flex_sections_history(
-            account_id, ("EquitySummaryInBase", "OpenDividendAccruals"),
+        historical_sources = db_published_flex_sections_by_date(
+            account_id, ("EquitySummaryInBase",),
+        ).union_all(
+            db_published_flex_sections_history(account_id, ("OpenDividendAccruals",)),
         ).cte("published_sections")
         history = connection.execute(text("""
             SELECT

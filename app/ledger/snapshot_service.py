@@ -20,6 +20,7 @@ from app.db import (
     PnlSnapshotDailyUpsertRequest,
     PositionLotUpsertRequest,
 )
+from app.db.open_positions import OPEN_POSITIONS_SUMMARY_UNAVAILABLE
 
 from .snapshot_dates import snapshot_report_date_start_utc
 from .fifo_engine import (
@@ -492,9 +493,14 @@ class StockLedgerSnapshotService:
                 unrealized_pnl = mark_price_base * fifo_result.position_quantity - sum(
                     (lot.cost_basis_remaining for lot in fifo_result.open_lots), Decimal("0"),
                 )
+            elif valuation_record is not None and valuation_record.position_qty is None:
+                snapshot_cost_basis = None
+                missing_valuation = True
+                valuation_source = OPEN_POSITIONS_SUMMARY_UNAVAILABLE
             else:
                 broker_position_quantity = (
-                    Decimal(valuation_record.position_qty) if valuation_record is not None else Decimal("0")
+                    Decimal(valuation_record.position_qty)
+                    if valuation_record is not None and valuation_record.position_qty is not None else Decimal("0")
                 )
                 snapshot_position_quantity = broker_position_quantity
                 quantities_match = fifo_result.position_quantity == broker_position_quantity
@@ -728,7 +734,8 @@ class StockLedgerSnapshotService:
 
         if position_quantity == Decimal("0"):
             return Decimal("0"), "no_open_position"
-        if valuation_record is not None and Decimal(valuation_record.position_qty) == position_quantity:
+        if (valuation_record is not None and valuation_record.position_qty is not None
+                and Decimal(valuation_record.position_qty) == position_quantity):
             mark_price = self._positive_decimal_or_none(valuation_record.mark_price)
             multiplier = self._positive_decimal_or_none(valuation_record.multiplier)
             if mark_price is not None and multiplier is not None:

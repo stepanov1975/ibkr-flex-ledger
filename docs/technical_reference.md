@@ -652,12 +652,19 @@ The portfolio-summary report supplies the `/ui` overview with the latest broker 
 balance per currency, all canonical deposits and withdrawals in their original currency,
 and net/gross transfer totals per currency. Cash and positions each come from the newest
 successful artifact containing that section, so a corrected same-day report replaces the
-older section instead of being merged with it. USD net transfers use the transaction's IBKR
-base amount or FX rate. Estimated net liquidation value is same-date base-currency cash plus
-position values converted to USD; total profit subtracts net transfers in USD, and profit
-percentage divides that result by positive net transfers. A USD-derived metric is `null`
-when report dates differ or a required FX rate, cash balance, or current position value is
-unavailable.
+older section. The portfolio summary reads all inputs in one repeatable-read transaction.
+Estimated net liquidation value is same-date base-currency cash plus position values
+converted to USD. It requires a unique summary row per reported security. Legacy rows
+without a detail field are eligible as summaries. Missing or ambiguous summaries make
+account valuation unavailable and the affected instrument snapshots provisional. Use
+[stored-report replay](operations.md#broker-position-repair-by-immutable-replay) to rebuild
+snapshots previously calculated from lot detail.
+
+USD net transfers use the transaction's IBKR base amount or FX rate. Profit subtracts net
+transfers through the valuation date, and profit percentage divides by that same total
+when it is positive. The transfer totals and history cover all imported transfers.
+Estimated value and profit are unavailable when cash and position dates differ or a
+required input is missing.
 
 The shared Transfers navigation links to `/ui/transfers`, which shows deposit and
 withdrawal history with Previous/Next navigation, 25 rows per page. `/reports/transfer-history` applies `limit` and `offset` in the database,
@@ -684,11 +691,12 @@ and instrument counts plus the covered date range.
 normalized daily NAV history, and ChangeInNAV period movements/TWR. Read-only
 queries select whole sections from successful artifacts in a repeatable read.
 Failed reports cannot supersede published sources. Raw IDs, artifact IDs and
-statement dates accompany sections. History normalizes row dates and prefers the
-newest successful source. Cash/position comparisons require matching statement
+statement dates accompany sections. NAV history takes the latest published equity
+section per statement date before normalizing and deduplicating the row dates.
+Cash/position comparisons require matching statement
 dates; summary positions exclude lot detail. Missing inputs remain unknown.
 MTM and realized/change-in-unrealized are alternative modes; TWR is never added
-to money. Existing portfolio profit and return-on-net-transfers remain unchanged.
+to money.
 
 Published Flex section selection lives in `app/db/published_flex_sections.py`.
 Its latest and history relation builders own account isolation, publication

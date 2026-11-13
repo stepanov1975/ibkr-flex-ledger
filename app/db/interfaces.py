@@ -883,7 +883,7 @@ class LedgerOpenPositionValuationRecord:
         instrument_id: Canonical instrument identifier.
         asset_category: Broker-reported asset category.
         currency: Broker-reported instrument currency.
-        position_qty: Broker-reported open position quantity.
+        position_qty: Broker-reported quantity when a unique summary is available.
         mark_price: Optional broker-reported mark price.
         cost_basis_money: Optional broker-reported cost basis.
         broker_unrealized_pnl: Optional broker-reported unrealized PnL.
@@ -895,7 +895,7 @@ class LedgerOpenPositionValuationRecord:
     instrument_id: UUID
     asset_category: str
     currency: str
-    position_qty: str
+    position_qty: str | None
     mark_price: str | None
     cost_basis_money: str | None
     broker_unrealized_pnl: str | None
@@ -1064,10 +1064,10 @@ class LedgerSnapshotRepositoryPort(Protocol):
         """Commit lot and snapshot projections together, joining an existing transaction."""
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
-        """List prior nonzero broker holdings, including those without canonical activity."""
+        """List prior holdings with a nonzero or unavailable broker quantity."""
 
     def db_ledger_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
-        """Check for prior nonzero positions omitted by the current broker statement."""
+        """Check for removed positions or a change in summary completeness."""
 
     def db_ledger_instrument_ids_for_scope(
         self,

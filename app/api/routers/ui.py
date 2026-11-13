@@ -68,9 +68,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <section class="card summary-card"><h2>Realized</h2><div id="realized-pnl" class="metric">—</div></section>
 <section class="card summary-card"><h2>Unrealized</h2><div id="unrealized-pnl" class="metric">—</div></section>
 <section class="card summary-card"><h2>Estimated net liquidation value</h2><div id="net-liquidation" class="metric">—</div></section>
-<section class="card summary-card"><h2>Net transfers (USD)</h2><div id="net-transfers-usd" class="metric">—</div></section>
+<section class="card summary-card"><h2>Net transfers (USD)</h2><div id="net-transfers-usd" class="metric">—</div><div class="muted">All imported transfers</div></section>
 <section class="card summary-card"><h2>Total profit (USD)</h2><div id="total-profit-usd" class="metric">—</div></section>
-<section class="card summary-card"><h2>Return on net transfers</h2><div id="profit-percent" class="metric">—</div></section>
+<section class="card summary-card"><h2>Return on net transfers</h2><div id="profit-percent" class="metric">—</div><div class="muted">Through the valuation date</div></section>
 <section class="card summary-card"><h2>Total costs (USD)</h2><div id="total-costs-usd" class="metric">—</div></section>
 <section class="card full instrument-card"><div class="section-heading"><h2>Total P&amp;L by instrument</h2><div class="instrument-filters"><input id="symbol-search" type="search" aria-label="Search symbols" placeholder="Search symbols…"><label class="toggle"><input id="show-stocks" type="checkbox" checked> Stocks</label><label class="toggle"><input id="show-options" type="checkbox" checked> Options</label><label class="toggle"><input id="hide-zero-positions" type="checkbox" checked> Hide zero positions</label></div></div><div class="scroll"><table><thead><tr><th>Symbol</th><th>Position</th><th>Average cost</th><th>Total cost</th><th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody id="pnl"></tbody></table></div><p id="pnl-empty" class="muted" role="status"></p></section>
 <section class="card"><h2>Net dividend payments</h2><div id="net-dividend-payments-usd" class="metric">—</div><div class="muted">Gross <span id="gross-dividend-payments-usd">—</span> · Withholding <span id="dividend-withholding-tax-usd">—</span></div></section>

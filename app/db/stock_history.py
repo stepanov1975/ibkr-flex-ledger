@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.fx_rates import select_conversion_rate
 from .interfaces import LedgerFxRateRecord
 from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
+from .open_positions import db_open_position_is_summary
 
 
 def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> dict[str, Any] | None:
@@ -70,12 +71,15 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 'snapshot_runs': [row['ingestion_run_id'] for row in snapshots.values() if row['ingestion_run_id']],
             }
             valuations = [dict(row) for row in connection.execute(text(
-                "SELECT r.ingestion_run_id, r.raw_artifact_id, COALESCE(a.report_date_local,r.report_date_local) AS report_date_local, "
-                "COALESCE(a.valuation_pending_at_utc,a.created_at_utc,min(r.created_at_utc)) AS recorded_at_utc, "
-                "jsonb_object_agg(r.source_payload->>'conid', "
-                "jsonb_build_object('payload',r.source_payload,'raw_id',r.raw_record_id) ORDER BY r.raw_record_id) "
-                "FILTER (WHERE r.source_payload->>'conid'=ANY(:conids) "
-                "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%') AS positions "
+                "WITH evidence AS ("
+                "SELECT r.ingestion_run_id, r.raw_artifact_id, "
+                "COALESCE(a.report_date_local,r.report_date_local) AS report_date_local, "
+                "COALESCE(a.valuation_pending_at_utc,a.created_at_utc) AS valuation_recorded_at_utc, "
+                "r.created_at_utc, r.raw_record_id, r.source_payload, r.source_payload->>'conid' AS conid, "
+                "r.source_payload->>'conid'=ANY(:conids) "
+                "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
+                "AND UPPER(BTRIM(COALESCE(r.source_payload->>'assetCategory', ''))) NOT IN ('CASH','FX') AS holding, "
+                f"{db_open_position_is_summary('r')} AS is_summary "
                 "FROM raw_record r LEFT JOIN raw_artifact a ON a.raw_artifact_id=r.raw_artifact_id "
                 "JOIN ingestion_run run ON run.ingestion_run_id=r.ingestion_run_id "
                 "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=a.completed_ingestion_run_id "
@@ -84,9 +88,17 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "OR (a.completed_ingestion_run_id IS NULL AND run.status='success')) "
                 "AND (CAST(:first_date AS date) IS NULL OR COALESCE(a.report_date_local,r.report_date_local)>=:first_date "
                 "OR COALESCE(a.report_date_local,r.report_date_local) IS NULL "
-                "OR r.ingestion_run_id=ANY(:snapshot_runs)) "
-                "GROUP BY r.ingestion_run_id,r.raw_artifact_id,a.report_date_local,r.report_date_local, "
-                "a.valuation_pending_at_utc,a.created_at_utc"
+                "OR r.ingestion_run_id=ANY(:snapshot_runs))), "
+                "counted AS (SELECT *, count(*) FILTER (WHERE holding AND is_summary) "
+                "OVER (PARTITION BY ingestion_run_id,raw_artifact_id,report_date_local,conid) AS summary_count "
+                "FROM evidence) "
+                "SELECT ingestion_run_id, raw_artifact_id, report_date_local, "
+                "COALESCE(valuation_recorded_at_utc,min(created_at_utc)) AS recorded_at_utc, "
+                "jsonb_object_agg(conid, jsonb_build_object('payload', "
+                "CASE WHEN summary_count=1 THEN source_payload ELSE '{}'::jsonb END, "
+                "'raw_id',raw_record_id) ORDER BY raw_record_id) "
+                "FILTER (WHERE holding AND (summary_count<>1 OR is_summary)) AS positions "
+                "FROM counted GROUP BY ingestion_run_id,raw_artifact_id,report_date_local,valuation_recorded_at_utc"
             ), valuation_params).mappings()]
             fx_rates = SQLAlchemyLedgerSnapshotService(engine, connection=connection).db_ledger_fx_rate_list_for_account(
                 account_id, max(
@@ -260,6 +272,8 @@ def _valuation_inputs(
     """Compare parsed valuation inputs, ignoring broker labels and numeric formatting."""
     if payload is None:
         return None
+    if not payload:
+        return {'summary_unavailable': True}
     result: dict[str, Any] = {'currency': (payload.get('currency') or '').strip().upper()}
     for key in ('position', 'markPrice', 'costBasisMoney', 'fifoPnlUnrealized', 'fxRateToBase', 'multiplier'):
         value = (payload.get(key) or '').strip()

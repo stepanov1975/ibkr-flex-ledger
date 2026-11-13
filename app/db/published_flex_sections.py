@@ -72,3 +72,13 @@ def db_published_flex_sections_history(
         )),
     ).distinct()
     return history if include_undated else history.where(artifact.c.report_date_local.is_not(None))
+
+
+def db_published_flex_sections_by_date(account_id: str, sections: Sequence[str]) -> Select[Any]:
+    """Select the effective version of each requested section per statement date."""
+    history = db_published_flex_sections_history(account_id, sections)
+    sources = history.selected_columns
+    return history.distinct(sources.section_name, sources.report_date_local).order_by(
+        sources.section_name, sources.report_date_local.desc(),
+        sources.created_at_utc.desc(), sources.raw_artifact_id.desc(),
+    )

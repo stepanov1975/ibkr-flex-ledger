@@ -1,5 +1,6 @@
 """Real PostgreSQL source version and account isolation tests."""
 
+from datetime import date
 from decimal import Decimal
 
 from app.analytics.account_insights import _CHANGE_COMPONENTS, _NAV_COMPONENTS
@@ -37,3 +38,35 @@ def test_insights_successful_whole_sections_and_history(database):  # noqa: F811
         b'</OpenPositions>', b'</Ignored><OpenPositions/>')
     assert orchestrator.job_execute("ingestion_run").status == "success"
     assert db_account_insights(database, "INTEGRITY")["nav"]["cash_and_positions"] == Decimal("30")
+
+
+def test_nav_history_uses_the_effective_equity_section_per_statement_day(database):  # noqa: F811
+    orchestrator, adapter, *_ = _harness(database)
+    equity = (b'<EquitySummaryInBase>'
+              b'<EquitySummaryByReportDateInBase reportDate="20260820" currency="USD" total="240"/>'
+              b'<EquitySummaryByReportDateInBase reportDate="20260821" currency="USD" total="250"/>'
+              b'</EquitySummaryInBase>')
+    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"</FlexStatement>", equity + b"</FlexStatement>")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    assert [point["nav"] for point in db_account_insights(database, "INTEGRITY")["nav_history"]] == [
+        Decimal("240"), Decimal("250"),
+    ]
+
+    earlier_statement = equity.split(b'<EquitySummaryByReportDateInBase reportDate="20260821"')[0]
+    earlier_statement += b"</EquitySummaryInBase>"
+    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b' reportDate="20260821">', b' reportDate="20260820">', 1)
+    adapter.payload_bytes = adapter.payload_bytes.replace(b"</FlexStatement>", earlier_statement + b"</FlexStatement>")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+
+    adapter.payload_bytes = _SEEDED_PAYLOAD
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    assert len(db_account_insights(database, "INTEGRITY")["nav_history"]) == 2
+
+    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(
+        b"</FlexStatement>", b"<EquitySummaryInBase/></FlexStatement>",
+    )
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    result = db_account_insights(database, "INTEGRITY")
+    assert [(point["date"], point["nav"]) for point in result["nav_history"]] == [
+        (date(2026, 8, 20), Decimal("240")),
+    ]

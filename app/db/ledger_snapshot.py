@@ -15,6 +15,7 @@ from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope
+from .open_positions import OPEN_POSITIONS_SUMMARY_UNAVAILABLE, db_open_position_is_summary
 
 from app.db.interfaces import (
     LedgerCashflowRecord,
@@ -145,36 +146,46 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 yield SQLAlchemyLedgerSnapshotService(self._engine, connection=connection)
 
     def db_ledger_prior_holding_ids(self, account_id: str, report_date_local: str) -> list[str]:
-        """Retain omitted broker-only holdings in the next snapshot's instrument set."""
+        """Retain prior holdings with a nonzero or unavailable broker quantity."""
         try:
             with self._connection_scope() as connection:
                 return [str(identifier) for identifier in connection.execute(text(
-                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
+                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty,valuation_source "
                     "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
                     "ORDER BY instrument_id,report_date_local DESC) "
                     "SELECT instrument_id FROM latest JOIN instrument USING(instrument_id) "
-                    "WHERE (position_qty<>0 OR cashflow_reassigned_at_utc IS NOT NULL) "
+                    "WHERE (position_qty<>0 OR valuation_source=:summary_unavailable "
+                    "OR cashflow_reassigned_at_utc IS NOT NULL) "
                     "AND UPPER(BTRIM(asset_category)) NOT IN ('CASH','FX')"
-                ), {'account_id': account_id, 'day': report_date_local}).scalars()]
+                ), {'account_id': account_id, 'day': report_date_local,
+                    'summary_unavailable': OPEN_POSITIONS_SUMMARY_UNAVAILABLE}).scalars()]
         except SQLAlchemyError as error:
             raise RuntimeError("prior broker holdings read failed") from error
 
     def db_ledger_has_removed_positions(self, account_id: str, ingestion_run_id: str, report_date_local: str) -> bool:
-        """Detect deletions that cannot appear in the changed-current-row scope."""
+        """Detect removed positions or a change in summary completeness outside the row diff."""
         try:
             with self._connection_scope() as connection:
                 return bool(connection.scalar(text(
-                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty "
+                    "WITH latest AS (SELECT DISTINCT ON (instrument_id) instrument_id,position_qty,valuation_source "
                     "FROM pnl_snapshot_daily WHERE account_id=:account_id AND report_date_local<=CAST(:day AS date) "
-                    "ORDER BY instrument_id,report_date_local DESC) "
-                    "SELECT EXISTS(SELECT 1 FROM latest s JOIN instrument i USING(instrument_id) "
-                    "WHERE s.position_qty<>0 AND UPPER(BTRIM(i.asset_category)) NOT IN ('CASH','FX') "
-                    "AND EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
-                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions') "
-                    "AND NOT EXISTS(SELECT 1 FROM raw_record r WHERE r.account_id=:account_id "
-                    "AND r.ingestion_run_id=CAST(:run_id AS uuid) AND r.section_name='OpenPositions' "
-                    "AND r.source_row_ref LIKE 'OpenPositions:OpenPosition:%' AND r.source_payload->>'conid'=i.conid))"
-                ), {'account_id': account_id, 'run_id': ingestion_run_id, 'day': report_date_local}))
+                    "ORDER BY instrument_id,report_date_local DESC), "
+                    "position_rows AS (SELECT r.source_row_ref, r.source_payload FROM raw_record r "
+                    "WHERE r.account_id=:account_id AND r.ingestion_run_id=CAST(:run_id AS uuid) "
+                    "AND r.section_name='OpenPositions'), "
+                    "summaries AS (SELECT r.source_payload->>'conid' AS conid, "
+                    f"count(*) FILTER (WHERE {db_open_position_is_summary('r')}) AS summary_count "
+                    "FROM position_rows r WHERE r.source_row_ref LIKE 'OpenPositions:OpenPosition:%' "
+                    "AND UPPER(BTRIM(r.source_payload->>'assetCategory')) NOT IN ('CASH','FX') GROUP BY 1) "
+                    "SELECT EXISTS(SELECT 1 FROM position_rows) AND EXISTS( "
+                    "SELECT 1 FROM latest s JOIN instrument i USING(instrument_id) "
+                    "LEFT JOIN summaries current ON current.conid=i.conid "
+                    "WHERE UPPER(BTRIM(i.asset_category)) NOT IN ('CASH','FX') AND ("
+                    "(current.conid IS NULL AND (s.position_qty<>0 OR s.valuation_source=:summary_unavailable)) "
+                    "OR (current.conid IS NOT NULL AND (current.summary_count<>1) IS DISTINCT FROM "
+                    "COALESCE(s.valuation_source=:summary_unavailable, false))))"
+                ), {'account_id': account_id, 'run_id': ingestion_run_id, 'day': report_date_local,
+                    'summary_unavailable': OPEN_POSITIONS_SUMMARY_UNAVAILABLE}))
         except SQLAlchemyError as error:
             raise RuntimeError("removed broker position check failed") from error
 
@@ -476,27 +487,11 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_ingestion_run_id = self._db_ledger_validate_uuid_text(ingestion_run_id, "ingestion_run_id")
 
         statement = (
-            "WITH parsed AS ("
-            "SELECT i.instrument_id, rr.raw_record_id, "
-            "UPPER(BTRIM(rr.source_payload->>'assetCategory')) AS asset_category, "
-            "UPPER(BTRIM(rr.source_payload->>'currency')) AS currency, "
-            "REPLACE(BTRIM(COALESCE(rr.source_payload->>'position', '')), ',', '')::numeric AS position_qty, "
-            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'markPrice', '')) IN ('', '-', '--', 'N/A') "
-            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'markPrice'), ',', '')::numeric END AS mark_price, "
-            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'costBasisMoney', '')) IN ('', '-', '--', 'N/A') "
-            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'costBasisMoney'), ',', '')::numeric END AS cost_basis_money, "
-            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fifoPnlUnrealized', '')) IN ('', '-', '--', 'N/A') "
-            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fifoPnlUnrealized'), ',', '')::numeric END "
-            "AS broker_unrealized_pnl, "
-            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fxRateToBase', '')) IN ('', '-', '--', 'N/A') "
-            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fxRateToBase'), ',', '')::numeric END AS fx_rate_to_base, "
-            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
-            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
-            "CASE "
-            "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
-            "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
-            "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
-            "END AS report_date_local "
+            "WITH ranked AS (SELECT i.instrument_id, rr.source_payload, "
+            f"count(*) FILTER (WHERE {db_open_position_is_summary('rr')}) "
+            "OVER (PARTITION BY i.instrument_id) AS summary_count, "
+            f"row_number() OVER (PARTITION BY i.instrument_id ORDER BY ({db_open_position_is_summary('rr')}) DESC, "
+            "rr.raw_record_id DESC) AS row_rank "
             "FROM raw_record rr "
             "JOIN instrument i ON i.account_id = rr.account_id AND i.conid = rr.source_payload->>'conid' "
             "WHERE rr.account_id = :account_id "
@@ -516,15 +511,31 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             ]
             statement += " AND i.instrument_id = ANY(CAST(:instrument_ids AS uuid[]))"
         statement += (
-            "), ranked AS ("
-            "SELECT instrument_id, asset_category, currency, position_qty, mark_price, cost_basis_money, "
-            "broker_unrealized_pnl, fx_rate_to_base, multiplier, report_date_local, "
-            "ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY raw_record_id DESC) AS row_rank "
-            "FROM parsed"
-            ") "
-            "SELECT instrument_id, asset_category, currency, position_qty, mark_price, cost_basis_money, "
-            "broker_unrealized_pnl, fx_rate_to_base, multiplier, report_date_local "
-            "FROM ranked WHERE row_rank = 1"
+            ") SELECT rr.instrument_id, "
+            "UPPER(BTRIM(rr.source_payload->>'assetCategory')) AS asset_category, "
+            "UPPER(BTRIM(rr.source_payload->>'currency')) AS currency, "
+            "CASE WHEN rr.summary_count=1 THEN "
+            "REPLACE(BTRIM(COALESCE(rr.source_payload->>'position', '')), ',', '')::numeric END AS position_qty, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'markPrice', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'markPrice'), ',', '')::numeric END AS mark_price, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'costBasisMoney', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'costBasisMoney'), ',', '')::numeric END AS cost_basis_money, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fifoPnlUnrealized', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fifoPnlUnrealized'), ',', '')::numeric END "
+            "AS broker_unrealized_pnl, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'fxRateToBase', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fxRateToBase'), ',', '')::numeric END AS fx_rate_to_base, "
+            "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
+            "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
+            "CASE "
+            "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
+            "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
+            "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
+            "END AS report_date_local "
+            "FROM (SELECT instrument_id, summary_count, "
+            "CASE WHEN summary_count=1 THEN source_payload ELSE jsonb_build_object("
+            "'assetCategory', source_payload->>'assetCategory', 'currency', source_payload->>'currency') END AS source_payload "
+            "FROM ranked WHERE row_rank=1) rr"
         )
 
         try:
@@ -541,7 +552,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 instrument_id=row["instrument_id"],
                 asset_category=row["asset_category"],
                 currency=row["currency"],
-                position_qty=str(row["position_qty"]),
+                position_qty=None if row["position_qty"] is None else str(row["position_qty"]),
                 mark_price=None if row["mark_price"] is None else str(row["mark_price"]),
                 cost_basis_money=None
                 if row["cost_basis_money"] is None
