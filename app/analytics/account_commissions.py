@@ -9,23 +9,36 @@ _COMPONENTS = ("brokerExecutionCharge", "brokerClearingCharge", "thirdPartyExecu
 _REGULATORY = ("regSection31TransactionFee", "regFINRATradingActivityFee", "regOther")
 
 
+def _commission_currency(execution: dict[str, Any]) -> str:
+    return str(execution["payload"].get("ibCommissionCurrency") or execution["currency"]).strip().upper()
+
+
 def account_commissions(rows: list[InsightRow], trades: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare detail totals without adding nested regulatory charges twice."""
     source = AccountInsights(rows, [])
     details = [r for r in source.section("UnbundledCommissionDetails") if r.payload.get("conid")]
-    result = []
+    result: list[dict[str, Any]] = []
     linked: set[str] = set()
     for row in details:
         p = row.payload
         trade_id = str(p.get("tradeID") or "")
         currency = str(p.get("currency") or "").strip().upper()
         candidates = [t for t in trades if trade_id and str(t["payload"].get("tradeID")) == trade_id
-                      and str(t["payload"].get("conid")) == str(p["conid"])
-                      and str(t["payload"].get("ibCommissionCurrency") or t["currency"]).strip().upper() == currency]
-        duplicate = sum(str(r.payload.get("tradeID") or "") == trade_id and
-                        str(r.payload.get("conid")) == str(p["conid"]) and r.payload.get("currency") == currency
-                        for r in details) != 1
-        trade = candidates[0] if len(candidates) == 1 and not duplicate else None
+                      and str(t["payload"].get("conid")) == str(p["conid"])]
+        same_currency = [t for t in candidates if _commission_currency(t) == currency]
+        identified_details = [r for r in details if str(r.payload.get("tradeID") or "") == trade_id
+                              and str(r.payload.get("conid")) == str(p["conid"])]
+        duplicate = sum(str(r.payload.get("currency") or "").strip().upper() == currency for r in identified_details) > 1
+        trade = same_currency[0] if len(same_currency) == 1 and not duplicate else None
+        if not same_currency and len(candidates) == len(identified_details) == 1:
+            trade = candidates[0]
+        execution_currency = _commission_currency(trade) if trade else None
+        comparable = bool(currency and currency == execution_currency)
+        reason = "Signed commissions compared in the same reported currency."
+        if not trade:
+            reason = "Missing or ambiguous trade/security identity."
+        elif not comparable:
+            reason = f"Commission currency conflict. Detail reports {currency or 'unknown'}, execution reports {execution_currency or 'unknown'}."
         if trade:
             linked.add(trade["event_id"])
         components: list[dict[str, Any]] = [{"field": key, "label": insight_label(key), "amount": insight_decimal(p.get(key))}
@@ -39,8 +52,7 @@ def account_commissions(rows: list[InsightRow], trades: list[dict[str, Any]]) ->
                             insight_sum([r["amount"] for r in components]),
                             "Regulatory detail is already included in the third-party regulatory subtotal."),
                        "execution_check": insight_check("Commission versus execution", total,
-                            trade["commission"] if trade else None,
-                            "Signed broker amounts: negative charges, positive rebates; unique trade and commission currency required."),
+                            trade["commission"] if trade and comparable else None, reason),
                        "regulatory": [{"field": k, "label": insight_label(k), "amount": insight_decimal(p.get(k))} for k in _REGULATORY]})
     selected = source.section("UnbundledCommissionDetails")
     cash = [r for r in source.section("CashReport") if selected and r.artifact_id == selected[0].artifact_id]

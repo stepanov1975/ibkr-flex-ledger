@@ -16,13 +16,16 @@ def account_income(rows: list[InsightRow], history: list[InsightRow], cash: list
     latest: dict[tuple[str, str, str, str], list[InsightRow]] = {}
     for row in history:
         p = row.payload
-        if p.get("conid"):
+        if row.section == "OpenDividendAccruals" and p.get("conid"):
             key = (str(p.get("actionID") or ""), str(p["conid"]), str(p.get("currency", "")),
                    str(p.get("payDate") or "") if not p.get("actionID") else "")
             group = latest.setdefault(key, [])
             if not group or group[0].artifact_id == row.artifact_id:
                 if all(previous.raw_id != row.raw_id for previous in group):
                     group.append(row)
+    reversed_actions = {(str(r.payload.get("actionID")), str(r.payload.get("conid")), r.payload.get("currency"))
+                        for r in [*source.section("ChangeInDividendAccruals"), *history]
+                        if r.section == "ChangeInDividendAccruals" and r.payload.get("code") == "Re"}
     settlements = []
     for (action, conid, currency, _), group in latest.items():
         row = group[0]
@@ -31,9 +34,7 @@ def account_income(rows: list[InsightRow], history: list[InsightRow], cash: list
         payments = [e for e in candidates if e["cash_action"].lower() in ("dividends", "payment in lieu of dividends")]
         taxes = [e for e in candidates if e["cash_action"].lower() == "withholding tax"]
         unexpected = [e for e in candidates if e not in payments and e not in taxes]
-        reversed_accrual = any(str(r.payload.get("actionID")) == action and str(r.payload.get("conid")) == conid
-                               and r.payload.get("currency") == currency and r.payload.get("code") == "Re"
-                               for r in source.section("ChangeInDividendAccruals"))
+        reversed_accrual = (action, conid, currency) in reversed_actions
         expected = insight_decimal(row.payload.get("netAmount"))
         actual = sum((e["amount"] - (e.get("fees") or Decimal("0")) - (e.get("withholding_tax") or Decimal("0"))
                       for e in payments + taxes), Decimal("0")) if payments and not unexpected else None
@@ -42,6 +43,11 @@ def account_income(rows: list[InsightRow], history: list[InsightRow], cash: list
             actual = None
         reason = ("Action/security/currency-linked booked payments and withholding; accrual reversals are not payments."
                   if payments else "No uniquely action-linked payment found; a reversal alone does not prove payment.")
+        accrued_tax = insight_decimal(row.payload.get("tax"))
+        if actual is not None and expected != actual and accrued_tax and not taxes and not any(e.get("withholding_tax") for e in payments):
+            reason = f"The accrual included {accrued_tax} {currency} withholding. No withholding was booked with the linked payment."
+            if reversed_accrual:
+                reason += " The broker subsequently reversed the accrual."
         if unexpected or fee not in (None, Decimal("0")):
             reason = "Additional fees or unclassified linked cashflows require review."
         if len(group) != 1 or not action:

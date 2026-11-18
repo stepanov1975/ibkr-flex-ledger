@@ -12,7 +12,7 @@ def _source(realized: str, broker_realized: str | None) -> ReconciliationSourceR
         report_date_local=date(2026, 8, 21), instrument_id=uuid4(), conid="123", symbol="TEST", currency="USD",
         position_qty="1", realized_pnl=realized, unrealized_pnl="0", fees="0", withholding_tax="0",
         broker_position_qty="1", broker_realized_pnl=broker_realized, broker_unrealized_pnl="0",
-        broker_fees="0", broker_withholding_tax="0", source_event_id=None, source_raw_record_id=None,
+        broker_fees="0", broker_withholding_tax="0", asset_category="STK", sources_by_metric={},
         provisional=False,
     )
 
@@ -39,3 +39,10 @@ def test_missing_broker_value_is_provisional_mismatch() -> None:
     assert diff.within_tolerance is False
     assert diff.provisional is True
     assert diff.rel_diff is None
+
+
+def test_fx_executions_keep_cost_checks_and_omit_security_position_checks():
+    from dataclasses import replace
+    for category in ("FX", "CASH"):
+        rows = analytics_build_reconciliation_diffs([replace(_source("0", "0"), asset_category=category)])
+        assert [row.metric for row in rows] == ["realized_pnl", "fees", "withholding_tax"]

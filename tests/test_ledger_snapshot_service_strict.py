@@ -1553,3 +1553,21 @@ def test_split_rounding_keeps_donor_fx_context_when_surviving_lot_transfers(fx_r
                                          "date": "2026-08-18", "rate": fx_rate}]
     assert snapshot.provisional is (fx_rate is None)
     assert Decimal(snapshot.cost_basis) == (10 if fx_rate is None else 12)
+
+
+@pytest.mark.parametrize("action,put_call,side,cost,expected", [
+    ("A", "P", "BUY", "104", "-1.04"), ("A", "C", "SELL", "104", "1.04"),
+    ("Ex", "C", "BUY", "-104", "1.04"), ("Ex", "P", "SELL", "-104", "-1.04"),
+])
+def test_delivery_adjustments_preserve_total_premium(action, put_call, side, cost, expected):
+    from app.ledger.option_delivery import delivery_price_adjustments
+    option = replace(_trade(uuid4(), "BUY" if action == "A" else "SELL", "1", "0",
+                            asset_category="OPT", multiplier="100"),
+                     delivery={"notes": action, "underlyingConid": "100", "putCall": put_call,
+                               "strike": "64", "cost": cost, "fifoPnlRealized": "0"})
+    stock = replace(_trade(uuid4(), side, "100", "64"), delivery={"notes": action, "conid": "100"})
+    assert delivery_price_adjustments([option, stock], "USD") == {
+        stock.event_trade_fill_id: Decimal(expected), option.event_trade_fill_id: Decimal("104"),
+    }
+    duplicate = replace(stock, event_trade_fill_id=uuid4())
+    assert set(delivery_price_adjustments([option, stock, duplicate], "USD").values()) == {None}

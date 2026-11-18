@@ -10,6 +10,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope, db_transaction_scope
+from .raw_fields import db_raw_numeric, db_trade_is_delivery
 from .trade_consistency import db_validate_trade_consistency
 
 from app.db.interfaces import (
@@ -52,7 +53,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     _RAW_RECORD_QUERY_CHANGED_BY_RUN_ID = (
         "SELECT current.raw_record_id, current.ingestion_run_id, current.account_id, current.period_key, "
         "current.flex_query_id, current.report_date_local, current.section_name, current.source_row_ref, "
-        "current.source_payload "
+        "current.source_payload, "
+        f"(current.section_name='Trades' AND {db_trade_is_delivery('prior')}) AS was_delivery "
         "FROM raw_record AS current "
         "LEFT JOIN LATERAL ("
         "SELECT previous.raw_record_id, previous.source_payload "
@@ -335,6 +337,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     "asset_category": request.asset_category,
                     "currency": request.currency,
                     "description": request.description,
+                    "statement_date": request.statement_date.isoformat() if request.statement_date else None,
                 }
                 for request in normalized_requests
             ]
@@ -353,14 +356,20 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "SELECT * FROM jsonb_to_recordset(CAST(:requests_json AS jsonb)) AS value("
                             "account_id text, conid text, symbol text, local_symbol text, "
                             "isin text, cusip text, figi text, asset_category text, "
-                            "currency text, description text"
+                            "currency text, description text, statement_date date"
                             ")"
+                            "), newer AS ("
+                            "SELECT i.instrument_id, i.account_id, i.conid FROM input "
+                            "JOIN instrument i USING (account_id, conid) WHERE EXISTS ("
+                            "SELECT 1 FROM pnl_snapshot_daily s WHERE s.account_id=i.account_id "
+                            "AND s.instrument_id=i.instrument_id AND s.report_date_local>input.statement_date)"
                             "), upserted AS ("
                             "INSERT INTO instrument ("
                             "account_id, conid, symbol, local_symbol, isin, cusip, figi, "
                             "asset_category, currency, description"
                             ") SELECT account_id, conid, symbol, local_symbol, isin, cusip, figi, "
                             "asset_category, currency, description FROM input "
+                            "WHERE NOT EXISTS (SELECT 1 FROM newer n WHERE n.account_id=input.account_id AND n.conid=input.conid) "
                             "ON CONFLICT (account_id, conid) DO UPDATE SET "
                             "symbol = EXCLUDED.symbol, "
                             "local_symbol = COALESCE(EXCLUDED.local_symbol, instrument.local_symbol), "
@@ -372,7 +381,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "description = COALESCE(EXCLUDED.description, instrument.description), "
                             "updated_at_utc = now() "
                             "RETURNING instrument_id, account_id, conid"
-                            ") SELECT * FROM upserted ORDER BY conid"
+                            ") SELECT * FROM upserted UNION ALL SELECT * FROM newer ORDER BY conid"
                         ),
                         {"requests_json": requests_json},
                     ).mappings().all()
@@ -555,10 +564,16 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "SELECT COUNT(DISTINCT jsonb_build_array("
                             "COALESCE(NULLIF(UPPER(BTRIM(metadata.source_payload->>'ibCommissionCurrency')), ''), "
                             "UPPER(BTRIM(event_trade_fill.currency))), "
-                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
-                            "THEN 1::numeric ELSE REPLACE(BTRIM(metadata.source_payload->>'multiplier'), ',', '')::numeric END, "
-                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
-                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END"
+                            f"COALESCE(({db_raw_numeric('multiplier', 'metadata')}), 1), "
+                            f"{db_raw_numeric('closePrice', 'metadata')}, "
+                            f"{db_raw_numeric('fifoPnlRealized', 'metadata')}, "
+                            f"{db_raw_numeric('ibCommission', 'metadata')}, {db_raw_numeric('fees', 'metadata')}, "
+                            f"{db_raw_numeric('fxRateToBase', 'metadata')}, {db_raw_numeric('netCash', 'metadata')}, "
+                            f"{db_raw_numeric('netCashInBase', 'metadata')}, "
+                            f"CASE WHEN {db_trade_is_delivery('metadata')} THEN jsonb_build_array("
+                            "metadata.source_payload->>'notes', metadata.source_payload->>'conid', "
+                            "metadata.source_payload->>'underlyingConid', metadata.source_payload->>'putCall', "
+                            f"metadata.source_payload->>'strike', {db_raw_numeric('cost', 'metadata')}) END"
                             ")) > 1 FROM raw_record metadata WHERE metadata.raw_record_id IN ("
                             "COALESCE(event_trade_fill.metadata_source_raw_record_id, event_trade_fill.source_raw_record_id), "
                             "EXCLUDED.metadata_source_raw_record_id)) "
@@ -734,6 +749,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             asset_category=self._db_canonical_validate_non_empty_text(request.asset_category, "request.asset_category"),
             currency=self._db_canonical_validate_non_empty_text(request.currency, "request.currency"),
             description=self._db_canonical_validate_optional_text(request.description),
+            statement_date=request.statement_date,
         )
 
     def _db_canonical_read_raw_rows(
@@ -774,6 +790,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 section_name=row["section_name"],
                 source_row_ref=row["source_row_ref"],
                 source_payload=dict(row["source_payload"]),
+                was_delivery=bool(row.get("was_delivery")),
             )
             for row in rows
         ]

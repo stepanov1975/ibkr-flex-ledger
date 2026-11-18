@@ -80,6 +80,7 @@ def test_failed_metadata_refresh_leaves_published_values_intact(database, monkey
 
 @pytest.mark.parametrize('metadata', [
     {'description': 'Updated description'},
+    {'fifoPnlRealized': '0.000', 'ibCommission': '-1.00', 'fxRateToBase': '1.000'},
     {'closePrice': '110.000', 'multiplier': '1.000', 'ibCommissionCurrency': ' usd '},
 ])
 def test_equivalent_metadata_does_not_invalidate_trade_accounting(database, metadata):
@@ -92,3 +93,35 @@ def test_equivalent_metadata_does_not_invalidate_trade_accounting(database, meta
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     with database.connect() as connection:
         assert connection.scalar(text('SELECT updated_at_utc FROM event_trade_fill')) == modified
+
+
+def test_reconciliation_uses_corrected_amount_evidence_on_import_and_replay(database):
+    harness = _harness(database)
+    orchestrator, adapter, *_ = harness
+    portfolio = SQLAlchemyPortfolioService(database)
+    adapter.payload_bytes = _report(fifoPnlRealized="10")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    adapter.payload_bytes = _report(fifoPnlRealized="9.75")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    with database.connect() as connection:
+        event, origin = connection.execute(text(
+            "SELECT event_trade_fill_id, source_raw_record_id FROM event_trade_fill"
+        )).one()
+        correction, period = connection.execute(text(
+            "SELECT raw_record_id, period_key FROM raw_record WHERE section_name='Trades' "
+            "AND source_payload->>'fifoPnlRealized'='9.75'"
+        )).one()
+
+    def evidence():
+        row, = portfolio.db_reconciliation_sources("INTEGRITY", None, None, None)
+        assert Decimal(row.broker_realized_pnl) == Decimal("9.75")
+        return [raw_id for event_id, raw_id in row.sources_by_metric["realized_pnl"] if event_id == event]
+
+    assert evidence() == [correction]
+    with database.begin() as connection:
+        connection.execute(text("UPDATE event_trade_fill SET metadata_source_raw_record_id=source_raw_record_id"))
+    assert evidence() == []
+    assert _replay(harness, period).status == "success"
+    assert evidence() == [correction]
+    with database.connect() as connection:
+        assert connection.scalar(text("SELECT source_raw_record_id FROM event_trade_fill")) == origin

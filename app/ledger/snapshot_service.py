@@ -22,6 +22,7 @@ from app.db import (
 )
 from app.db.open_positions import OPEN_POSITIONS_SUMMARY_UNAVAILABLE
 
+from .option_delivery import delivery_price_adjustments
 from .snapshot_dates import snapshot_report_date_start_utc
 from .fifo_engine import (
     FifoLedgerComputationRequest, FifoOpenLotResult, FifoSecurityMovementInput,
@@ -219,6 +220,17 @@ class StockLedgerSnapshotService:
             through_report_date_local=normalized_report_date,
             instrument_ids=instrument_ids,
         )
+        delivery_inputs = trade_rows
+        if instrument_ids is not None and any(trade.delivery is not None for trade in trade_rows):
+            # A scoped stock rebuild still needs its option leg (and vice versa).
+            delivery_inputs = self._repository.db_ledger_trade_fill_list_for_account(
+                account_id=normalized_account_id, through_report_date_local=normalized_report_date,
+            )
+        delivery_adjustments = delivery_price_adjustments(delivery_inputs, normalized_functional_currency)
+        uncertain_delivery_sources = {
+            str(t.source_raw_record_id) for t in trade_rows
+            if t.delivery is not None and delivery_adjustments[t.event_trade_fill_id] is None
+        }
         cashflow_rows = self._repository.db_ledger_cashflow_list_for_account(
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
@@ -347,6 +359,9 @@ class StockLedgerSnapshotService:
                 missing_fx |= input_missing_fx
                 quantity = Decimal(trade.quantity)
                 price = Decimal(trade.price) * contract_multiplier * trade_fx_rate
+                delivery_adjustment = delivery_adjustments.get(trade.event_trade_fill_id)
+                if delivery_adjustment is not None:
+                    price += delivery_adjustment
                 converted_trades.append(
                     FifoTradeFillInput(
                         event_trade_fill_id=str(trade.event_trade_fill_id),
@@ -406,12 +421,14 @@ class StockLedgerSnapshotService:
             broker_eligible = instrument_asset_categories[instrument_id].strip().upper() not in {"CASH", "FX"}
             converted_trades, fx_sources, fx_dependencies, missing_fx = trade_context[instrument_id]
             fifo_result = fifo_results[instrument_id]
+            uncertain_delivery = any(str(t.source_raw_record_id) in uncertain_delivery_sources for t in instrument_trades)
             for lot in (*fifo_result.open_lots, *fifo_result.closed_lots):
                 for source_id in lot.basis_source_raw_record_ids:
                     origin_sources, origin_dependencies, origin_missing = origin_fx_context[source_id]
                     fx_sources.update(origin_sources)
                     fx_dependencies.update(origin_dependencies)
                     missing_fx |= origin_missing
+                    uncertain_delivery |= source_id in uncertain_delivery_sources
             fifo_cost_basis = self._build_open_cost_basis(fifo_result.open_lots)
 
             cashflow_amount_total = Decimal("0")
@@ -607,6 +624,7 @@ class StockLedgerSnapshotService:
             broker_only = ingestion_run_id is not None and valuation_record is not None and not has_canonical_history
             provisional = (
                 missing_valuation or missing_fx or quantity_mismatch or broker_only
+                or uncertain_delivery
                 or valuation_source == "trades_last_trade_price"
             )
             fx_source = ",".join(sorted(fx_sources)) if fx_sources else "base_currency"

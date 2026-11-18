@@ -128,3 +128,38 @@ def test_replay_respects_manual_split_lock_and_records_success_after_release(dat
         assert connection.execute(text('SELECT run_type, status FROM ingestion_run ORDER BY started_at_utc')).all() == [
             ('manual', 'success'), ('reprocess', 'success'),
         ]
+
+
+def test_run_completion_includes_work_inside_publication_transaction(database):
+    from app.db import SQLAlchemyCanonicalPersistenceService
+    from app.db.session import db_connection_scope
+
+    runs = SQLAlchemyIngestionRunService(database)
+    with runs.db_ingestion_run_guard("TIMING"):
+        run = runs.db_ingestion_run_create_started("TIMING", "manual", "2026-11-17", "query", None)
+        with SQLAlchemyCanonicalPersistenceService(database).db_canonical_transaction():
+            with db_connection_scope(database) as connection:
+                connection.execute(text("SELECT pg_sleep(0.03)"))
+                before_finalize = connection.scalar(text("SELECT clock_timestamp()"))
+            result = runs.db_ingestion_run_finalize(run.ingestion_run_id, "success", None, None, [])
+    assert result.state.ended_at_utc >= before_finalize
+    assert result.state.duration_ms >= 30
+
+
+def test_migration_repairs_only_provable_early_completion(database):
+    from alembic import command
+    from alembic.config import Config
+    config = Config("alembic.ini")
+    command.downgrade(config, "20260911_18")
+    with database.begin() as connection:
+        connection.exec_driver_sql("""
+            INSERT INTO ingestion_run (account_id, run_type, status, period_key, flex_query_id,
+                                       started_at_utc, ended_at_utc, duration_ms, diagnostics)
+            SELECT 'TIMING','manual','success','2026-11-17','query','2026-11-17 09:00:00Z',
+                   '2026-11-17 09:00:04Z',4000,diag::jsonb FROM (VALUES
+                   ('[{"stage":"run","status":"success","at_utc":"2026-11-17T09:00:07Z"}]'),
+                   ('[{"stage":"run","status":"success","at_utc":"invalid"}]'),('[]')) AS rows(diag)
+        """)
+    command.upgrade(config, "head")
+    with database.connect() as connection:
+        assert connection.scalars(text("SELECT duration_ms FROM ingestion_run ORDER BY duration_ms")).all() == [4000, 4000, 7000]

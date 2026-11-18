@@ -33,7 +33,7 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
             ORDER BY r.section_name,r.source_row_ref,r.raw_record_id
         """).columns().add_cte(latest_sources)).mappings().all()
         historical_sources = db_published_flex_sections_by_date(
-            account_id, ("EquitySummaryInBase",),
+            account_id, ("EquitySummaryInBase", "ChangeInDividendAccruals"),
         ).union_all(
             db_published_flex_sections_history(account_id, ("OpenDividendAccruals",)),
         ).cte("published_sections")
@@ -51,7 +51,7 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
         report = AccountInsights(sources, [r for r in historical if r.section == "EquitySummaryInBase"]).build()
         evidence = db_account_insight_evidence(connection, account_id)
         report["checks"] = account_calculation_checks(sources, evidence)
-        report["income"] = account_income(sources, [r for r in historical if r.section == "OpenDividendAccruals"], evidence["cash"])
+        report["income"] = account_income(sources, historical, evidence["cash"])
         report["lending"] = account_lending(sources)
         report["settled_cash"] = account_settled_cash(sources)
         report["option_activity"] = account_option_activity(sources, evidence["trades"])

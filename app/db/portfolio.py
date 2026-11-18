@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, Date, Engine, Integer, Numeric, String, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from .raw_fields import db_raw_numeric
 from .stock_history import db_stock_history
 from .open_positions import db_open_position_is_summary
 from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
@@ -964,15 +965,8 @@ class SQLAlchemyPortfolioService:
         report_date_to: date | None,
         instrument_id: UUID | None,
     ) -> list[ReconciliationSourceRecord]:
-        def raw_numeric(field: str, alias: str = "raw") -> str:
-            return (
-                f"CASE WHEN BTRIM(COALESCE({alias}.source_payload->>'{field}', '')) "
-                "IN ('', '-', '--', 'N/A') THEN NULL ELSE "
-                f"REPLACE(BTRIM({alias}.source_payload->>'{field}'), ',', '')::numeric END"
-            )
-
         raw_currency = "UPPER(BTRIM(raw.source_payload->>'currency'))"
-        raw_fx_rate = raw_numeric("fxRateToBase")
+        raw_fx_rate = db_raw_numeric("fxRateToBase")
         row_fx_rate = (
             f"CASE WHEN {raw_currency}=s.currency THEN 1::numeric ELSE {raw_fx_rate} END"
         )
@@ -1000,12 +994,13 @@ class SQLAlchemyPortfolioService:
             f"CASE WHEN {commission_currency}=event.currency THEN ({trade_fx_rate}) "
             f"ELSE ({conversion_rate(commission_currency)}) END"
         )
-        position = raw_numeric("position")
-        unrealized = raw_numeric("fifoPnlUnrealized")
+        position = db_raw_numeric("position")
+        unrealized = db_raw_numeric("fifoPnlUnrealized")
         # Canonical identities deduplicate overlapping reports; amounts remain broker-reported.
         trade_history = (
             "FROM event_trade_fill event JOIN raw_record raw ON raw.raw_record_id="
             "COALESCE(event.metadata_source_raw_record_id, event.source_raw_record_id) "
+            "JOIN raw_record origin ON origin.raw_record_id=event.source_raw_record_id "
             "WHERE event.account_id=s.account_id AND event.instrument_id=s.instrument_id "
             "AND event.report_date_local<=s.report_date_local "
         )
@@ -1039,8 +1034,24 @@ class SQLAlchemyPortfolioService:
         cash_reported_tax = (
             f"({cash_tax}) - CASE WHEN event.cash_action='Withholding Tax' THEN ({cash_amount}) ELSE 0 END"
         )
+        # A post-settlement commission can revise reported trading P&L and also
+        # appear in cash. Use the original trading value only when the linked
+        # cash adjustments explain the entire revision in the trade currency.
+        original_realized = db_raw_numeric("fifoPnlRealized", "origin")
+        adjustment_total = (
+            "(SELECT sum(adj.amount) FROM event_cashflow adj JOIN raw_record receipt "
+            "ON receipt.raw_record_id=adj.source_raw_record_id WHERE adj.account_id=event.account_id "
+            "AND adj.instrument_id=event.instrument_id AND adj.currency=event.currency "
+            "AND adj.cash_action='Commission Adjustments' AND receipt.source_payload->>'tradeID'="
+            "NULLIF(origin.source_payload->>'tradeID',''))"
+        )
+        revised_by_adjustment = (
+            f"event.realized_pnl<>({original_realized}) AND "
+            f"event.realized_pnl-({original_realized})={adjustment_total}"
+        )
+        realized_value = f"CASE WHEN {revised_by_adjustment} THEN ({original_realized}) ELSE event.realized_pnl END"
         broker_realized = (
-            f"{complete_total(f'event.realized_pnl * ({trade_fx_rate})', trade_history)} + "
+            f"{complete_total(f'({realized_value}) * ({trade_fx_rate})', trade_history)} + "
             f"{complete_total(cash_net, cash_history)}"
         )
         broker_fees = f"{complete_total(trade_fees, trade_history)} + {complete_total(cash_reported_fees, cash_history)}"
@@ -1062,7 +1073,25 @@ class SQLAlchemyPortfolioService:
             "AND present.ingestion_run_id=s.ingestion_run_id AND present.report_date_local=s.report_date_local "
             "AND present.section_name='OpenPositions' AND present.source_payload->>'conid'=i.conid)"
         )
-        closed_position = f"CASE WHEN ({complete_positions}) AND ({absent_position}) THEN 0::numeric END"
+        closed_position = ("CASE WHEN UPPER(BTRIM(i.asset_category)) NOT IN ('CASH','FX') "
+                           f"AND ({complete_positions}) AND ({absent_position}) THEN 0::numeric END")
+
+        # Keep the canonical event and the raw version used by its calculation together.
+        history_sources = (
+            "(SELECT jsonb_agg(to_jsonb(src) ORDER BY src.day DESC, src.event_id) FROM ("
+            "SELECT event.event_trade_fill_id AS event_id, raw.raw_record_id, event.report_date_local AS day, "
+            f"CASE WHEN {revised_by_adjustment} THEN origin.raw_record_id "
+            f"WHEN round(({db_raw_numeric('fifoPnlRealized')}),8) IS NOT DISTINCT FROM event.realized_pnl "
+            "THEN raw.raw_record_id END AS realized_raw_id, "
+            "(COALESCE(event.commission,0)<>0 OR COALESCE(event.fees,0)<>0) "
+            f"AND COALESCE(round(({db_raw_numeric('ibCommission')}),8),0)=COALESCE(event.commission,0) "
+            f"AND COALESCE(round(({db_raw_numeric('fees')}),8),0)=COALESCE(event.fees,0) AS has_fee, false AS has_tax "
+            f"{trade_history} UNION ALL "
+            "SELECT event.event_cashflow_id, event.source_raw_record_id, event.report_date_local, event.source_raw_record_id, "
+            "COALESCE(event.fees,0)<>0 OR event.cash_action='Other Fees', "
+            "COALESCE(event.withholding_tax,0)<>0 OR event.cash_action='Withholding Tax' "
+            f"{cash_history}) src)"
+        )
 
         query = text(
             "SELECT s.report_date_local, s.instrument_id, i.conid, i.symbol, s.currency, s.position_qty, "
@@ -1072,12 +1101,9 @@ class SQLAlchemyPortfolioService:
             f"COALESCE(({unrealized}) * ({row_fx_rate}), {closed_position}) AS broker_unrealized_pnl, "
             f"({broker_fees}) AS broker_fees, "
             f"{broker_tax} AS broker_withholding_tax, "
-            "(SELECT event_trade_fill_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
-            "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_event_id, "
-            "(SELECT source_raw_record_id FROM event_trade_fill event WHERE event.instrument_id=s.instrument_id "
-            "AND event.report_date_local=s.report_date_local ORDER BY event_trade_fill_id LIMIT 1) AS source_raw_record_id "
+            f"i.asset_category, raw.raw_record_id AS position_raw_id, {history_sources} AS history_sources "
             "FROM pnl_snapshot_daily s JOIN instrument i USING (instrument_id) "
-            "LEFT JOIN LATERAL (SELECT raw.source_payload, count(*) OVER () AS summary_count FROM raw_record raw "
+            "LEFT JOIN LATERAL (SELECT raw.raw_record_id, raw.source_payload, count(*) OVER () AS summary_count FROM raw_record raw "
             "WHERE raw.account_id=s.account_id AND raw.ingestion_run_id=s.ingestion_run_id "
             "AND raw.section_name='OpenPositions' AND raw.report_date_local=s.report_date_local "
             f"AND raw.source_payload->>'conid'=i.conid AND {db_open_position_is_summary('raw')}) raw ON raw.summary_count=1 "
@@ -1088,8 +1114,22 @@ class SQLAlchemyPortfolioService:
             "ORDER BY s.report_date_local asc, i.symbol asc, s.instrument_id asc"
         )
         rows = self._report_rows(query, account_id, report_date_from, report_date_to, instrument_id)
-        return [
-            ReconciliationSourceRecord(
+        result = []
+        for row in rows:
+            position_sources: list[tuple[UUID | None, UUID]] = [(None, row["position_raw_id"])] if row["position_raw_id"] else []
+            sources: dict[str, list[tuple[UUID | None, UUID]]] = {
+                "position_qty": position_sources, "unrealized_pnl": position_sources,
+                "realized_pnl": [], "fees": [], "withholding_tax": [],
+            }
+            for entry in row["history_sources"] or []:
+                source = (UUID(entry["event_id"]), UUID(entry["raw_record_id"]))
+                if entry["realized_raw_id"]:
+                    sources["realized_pnl"].append((source[0], UUID(entry["realized_raw_id"])))
+                if entry["has_fee"]:
+                    sources["fees"].append(source)
+                if entry["has_tax"]:
+                    sources["withholding_tax"].append(source)
+            result.append(ReconciliationSourceRecord(
                 report_date_local=row["report_date_local"], instrument_id=row["instrument_id"], conid=row["conid"],
                 symbol=row["symbol"], currency=row["currency"], position_qty=str(row["position_qty"]),
                 realized_pnl=str(row["realized_pnl"]), unrealized_pnl=str(row["unrealized_pnl"]), fees=str(row["fees"]),
@@ -1099,11 +1139,10 @@ class SQLAlchemyPortfolioService:
                 broker_unrealized_pnl=self._numeric(row["broker_unrealized_pnl"]),
                 broker_fees=self._numeric(row["broker_fees"]),
                 broker_withholding_tax=self._numeric(row["broker_withholding_tax"]),
-                source_event_id=row["source_event_id"], source_raw_record_id=row["source_raw_record_id"],
+                asset_category=row["asset_category"], sources_by_metric=sources,
                 provisional=bool(row["provisional"]),
-            )
-            for row in rows
-        ]
+            ))
+        return result
 
     def db_reconciliation_missing_sections(
         self,

@@ -238,6 +238,7 @@ class RawRecordForCanonicalMapping:
     section_name: str
     source_row_ref: str
     source_payload: dict[str, Any]
+    was_delivery: bool = False
 
 
 @dataclass(frozen=True)
@@ -421,6 +422,7 @@ class CanonicalInstrumentUpsertRequest:
     asset_category: str
     currency: str
     description: str | None
+    statement_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -833,6 +835,7 @@ class LedgerTradeFillRecord:
     asset_category: str = "STK"
     multiplier: str | None = None
     commission_currency: str | None = None
+    delivery: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

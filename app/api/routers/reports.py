@@ -326,6 +326,8 @@ def _label_csv(row: LabelPnlReportRecord) -> dict[str, object]:
 
 def _reconciliation_json(row: ReconciliationDiff) -> dict[str, object]:
     payload = _reconciliation_csv(row)
+    payload["sources"] = [{"event_id": str(event_id) if event_id else None, "raw_record_id": str(raw_id)}
+                          for event_id, raw_id in row.sources]
     payload["within_tolerance"] = row.within_tolerance
     payload["provisional"] = row.provisional
     return payload
@@ -333,6 +335,8 @@ def _reconciliation_json(row: ReconciliationDiff) -> dict[str, object]:
 
 def _reconciliation_csv(row: ReconciliationDiff) -> dict[str, object]:
     values = asdict(row)
+    values.pop("sources")
+    values["source_event_id"], values["source_raw_record_id"] = row.sources[0] if row.sources else (None, None)
     values["report_date_local"] = row.report_date_local.isoformat()
     for key in ("instrument_id", "source_event_id", "source_raw_record_id"):
         value = values[key]

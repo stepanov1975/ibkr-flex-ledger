@@ -362,6 +362,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                                 account_id=self._config.account_id,
                                 functional_currency=self._config.functional_currency,
                                 raw_records=canonical_raw_rows,
+                                statement_date=extraction_result.report_date_local,
                                 canonical_persistence_repository=self._canonical_repository,
                             )
                             canonical_duration_ms = _duration_ms(canonical_started_ns)
@@ -394,6 +395,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                         else period_key
                     ),
                     canonical_raw_rows=canonical_raw_rows,
+                    recovered_artifact=recover_artifact_rows,
                     duplicate_skip_reason=duplicate_skip_reason,
                     timeline=timeline,
                 )
@@ -536,6 +538,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
         canonical_raw_rows: list[RawRecordForCanonicalMapping] | None,
         duplicate_skip_reason: str | None,
         timeline: list[dict[str, object]],
+        recovered_artifact: bool = False,
     ) -> None:
         """Append snapshot stage timeline events for automatic Task 7 execution.
 
@@ -587,7 +590,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
             scope = (
                 SnapshotRebuildScope(full_rebuild_reason="canonical_repository_not_configured")
                 if canonical_raw_rows is None else
-                job_build_incremental_snapshot_scope(canonical_raw_rows)
+                job_build_incremental_snapshot_scope(canonical_raw_rows, recovered_artifact=recovered_artifact)
             )
             snapshot_started_ns = perf_counter_ns()
             snapshot_result = self._snapshot_service.ledger_snapshot_build_and_persist(
