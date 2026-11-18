@@ -144,6 +144,46 @@ def test_physical_assignment_carries_net_premium_to_delivered_stock(database, id
     assert Decimal(option.realized_pnl) == (0 if identified else 118)
 
 
+@pytest.mark.parametrize("correction,expected_basis", [
+    ({"cost": "110"}, 1890),
+    ({"underlyingConid": "other"}, 2000),
+    ({"notes": ""}, 2000),
+    ({"fifoPnlRealized": "1"}, 2000),
+])
+def test_corrected_delivery_rebuilds_stock_on_import_and_replay(database, correction, expected_basis):
+    from sqlalchemy import text
+    from test_end_to_end_seeded import _ALEX_PAYLOAD
+    from test_ingestion_integrity_regressions import _replay
+
+    harness = _harness(database)
+    orchestrator, adapter, *_ = harness
+    root = ET.fromstring(_ALEX_PAYLOAD)
+    _, option, stock, sale = root.findall(".//Trade")
+    root.find(".//Trades").remove(sale)
+    option.attrib.update(transactionType="BookTrade", notes="A", underlyingConid=stock.get("conid"),
+                         putCall="P", strike="10", cost="120", fifoPnlRealized="0")
+    stock.attrib.update(transactionType="BookTrade", notes="A")
+    ET.SubElement(root.find(".//OpenPositions"), "OpenPosition", conid=stock.get("conid"), symbol="ALEX",
+                  assetCategory="STK", currency="USD", position="200", markPrice="11", multiplier="1")
+
+    def stock_basis():
+        with database.connect() as connection:
+            return connection.scalar(text("SELECT cost_basis FROM pnl_snapshot_daily "
+                                          "JOIN instrument USING (instrument_id) WHERE symbol='ALEX'"))
+
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    assert stock_basis() == 1880
+    option.attrib.update(correction)
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    assert stock_basis() == expected_basis
+    with database.connect() as connection:
+        period = connection.scalar(text("SELECT period_key FROM raw_artifact LIMIT 1"))
+    assert _replay(harness, period).status == "success"
+    assert stock_basis() == expected_basis
+
+
 def test_reconciliation_evidence_and_linked_commission_revision(database):
     from sqlalchemy import text
     repo = SQLAlchemyPortfolioService(database)

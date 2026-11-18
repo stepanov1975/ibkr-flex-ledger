@@ -238,6 +238,7 @@ class RawRecordForCanonicalMapping:
     section_name: str
     source_row_ref: str
     source_payload: dict[str, Any]
+    was_delivery: bool = False
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope, db_transaction_scope
-from .trade_consistency import db_validate_trade_consistency
+from .trade_consistency import db_trade_is_delivery, db_validate_trade_consistency
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -52,7 +52,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
     _RAW_RECORD_QUERY_CHANGED_BY_RUN_ID = (
         "SELECT current.raw_record_id, current.ingestion_run_id, current.account_id, current.period_key, "
         "current.flex_query_id, current.report_date_local, current.section_name, current.source_row_ref, "
-        "current.source_payload "
+        "current.source_payload, "
+        f"(current.section_name='Trades' AND {db_trade_is_delivery('prior')}) AS was_delivery "
         "FROM raw_record AS current "
         "LEFT JOIN LATERAL ("
         "SELECT previous.raw_record_id, previous.source_payload "
@@ -565,7 +566,12 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
                             "THEN 1::numeric ELSE REPLACE(BTRIM(metadata.source_payload->>'multiplier'), ',', '')::numeric END, "
                             "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
-                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END"
+                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END, "
+                            f"CASE WHEN {db_trade_is_delivery('metadata')} THEN jsonb_build_array("
+                            "metadata.source_payload->>'notes', metadata.source_payload->>'conid', "
+                            "metadata.source_payload->>'underlyingConid', metadata.source_payload->>'putCall', "
+                            "metadata.source_payload->>'strike', metadata.source_payload->>'cost', "
+                            "metadata.source_payload->>'fifoPnlRealized') END"
                             ")) > 1 FROM raw_record metadata WHERE metadata.raw_record_id IN ("
                             "COALESCE(event_trade_fill.metadata_source_raw_record_id, event_trade_fill.source_raw_record_id), "
                             "EXCLUDED.metadata_source_raw_record_id)) "
@@ -782,6 +788,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 section_name=row["section_name"],
                 source_row_ref=row["source_row_ref"],
                 source_payload=dict(row["source_payload"]),
+                was_delivery=bool(row.get("was_delivery")),
             )
             for row in rows
         ]

@@ -14,6 +14,7 @@ from sqlalchemy import Connection, Engine, text
 from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
+from .trade_consistency import db_trade_is_delivery
 from .session import db_connection_scope
 from .open_positions import OPEN_POSITIONS_SUMMARY_UNAVAILABLE, db_open_position_is_summary
 
@@ -324,9 +325,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
             "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
             "i.asset_category, "
-            "CASE WHEN rr.source_payload->>'transactionType'='BookTrade' "
-            "AND rr.source_payload->>'notes' ~ '(^|[;, ])(A|Ex)($|[;, ])' "
-            "THEN rr.source_payload END AS delivery, "
+            f"CASE WHEN {db_trade_is_delivery('rr')} THEN rr.source_payload END AS delivery, "
             "NULLIF(UPPER(BTRIM(rr.source_payload->>'ibCommissionCurrency')), '') AS commission_currency, "
             "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "

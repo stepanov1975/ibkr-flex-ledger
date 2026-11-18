@@ -6,15 +6,19 @@ from app.ledger import SnapshotRebuildScope
 
 def job_build_incremental_snapshot_scope(
     rows: list[RawRecordForCanonicalMapping],
+    *, recovered_artifact: bool = False,
 ) -> SnapshotRebuildScope:
     """Interpret changed raw rows as security and currency rebuild hints."""
 
     conids: set[str] = set()
     currencies: set[str] = set()
     for row in rows:
-        if row.section_name == "Trades" and row.source_payload.get("transactionType") == "BookTrade":
+        if row.section_name == "Trades":
+            if recovered_artifact:
+                # The recovery read does not carry prior-version flags.
+                return SnapshotRebuildScope(full_rebuild_reason="recovered_trade_history")
             notes = str(row.source_payload.get("notes", "")).replace(",", " ").replace(";", " ").split()
-            if {"A", "Ex"}.intersection(notes):
+            if row.was_delivery or (row.source_payload.get("transactionType") == "BookTrade" and {"A", "Ex"}.intersection(notes)):
                 return SnapshotRebuildScope(full_rebuild_reason="option_delivery_changed")
         if row.section_name in {"Trades", "CashTransactions", "CorporateActions", "OpenPositions"}:
             raw_conid = row.source_payload.get("conid")
