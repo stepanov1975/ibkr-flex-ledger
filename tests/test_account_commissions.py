@@ -46,3 +46,13 @@ def test_duplicate_details_and_missing_components_do_not_false_match():
     assert all(v["execution_check"]["status"] == "not_comparable" for v in r["details"])
     d.payload.pop("other")
     assert account_commissions([d], [])["details"][0]["components_check"]["status"] == "not_comparable"
+
+
+def test_currency_conflict_counts_present_detail_and_explains_both_currencies():
+    rows = [detail(currency="ILS"), row("CashReport", fromDate="20260901", toDate="20260918")]
+    report = account_commissions(rows, [trade()])
+    check = report["details"][0]["execution_check"]
+    assert report["covered_executions"] == 1
+    assert report["missing_detail_executions"] == 0
+    assert check["status"] == "not_comparable"
+    assert "ILS" in check["reason"] and "USD" in check["reason"]

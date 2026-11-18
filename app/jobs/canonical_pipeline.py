@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 
 from app.db import (
     CanonicalInstrumentRecord,
@@ -22,6 +23,7 @@ def job_canonical_map_and_persist(
     canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
     mapping_service: CanonicalMappingService | None = None,
     source_origins: dict[str, RawRecordForCanonicalMapping] | None = None,
+    statement_date: date | None = None,
 ) -> dict[str, int]:
     """Map raw rows into canonical contracts and persist with deterministic UPSERT logic.
 
@@ -69,6 +71,7 @@ def job_canonical_map_and_persist(
 
     instrument_id_by_conid = _job_canonical_upsert_instruments(
         mapped_batch=mapped_batch,
+        statement_date=statement_date,
         canonical_persistence_repository=canonical_persistence_repository,
     )
     conid_by_raw_record_id = _job_canonical_build_conid_index(raw_records=mapping_rows)
@@ -164,6 +167,7 @@ def job_canonical_map_and_persist(
 
 def _job_canonical_upsert_instruments(
     mapped_batch: CanonicalMappingBatch,
+    statement_date: date | None,
     canonical_persistence_repository: CanonicalPersistenceRepositoryPort,
 ) -> dict[str, CanonicalInstrumentRecord]:
     """Upsert mapped canonical instruments and build lookup by conid.
@@ -181,7 +185,7 @@ def _job_canonical_upsert_instruments(
 
     requests_by_conid: dict[str, CanonicalInstrumentUpsertRequest] = {}
     for request in mapped_batch.instrument_upsert_requests:
-        requests_by_conid[request.conid] = request
+        requests_by_conid[request.conid] = replace(request, statement_date=statement_date)
 
     records = canonical_persistence_repository.db_canonical_instrument_upsert_many(
         [requests_by_conid[conid] for conid in sorted(requests_by_conid)]

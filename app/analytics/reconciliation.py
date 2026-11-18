@@ -25,8 +25,7 @@ class ReconciliationDiff:
     tolerance_rel: Decimal
     within_tolerance: bool
     formula_context: str
-    source_event_id: UUID | None
-    source_raw_record_id: UUID | None
+    sources: list[tuple[UUID | None, UUID]]
     provisional: bool
 
 
@@ -42,6 +41,8 @@ def analytics_build_reconciliation_diffs(source_rows: list[ReconciliationSourceR
     diffs: list[ReconciliationDiff] = []
     for row in source_rows:
         for metric in ("position_qty", *_MONEY_METRICS):
+            if row.asset_category.strip().upper() in {"CASH", "FX"} and metric in {"position_qty", "unrealized_pnl"}:
+                continue
             economic_value = Decimal(getattr(row, metric))
             broker_raw = getattr(row, f"broker_{metric}")
             broker_value = None if broker_raw is None else Decimal(broker_raw)
@@ -81,8 +82,7 @@ def analytics_build_reconciliation_diffs(source_rows: list[ReconciliationSourceR
                     tolerance_rel=tolerance_rel,
                     within_tolerance=within_tolerance,
                     formula_context=formula,
-                    source_event_id=row.source_event_id,
-                    source_raw_record_id=row.source_raw_record_id,
+                    sources=row.sources_by_metric.get(metric, []),
                     provisional=row.provisional or broker_value is None,
                 )
             )

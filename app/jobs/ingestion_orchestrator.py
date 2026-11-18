@@ -362,6 +362,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                                 account_id=self._config.account_id,
                                 functional_currency=self._config.functional_currency,
                                 raw_records=canonical_raw_rows,
+                                statement_date=extraction_result.report_date_local,
                                 canonical_persistence_repository=self._canonical_repository,
                             )
                             canonical_duration_ms = _duration_ms(canonical_started_ns)

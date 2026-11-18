@@ -187,8 +187,8 @@ class ReconciliationSourceRecord:
     broker_unrealized_pnl: str | None
     broker_fees: str | None
     broker_withholding_tax: str | None
-    source_event_id: UUID | None
-    source_raw_record_id: UUID | None
+    asset_category: str
+    sources_by_metric: dict[str, list[tuple[UUID | None, UUID]]]
     provisional: bool
 
 

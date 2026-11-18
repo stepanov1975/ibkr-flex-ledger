@@ -12,6 +12,10 @@ def job_build_incremental_snapshot_scope(
     conids: set[str] = set()
     currencies: set[str] = set()
     for row in rows:
+        if row.section_name == "Trades" and row.source_payload.get("transactionType") == "BookTrade":
+            notes = str(row.source_payload.get("notes", "")).replace(",", " ").replace(";", " ").split()
+            if {"A", "Ex"}.intersection(notes):
+                return SnapshotRebuildScope(full_rebuild_reason="option_delivery_changed")
         if row.section_name in {"Trades", "CashTransactions", "CorporateActions", "OpenPositions"}:
             raw_conid = row.source_payload.get("conid")
             conid = raw_conid.strip() if isinstance(raw_conid, str) else ""

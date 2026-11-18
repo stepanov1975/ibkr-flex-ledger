@@ -68,3 +68,9 @@ replaces that section, including an explicitly empty section. Omitted sections
 can retain older dates; incompatible dates do not produce a match. NAV history
 normalizes dates and prefers the newest successful source. Historical accruals
 support payment checks without summing repeated snapshots.
+
+A commission detail with a unique trade and security identity counts toward
+coverage even if the two records name different commission currencies. The
+execution comparison then shows both currencies and remains unverified.
+Dividend payment checks include historical accrual reversals and identify
+expected withholding that has no corresponding linked payment deduction.

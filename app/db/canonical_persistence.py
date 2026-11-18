@@ -335,6 +335,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                     "asset_category": request.asset_category,
                     "currency": request.currency,
                     "description": request.description,
+                    "statement_date": request.statement_date.isoformat() if request.statement_date else None,
                 }
                 for request in normalized_requests
             ]
@@ -353,14 +354,20 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "SELECT * FROM jsonb_to_recordset(CAST(:requests_json AS jsonb)) AS value("
                             "account_id text, conid text, symbol text, local_symbol text, "
                             "isin text, cusip text, figi text, asset_category text, "
-                            "currency text, description text"
+                            "currency text, description text, statement_date date"
                             ")"
+                            "), newer AS ("
+                            "SELECT i.instrument_id, i.account_id, i.conid FROM input "
+                            "JOIN instrument i USING (account_id, conid) WHERE EXISTS ("
+                            "SELECT 1 FROM pnl_snapshot_daily s WHERE s.account_id=i.account_id "
+                            "AND s.instrument_id=i.instrument_id AND s.report_date_local>input.statement_date)"
                             "), upserted AS ("
                             "INSERT INTO instrument ("
                             "account_id, conid, symbol, local_symbol, isin, cusip, figi, "
                             "asset_category, currency, description"
                             ") SELECT account_id, conid, symbol, local_symbol, isin, cusip, figi, "
                             "asset_category, currency, description FROM input "
+                            "WHERE NOT EXISTS (SELECT 1 FROM newer n WHERE n.account_id=input.account_id AND n.conid=input.conid) "
                             "ON CONFLICT (account_id, conid) DO UPDATE SET "
                             "symbol = EXCLUDED.symbol, "
                             "local_symbol = COALESCE(EXCLUDED.local_symbol, instrument.local_symbol), "
@@ -372,7 +379,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "description = COALESCE(EXCLUDED.description, instrument.description), "
                             "updated_at_utc = now() "
                             "RETURNING instrument_id, account_id, conid"
-                            ") SELECT * FROM upserted ORDER BY conid"
+                            ") SELECT * FROM upserted UNION ALL SELECT * FROM newer ORDER BY conid"
                         ),
                         {"requests_json": requests_json},
                     ).mappings().all()
@@ -734,6 +741,7 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             asset_category=self._db_canonical_validate_non_empty_text(request.asset_category, "request.asset_category"),
             currency=self._db_canonical_validate_non_empty_text(request.currency, "request.currency"),
             description=self._db_canonical_validate_optional_text(request.description),
+            statement_date=request.statement_date,
         )
 
     def _db_canonical_read_raw_rows(

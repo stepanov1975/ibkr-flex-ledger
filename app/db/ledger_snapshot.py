@@ -324,6 +324,9 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "etf.fees, etf.commission, etf.functional_currency, etf.currency, etf.transaction_id, "
             "etf.net_cash, etf.net_cash_in_base, etf.fx_rate_to_base, "
             "i.asset_category, "
+            "CASE WHEN rr.source_payload->>'transactionType'='BookTrade' "
+            "AND rr.source_payload->>'notes' ~ '(^|[;, ])(A|Ex)($|[;, ])' "
+            "THEN rr.source_payload END AS delivery, "
             "NULLIF(UPPER(BTRIM(rr.source_payload->>'ibCommissionCurrency')), '') AS commission_currency, "
             "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
@@ -377,6 +380,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 fees=None if row["fees"] is None else str(row["fees"]),
                 commission=None if row["commission"] is None else str(row["commission"]),
                 commission_currency=row["commission_currency"],
+                delivery=row["delivery"],
                 functional_currency=row["functional_currency"],
                 currency=row["currency"],
                 transaction_id=row["transaction_id"],

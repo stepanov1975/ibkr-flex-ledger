@@ -249,8 +249,8 @@ class SQLAlchemyIngestionRunService(IngestionRunRepositoryPort):
                     text(
                         "UPDATE ingestion_run SET "
                         "status = :status, "
-                        "ended_at_utc = now(), "
-                        "duration_ms = GREATEST(0, CAST(EXTRACT(EPOCH FROM (now() - started_at_utc)) * 1000 AS BIGINT)), "
+                        "ended_at_utc = statement_timestamp(), "
+                        "duration_ms = GREATEST(0, CAST(EXTRACT(EPOCH FROM (statement_timestamp() - started_at_utc)) * 1000 AS BIGINT)), "
                         "error_code = :error_code, "
                         "error_message = :error_message, "
                         "diagnostics = CAST(:diagnostics AS jsonb) "

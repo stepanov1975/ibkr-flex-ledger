@@ -155,8 +155,8 @@ class _Portfolio:
             report_date_local=date(2026, 8, 21), instrument_id=self.instrument_id, conid="123", symbol="TEST",
             currency="USD", position_qty="2", realized_pnl="10", unrealized_pnl="5", fees="1",
             withholding_tax="0", broker_position_qty="2", broker_realized_pnl="10",
-            broker_unrealized_pnl="5", broker_fees="1", broker_withholding_tax="0", source_event_id=uuid4(),
-            source_raw_record_id=uuid4(), provisional=False,
+            broker_unrealized_pnl="5", broker_fees="1", broker_withholding_tax="0", asset_category="STK",
+            sources_by_metric={}, provisional=False,
         )]
 
     def db_label_list(self):

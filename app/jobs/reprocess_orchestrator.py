@@ -339,6 +339,7 @@ class CanonicalReprocessOrchestrator(JobOrchestratorPort):
                         account_id=config.account_id,
                         functional_currency=config.functional_currency,
                         raw_records=canonical_rows,
+                        statement_date=candidate.report_date_local,
                         canonical_persistence_repository=self._canonical_persistence_repository,
                         source_origins=source_origins,
                     )

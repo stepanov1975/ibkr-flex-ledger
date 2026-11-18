@@ -398,6 +398,8 @@ successfully processed source version. Snapshot updates for an existing report
 date remain limited to affected instruments and FX source currencies; the first
 snapshot for a report date automatically widens to a full rebuild and records
 `missing_report_date_baseline`. Explicit reprocess commands remain full replays.
+When an instrument already has a later published snapshot, historical imports
+and replays reuse its current identity and preserve its current symbol and aliases.
 
 Broker identifiers shared by distinct lot or dividend-accrual rows receive
 deterministic suffixes so every row survives raw persistence. Existing artifacts
@@ -828,3 +830,21 @@ is displayed separately. Comparisons require unique trade/security/commission-
 currency identity. Duplicate details invalidate aggregate amounts. Coverage counts
 use CashReport period metadata from the same artifact and never imply that missing
 detail means zero commission. These amounts are not added to portfolio costs again.
+
+Physical stock deliveries on assignment or exercise use the option closing row's
+signed cost to allocate its net premium. Matching requires one base-currency
+stock leg and one option leg for the underlying and date, consistent action,
+side, strike and multiplier, and a zero-price option close with zero reported
+realized P&L. Unsupported or ambiguous delivery evidence makes the affected
+calculations provisional. Existing snapshots and lots require a rebuild.
+
+Reconciliation omits securities position comparisons for FX conversions. Its JSON
+`sources` list identifies the position summary or the historical trade and cash
+records used by each metric. CSV v1 keeps one representative source per metric.
+When a trade-linked commission adjustment exactly explains the broker's revision
+to realized P&L, reconciliation uses the original trade P&L plus the adjustment
+on its cash posting date.
+
+Import finalization uses the timestamp of the finalizing SQL statement. Migration
+`20261117_19` repairs understated durations where the retained final diagnostic
+establishes a later completion time.

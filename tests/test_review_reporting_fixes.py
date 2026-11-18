@@ -226,3 +226,23 @@ def test_closed_position_completeness_checks_replay_completion_status(portfolio_
     row = repository.db_reconciliation_sources("REVIEW", DAY, DAY, instrument)[0]
     assert row.broker_position_qty == expected
     assert row.broker_unrealized_pnl == expected
+
+
+def test_historical_statement_keeps_published_instrument_identity(portfolio_db):
+    from app.db.canonical_persistence import SQLAlchemyCanonicalPersistenceService
+    from app.db.interfaces import CanonicalInstrumentUpsertRequest
+
+    engine, _ = portfolio_db
+    with engine.begin() as connection:
+        instrument, run, _ = _seed(connection)
+        _snapshot(connection, instrument, run)
+    repository = SQLAlchemyCanonicalPersistenceService(engine)
+    for statement_date, expected_symbol in [(date(2026, 8, 20), "TEST"), (DAY, "UPDATED")]:
+        request = CanonicalInstrumentUpsertRequest(
+            "REVIEW", "1", "UPDATED", None, None, None, None, "STK", "USD", None, statement_date,
+        )
+        record = repository.db_canonical_instrument_upsert(request)
+        assert record.instrument_id == instrument
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT symbol FROM instrument WHERE instrument_id=:id"),
+                                     {"id": instrument}) == expected_symbol

@@ -58,3 +58,10 @@ def test_scope_requests_full_rebuild_when_fx_source_currency_is_not_a_string() -
 def test_scope_is_empty_for_snapshot_irrelevant_sections() -> None:
     scope = job_build_incremental_snapshot_scope([_raw_row("AccountInformation", {"accountId": "U1"})])
     assert scope == SnapshotRebuildScope(frozenset(), frozenset(), None)
+
+
+def test_changed_assignment_leg_rebuilds_its_counterpart():
+    scope = job_build_incremental_snapshot_scope([_raw_row("Trades", {
+        "transactionType": "BookTrade", "notes": "P;A", "conid": "stock",
+    })])
+    assert scope.full_rebuild_reason == "option_delivery_changed"

@@ -64,3 +64,13 @@ def test_review_booked_cash_deductions_are_not_ignored():
     check = account_income([], [accrual()], cash)["payment_checks"][0]["check"]
     assert check["calculated"] == D("8")
     assert check["status"] == "matched"
+
+
+def test_historical_reversal_explains_unbooked_withholding_without_adjusting_payment():
+    history = [row("ChangeInDividendAccruals", actionID="A", conid="1", currency="USD", code="Re"), accrual()]
+    cash = [{"payload": {"actionID": "A", "conid": "1"}, "currency": "USD",
+             "cash_action": "Dividends", "amount": D("10"), "raw_id": "pay"}]
+    payment, = account_income([], history, cash)["payment_checks"]
+    assert payment["reversal_seen"] and payment["check"]["calculated"] == D("10")
+    assert "2 USD withholding" in payment["check"]["reason"]
+    assert payment["check"]["status"] == "different"

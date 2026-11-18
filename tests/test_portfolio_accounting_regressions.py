@@ -110,3 +110,62 @@ def test_last_day_value_requires_market_inputs(database, broker_valuation, missi
         assert Decimal(item["last_day_value"]) == Decimal("220")
     else:
         assert item["last_day_value"] is None
+
+
+@pytest.mark.parametrize("identified", [True, False])
+def test_physical_assignment_carries_net_premium_to_delivered_stock(database, identified):
+    from test_end_to_end_seeded import _ALEX_PAYLOAD
+    from sqlalchemy import text
+
+    orchestrator, adapter, _, _, service, *_ = _harness(database)
+    root = ET.fromstring(_ALEX_PAYLOAD)
+    opened, closed, delivery, sale = root.findall(".//Trade")
+    opened.set("ibCommission", "-2")
+    closed.attrib.update(transactionType="BookTrade", notes="A", underlyingConid=delivery.get("conid"),
+                         putCall="P", strike="10", cost="118", fifoPnlRealized="0")
+    delivery.attrib.update(transactionType="BookTrade", notes="A")
+    root.find(".//Trades").remove(sale)
+    ET.SubElement(root.find(".//OpenPositions"), "OpenPosition", conid=delivery.get("conid"), symbol="ALEX",
+                  assetCategory="STK", currency="USD", position="200", markPrice="11", multiplier="1")
+    if not identified:
+        closed.attrib.pop("underlyingConid")
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    with database.connect() as conn:
+        run = str(conn.scalar(text("SELECT ingestion_run_id FROM ingestion_run")))
+    # Rebuilding only the stock must still see the option evidence.
+    service.ledger_snapshot_build_and_persist("INTEGRITY", run, "2026-08-20", "USD",
+                                              affected_conids=frozenset({delivery.get("conid")}))
+    rows = {r.symbol: r for r in SQLAlchemyPortfolioService(database).db_report_pnl_by_instrument("INTEGRITY", None, None, None)}
+    stock, option = rows["ALEX"], rows[closed.get("symbol")]
+    assert stock.provisional is (not identified)
+    assert option.provisional is (not identified)
+    assert Decimal(stock.cost_basis) == (1882 if identified else 2000)
+    assert Decimal(option.realized_pnl) == (0 if identified else 118)
+
+
+def test_reconciliation_evidence_and_linked_commission_revision(database):
+    from sqlalchemy import text
+    repo = SQLAlchemyPortfolioService(database)
+    orchestrator, adapter, *_ = _harness(database)
+    root = ET.fromstring(_SEEDED_PAYLOAD)
+    trade = root.find(".//Trade")
+    trade.attrib.update(tradeID="trade-1", fifoPnlRealized="10")
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    trade.set("fifoPnlRealized", "9.75")
+    root.find(".//FlexStatement").set("reportDate", "20260822")
+    ET.SubElement(root.find(".//CashTransactions"), "CashTransaction", transactionID="adjustment", tradeID="trade-1",
+                  conid="900001", symbol="SEED", assetCategory="STK", type="Commission Adjustments",
+                  amount="-0.25", currency="USD", reportDate="20260822", dateTime="20260822;130000")
+    adapter.payload_bytes = ET.tostring(root)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    first, second = repo.db_reconciliation_sources("INTEGRITY", None, None, None)
+    assert Decimal(first.broker_realized_pnl) == 10
+    assert Decimal(second.broker_realized_pnl) == Decimal("9.75")
+    with database.connect() as conn:
+        event_id, original = conn.execute(text("SELECT event_trade_fill_id, source_raw_record_id FROM event_trade_fill")).one()
+        position_raw = conn.scalar(text("SELECT raw_record_id FROM raw_record WHERE section_name='OpenPositions' AND report_date_local='2026-08-22'"))
+    assert second.sources_by_metric["position_qty"] == [(None, position_raw)]
+    assert (event_id, original) in second.sources_by_metric["realized_pnl"]
+    assert len(second.sources_by_metric["realized_pnl"]) == 3
