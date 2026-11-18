@@ -74,3 +74,8 @@ coverage even if the two records name different commission currencies. The
 execution comparison then shows both currencies and remains unverified.
 Dividend payment checks include historical accrual reversals and identify
 expected withholding that has no corresponding linked payment deduction.
+
+A corrected execution links to the statement supplying its revised amount. If an
+older installation retained an inconsistent source link, reconciliation omits that
+link until the retained statements are replayed. Replay preserves the original
+execution identity and refreshes the source for the correction.

@@ -14,7 +14,7 @@ from sqlalchemy import Connection, Engine, text
 from app.domain.corporate_actions import domain_classify_corporate_action
 from sqlalchemy.exc import SQLAlchemyError
 
-from .trade_consistency import db_trade_is_delivery
+from .raw_fields import db_trade_is_delivery
 from .session import db_connection_scope
 from .open_positions import OPEN_POSITIONS_SUMMARY_UNAVAILABLE, db_open_position_is_summary
 

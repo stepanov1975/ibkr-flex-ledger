@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, Date, Engine, Integer, Numeric, String, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from .raw_fields import db_raw_numeric
 from .stock_history import db_stock_history
 from .open_positions import db_open_position_is_summary
 from .published_flex_sections import db_published_flex_sections_history, db_published_flex_sections_latest
@@ -964,15 +965,8 @@ class SQLAlchemyPortfolioService:
         report_date_to: date | None,
         instrument_id: UUID | None,
     ) -> list[ReconciliationSourceRecord]:
-        def raw_numeric(field: str, alias: str = "raw") -> str:
-            return (
-                f"CASE WHEN BTRIM(COALESCE({alias}.source_payload->>'{field}', '')) "
-                "IN ('', '-', '--', 'N/A') THEN NULL ELSE "
-                f"REPLACE(BTRIM({alias}.source_payload->>'{field}'), ',', '')::numeric END"
-            )
-
         raw_currency = "UPPER(BTRIM(raw.source_payload->>'currency'))"
-        raw_fx_rate = raw_numeric("fxRateToBase")
+        raw_fx_rate = db_raw_numeric("fxRateToBase")
         row_fx_rate = (
             f"CASE WHEN {raw_currency}=s.currency THEN 1::numeric ELSE {raw_fx_rate} END"
         )
@@ -1000,8 +994,8 @@ class SQLAlchemyPortfolioService:
             f"CASE WHEN {commission_currency}=event.currency THEN ({trade_fx_rate}) "
             f"ELSE ({conversion_rate(commission_currency)}) END"
         )
-        position = raw_numeric("position")
-        unrealized = raw_numeric("fifoPnlUnrealized")
+        position = db_raw_numeric("position")
+        unrealized = db_raw_numeric("fifoPnlUnrealized")
         # Canonical identities deduplicate overlapping reports; amounts remain broker-reported.
         trade_history = (
             "FROM event_trade_fill event JOIN raw_record raw ON raw.raw_record_id="
@@ -1043,7 +1037,7 @@ class SQLAlchemyPortfolioService:
         # A post-settlement commission can revise reported trading P&L and also
         # appear in cash. Use the original trading value only when the linked
         # cash adjustments explain the entire revision in the trade currency.
-        original_realized = raw_numeric("fifoPnlRealized", "origin")
+        original_realized = db_raw_numeric("fifoPnlRealized", "origin")
         adjustment_total = (
             "(SELECT sum(adj.amount) FROM event_cashflow adj JOIN raw_record receipt "
             "ON receipt.raw_record_id=adj.source_raw_record_id WHERE adj.account_id=event.account_id "
@@ -1086,8 +1080,12 @@ class SQLAlchemyPortfolioService:
         history_sources = (
             "(SELECT jsonb_agg(to_jsonb(src) ORDER BY src.day DESC, src.event_id) FROM ("
             "SELECT event.event_trade_fill_id AS event_id, raw.raw_record_id, event.report_date_local AS day, "
-            f"CASE WHEN {revised_by_adjustment} THEN origin.raw_record_id ELSE raw.raw_record_id END AS realized_raw_id, "
-            "COALESCE(event.commission,0)<>0 OR COALESCE(event.fees,0)<>0 AS has_fee, false AS has_tax "
+            f"CASE WHEN {revised_by_adjustment} THEN origin.raw_record_id "
+            f"WHEN round(({db_raw_numeric('fifoPnlRealized')}),8) IS NOT DISTINCT FROM event.realized_pnl "
+            "THEN raw.raw_record_id END AS realized_raw_id, "
+            "(COALESCE(event.commission,0)<>0 OR COALESCE(event.fees,0)<>0) "
+            f"AND COALESCE(round(({db_raw_numeric('ibCommission')}),8),0)=COALESCE(event.commission,0) "
+            f"AND COALESCE(round(({db_raw_numeric('fees')}),8),0)=COALESCE(event.fees,0) AS has_fee, false AS has_tax "
             f"{trade_history} UNION ALL "
             "SELECT event.event_cashflow_id, event.source_raw_record_id, event.report_date_local, event.source_raw_record_id, "
             "COALESCE(event.fees,0)<>0 OR event.cash_action='Other Fees', "
@@ -1125,7 +1123,8 @@ class SQLAlchemyPortfolioService:
             }
             for entry in row["history_sources"] or []:
                 source = (UUID(entry["event_id"]), UUID(entry["raw_record_id"]))
-                sources["realized_pnl"].append((source[0], UUID(entry["realized_raw_id"])))
+                if entry["realized_raw_id"]:
+                    sources["realized_pnl"].append((source[0], UUID(entry["realized_raw_id"])))
                 if entry["has_fee"]:
                     sources["fees"].append(source)
                 if entry["has_tax"]:

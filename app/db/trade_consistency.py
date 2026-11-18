@@ -304,9 +304,3 @@ def _trade_identity(request: dict[str, Any]) -> str:
 
 
 __all__ = ["TradeConsistencyError", "db_validate_trade_consistency"]
-
-
-def db_trade_is_delivery(alias: str) -> str:
-    """Identify a physical assignment or exercise reported on a BookTrade row."""
-    return (f"({alias}.source_payload->>'transactionType'='BookTrade' AND "
-            f"{alias}.source_payload->>'notes' ~ '(^|[;,[:space:]])(A|Ex)($|[;,[:space:]])')")

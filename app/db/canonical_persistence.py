@@ -10,7 +10,8 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope, db_transaction_scope
-from .trade_consistency import db_trade_is_delivery, db_validate_trade_consistency
+from .raw_fields import db_raw_numeric, db_trade_is_delivery
+from .trade_consistency import db_validate_trade_consistency
 
 from app.db.interfaces import (
     CanonicalCashflowUpsertRequest,
@@ -563,15 +564,16 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                             "SELECT COUNT(DISTINCT jsonb_build_array("
                             "COALESCE(NULLIF(UPPER(BTRIM(metadata.source_payload->>'ibCommissionCurrency')), ''), "
                             "UPPER(BTRIM(event_trade_fill.currency))), "
-                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
-                            "THEN 1::numeric ELSE REPLACE(BTRIM(metadata.source_payload->>'multiplier'), ',', '')::numeric END, "
-                            "CASE WHEN BTRIM(COALESCE(metadata.source_payload->>'closePrice', '')) IN ('', '-', '--', 'N/A') "
-                            "THEN NULL ELSE REPLACE(BTRIM(metadata.source_payload->>'closePrice'), ',', '')::numeric END, "
+                            f"COALESCE(({db_raw_numeric('multiplier', 'metadata')}), 1), "
+                            f"{db_raw_numeric('closePrice', 'metadata')}, "
+                            f"{db_raw_numeric('fifoPnlRealized', 'metadata')}, "
+                            f"{db_raw_numeric('ibCommission', 'metadata')}, {db_raw_numeric('fees', 'metadata')}, "
+                            f"{db_raw_numeric('fxRateToBase', 'metadata')}, {db_raw_numeric('netCash', 'metadata')}, "
+                            f"{db_raw_numeric('netCashInBase', 'metadata')}, "
                             f"CASE WHEN {db_trade_is_delivery('metadata')} THEN jsonb_build_array("
                             "metadata.source_payload->>'notes', metadata.source_payload->>'conid', "
                             "metadata.source_payload->>'underlyingConid', metadata.source_payload->>'putCall', "
-                            "metadata.source_payload->>'strike', metadata.source_payload->>'cost', "
-                            "metadata.source_payload->>'fifoPnlRealized') END"
+                            f"metadata.source_payload->>'strike', {db_raw_numeric('cost', 'metadata')}) END"
                             ")) > 1 FROM raw_record metadata WHERE metadata.raw_record_id IN ("
                             "COALESCE(event_trade_fill.metadata_source_raw_record_id, event_trade_fill.source_raw_record_id), "
                             "EXCLUDED.metadata_source_raw_record_id)) "
