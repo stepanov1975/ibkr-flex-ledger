@@ -279,6 +279,8 @@ class PortfolioRepositoryPort(Protocol):
         instrument_id: UUID | None,
     ) -> list[InstrumentPnlReportRecord]: ...
 
+    def db_report_latest_pnl_by_instrument(self, account_id: str) -> list[InstrumentPnlReportRecord]: ...
+
     def db_report_pnl_by_label(
         self,
         account_id: str,
@@ -300,20 +302,13 @@ class PortfolioRepositoryPort(Protocol):
         instrument_id: UUID,
     ) -> list[ProvenanceRecord]: ...
 
-    def db_reconciliation_sources(
+    def db_report_reconciliation(
         self,
         account_id: str,
         report_date_from: date | None,
         report_date_to: date | None,
         instrument_id: UUID | None,
-    ) -> list[ReconciliationSourceRecord]: ...
-
-    def db_reconciliation_missing_sections(
-        self,
-        account_id: str,
-        report_date_from: date | None,
-        report_date_to: date | None,
-    ) -> list[str]: ...
+    ) -> tuple[list[str], list[ReconciliationSourceRecord]]: ...
 
     def db_ingestion_slo_records(self, account_id: str, since_utc: datetime) -> list[IngestionSloRecord]: ...
 

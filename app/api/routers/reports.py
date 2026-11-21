@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import csv
 from dataclasses import asdict
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from io import StringIO
 from uuid import UUID
 
@@ -90,6 +91,28 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
             content={"schema_version": "v1", "items": [_label_json(row) for row in rows],
                      "filters": _filters(report_date_from, report_date_to, label_id)}
         )
+
+    @router.get("/pnl/latest")
+    def latest_pnl() -> JSONResponse:
+        rows = repository.db_report_latest_pnl_by_instrument(settings.account_id)
+        grouped: dict[str, list[InstrumentPnlReportRecord]] = defaultdict(list)
+        for row in rows:
+            grouped[row.currency].append(row)
+        with localcontext() as decimal_context:
+            # A sum of NUMERIC(24,8) amounts can exceed the precision of a single row.
+            decimal_context.prec = 48
+            totals = [
+                {"currency": currency, **{
+                    key: format(sum(Decimal(getattr(row, key)) for row in group), "f")
+                    for key in ("realized_pnl", "unrealized_pnl", "total_pnl")
+                }}
+                for currency, group in sorted(grouped.items())
+            ]
+        return JSONResponse(content={
+            "schema_version": "v1", "report_date_local": rows[0].report_date_local.isoformat() if rows else None,
+            "items": [_instrument_json(row) for row in rows], "totals_by_currency": totals,
+            "provisional": any(row.provisional for row in rows),
+        })
 
     @router.get("/transfer-history")
     def transfer_history(
@@ -227,17 +250,14 @@ def api_create_reports_router(settings: AppSettings, repository: PortfolioReposi
         invalid = _validate_report_query(report_date_from, report_date_to, output)
         if invalid is not None:
             return invalid
-        missing = repository.db_reconciliation_missing_sections(
-            settings.account_id, report_date_from, report_date_to
+        missing, source_rows = repository.db_report_reconciliation(
+            settings.account_id, report_date_from, report_date_to, instrument_id
         )
         if missing:
             return JSONResponse(
                 content={"status": "error", "code": "MISSING_REQUIRED_SECTION", "missing_sections": missing},
                 status_code=status.HTTP_409_CONFLICT,
             )
-        source_rows = repository.db_reconciliation_sources(
-            settings.account_id, report_date_from, report_date_to, instrument_id
-        )
         diffs = analytics_build_reconciliation_diffs(source_rows)
         if output == "csv":
             return _csv_response(

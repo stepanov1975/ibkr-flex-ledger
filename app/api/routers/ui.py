@@ -48,6 +48,16 @@ def api_create_ui_router() -> APIRouter:
     return router
 
 
+_PNL_TOTAL_SCRIPT = """
+function formatPnlTotal(value,currency){
+const negative=value.startsWith('-');const [whole,fraction='']=value.replace(/^-/,'').split('.');const digits=fraction.padEnd(3,'0');
+const cents=BigInt(whole)*100n+BigInt(digits.slice(0,2))+(digits[2]>='5'?1n:0n);
+return (negative&&cents!==0n?'-':'')+currency+' '+(cents/100n).toLocaleString('en-US')+'.'+String(cents%100n).padStart(2,'0');
+}
+function latestPnlTotal(result,field){return result.report_date_local===null?'No snapshots':result.totals_by_currency.map(item=>formatPnlTotal(item[field],item.currency)).join(' · ')}
+"""
+
+
 _PORTFOLIO_DASHBOARD_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IBKR Portfolio</title><style>
@@ -75,7 +85,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <section class="card full instrument-card"><div class="section-heading"><h2>Total P&amp;L by instrument</h2><div class="instrument-filters"><input id="symbol-search" type="search" aria-label="Search symbols" placeholder="Search symbols…"><label class="toggle"><input id="show-stocks" type="checkbox" checked> Stocks</label><label class="toggle"><input id="show-options" type="checkbox" checked> Options</label><label class="toggle"><input id="hide-zero-positions" type="checkbox" checked> Hide zero positions</label></div></div><div class="scroll"><table><thead><tr><th>Symbol</th><th>Position</th><th>Average cost</th><th>Total cost</th><th>Last-day value</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody id="pnl"></tbody></table></div><p id="pnl-empty" class="muted" role="status"></p></section>
 <section class="card"><h2>Net dividend payments</h2><div id="net-dividend-payments-usd" class="metric">—</div><div class="muted">Gross <span id="gross-dividend-payments-usd">—</span> · Withholding <span id="dividend-withholding-tax-usd">—</span></div></section>
 <section class="card half"><h2>Cash balances</h2><div class="scroll"><table><thead><tr><th>Currency</th><th class="number">Total cash</th></tr></thead><tbody id="cash-balances"></tbody></table></div></section>
-</div></main><script>
+</div></main><script>""" + _PNL_TOTAL_SCRIPT + """
 const el=id=>document.getElementById(id);const esc=value=>String(value??'');
 function cell(row,value,cls=''){const td=document.createElement('td');td.textContent=esc(value);if(cls)td.className=cls;row.append(td)}
 function formatCurrency(value,currency){if(value===null||value===undefined)return 'N/A';const amount=Number(value);if(!Number.isFinite(amount)||!currency)return esc(value);try{return new Intl.NumberFormat('en-US',{style:'currency',currency,currencyDisplay:'code',minimumFractionDigits:2,maximumFractionDigits:2}).format(amount)}catch{return esc(value)}}
@@ -84,11 +94,18 @@ function formatPercent(value){if(value===null||value===undefined)return 'N/A';co
 async function json(url){const response=await fetch(url);const data=await response.json();if(!response.ok)throw new Error(data?.message||data?.code||response.statusText);return data}
 let latestPnlItems=[];
 function renderPnl(){el('pnl').replaceChildren();const hideZero=el('hide-zero-positions').checked;const query=el('symbol-search').value.trim().toUpperCase();const stocks=el('show-stocks').checked,options=el('show-options').checked;for(const item of latestPnlItems){if(hideZero&&Number(item.position_qty)===0)continue;const category=item.asset_category.trim().toUpperCase();if(!((stocks&&category==='STK')||(options&&category==='OPT')))continue;if(!item.symbol.toUpperCase().includes(query))continue;const tr=document.createElement('tr');const symbolCell=document.createElement('td');const link=document.createElement('a');link.href='/ui/stocks/'+encodeURIComponent(item.instrument_id);link.textContent=item.symbol+(item.provisional?' (Provisional)':'');if(item.provisional)link.className='bad';symbolCell.append(link);tr.append(symbolCell);cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.average_cost,item.currency));cell(tr,formatCurrency(item.total_cost,item.currency));cell(tr,formatCurrency(item.last_day_value,item.currency));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));el('pnl').append(tr)}el('pnl-empty').textContent=el('pnl').children.length?'':'No instruments match your filters.'}
-async function loadPnl(){const x=await json('/reports/pnl/by-instrument');const latest=x.items.reduce((value,item)=>value===null||item.report_date_local>value?item.report_date_local:value,null);latestPnlItems=latest===null?[]:x.items.filter(item=>item.report_date_local===latest);let realized=0,unrealized=0,total=0;for(const item of latestPnlItems){realized+=Number(item.realized_pnl);unrealized+=Number(item.unrealized_pnl);total+=Number(item.total_pnl)}renderPnl();const provisional=latestPnlItems.some(item=>item.provisional);el('pnl-state').textContent=provisional?'Provisional totals — see Operations for details':'';el('pnl-state').className=provisional?'bad':'muted';for(const id of ['total-pnl','realized-pnl','unrealized-pnl'])el(id).className=provisional?'metric bad':'metric';const currency=latestPnlItems[0]?.currency||'USD';el('total-pnl').textContent=latest===null?'No snapshots':formatCurrency(total,currency);el('realized-pnl').textContent=latest===null?'No snapshots':formatCurrency(realized,currency);el('unrealized-pnl').textContent=latest===null?'No snapshots':formatCurrency(unrealized,currency)}
+async function loadPnl(){
+const result=await json('/reports/pnl/latest');latestPnlItems=result.items;renderPnl();
+el('pnl-state').textContent=result.provisional?'Provisional totals — see Operations for details':'';
+el('pnl-state').className=result.provisional?'bad':'muted';
+for(const [id,field] of [['total-pnl','total_pnl'],['realized-pnl','realized_pnl'],['unrealized-pnl','unrealized_pnl']]){
+  el(id).className=result.provisional?'metric bad':'metric';
+  el(id).textContent=latestPnlTotal(result,field);
+}}
 async function loadSummary(){const x=await json('/reports/portfolio-summary');el('cash-balances').replaceChildren();for(const item of x.cash_balances){const tr=document.createElement('tr');cell(tr,item.currency);cell(tr,formatCurrency(item.amount,item.currency),'number');el('cash-balances').append(tr)}el('net-liquidation').textContent=formatCurrency(x.estimated_net_liquidation_value_usd,'USD');el('net-transfers-usd').textContent=formatCurrency(x.net_transfers_usd,'USD');el('total-profit-usd').textContent=formatCurrency(x.total_profit_usd,'USD');el('profit-percent').textContent=formatPercent(x.profit_percent);el('total-costs-usd').textContent=formatCurrency(x.total_costs_usd,'USD');el('net-dividend-payments-usd').textContent=formatCurrency(x.net_dividend_payments_usd,'USD');el('gross-dividend-payments-usd').textContent=formatCurrency(x.gross_dividend_payments_usd,'USD');el('dividend-withholding-tax-usd').textContent=formatCurrency(x.dividend_withholding_tax_usd,'USD')}
 el('hide-zero-positions').onchange=renderPnl;
 el('symbol-search').oninput=renderPnl;el('show-stocks').onchange=renderPnl;el('show-options').onchange=renderPnl;
-async function loadAll(){for(const task of [loadPnl,loadSummary]){try{await task()}catch(error){console.error(error)}}}loadAll();
+async function loadAll(){for(const result of await Promise.allSettled([loadPnl(),loadSummary()])){if(result.status==='rejected')console.error(result.reason)}}loadAll();
 </script></body></html>"""
 
 
@@ -132,7 +149,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 <main><div class="grid">
 <section class="card"><h2>Scheduled ingestion success</h2><div id="success" class="metric">—</div><div id="slo-note" class="muted">Loading SLO…</div></section>
 <section class="card"><h2>Actions needing attention</h2><div id="case-count" class="metric">—</div><div class="muted">Available decisions · <span id="unsupported-count">—</span> need accounting support</div></section>
-<section class="card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div class="muted">Functional currency snapshots</div></section>
+<section class="card"><h2>Latest portfolio P&amp;L</h2><div id="total-pnl" class="metric">—</div><div id="pnl-state" class="muted"></div></section>
 <section class="card wide"><h2>Daily P&amp;L by instrument</h2><div class="scroll"><table><thead><tr><th>Date</th><th>Symbol</th><th>Position</th><th>Realized</th><th>Unrealized</th><th>Total</th><th>State</th></tr></thead><tbody id="pnl"></tbody></table></div></section>
 <section class="card"><h2>Labels</h2><form id="label-form"><input id="label-name" required placeholder="New label"><input id="label-color" placeholder="#68d5b4"><button>Add</button></form><div id="labels"></div></section>
 <section class="card full"><h2>Corporate-action review queue</h2>
@@ -172,7 +189,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 </div>
 </section>
 <section class="card full"><h2>Recent ingestion runs</h2><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead><tbody id="runs"></tbody></table></div><p><a href="/ui/ingestion-runs">View all ingestion runs</a></p></section>
-</div></main><script>
+</div></main><script>""" + _PNL_TOTAL_SCRIPT + """
 const el=id=>document.getElementById(id); const esc=value=>String(value??'');
 function cell(row,value,cls=''){const td=document.createElement('td');td.textContent=esc(value);if(cls)td.className=cls;row.append(td)}
 function formatCurrency(value,currency){const amount=Number(value);if(!Number.isFinite(amount)||!currency)return esc(value);try{return new Intl.NumberFormat('en-US',{style:'currency',currency,currencyDisplay:'code',minimumFractionDigits:2,maximumFractionDigits:2}).format(amount)}catch{return esc(value)}}
@@ -182,7 +199,8 @@ function formatDate(value){const match=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(Strin
 function formatDateTime(value){if(!value)return '—';const timestamp=new Date(value);return Number.isNaN(timestamp.getTime())?'—':uiDateTimeFormatter.format(timestamp).replace(',','')}
 async function json(url,options){const response=await fetch(url,options);const data=response.status===204?null:await response.json();if(!response.ok)throw new Error(data?.message||data?.code||response.statusText);return data}
 async function loadSlo(){const x=await json('/operations/slo');el('success').textContent=x.success_rate===null?'No scheduled runs':(x.success_rate*100).toFixed(1)+'%';el('slo-note').textContent=x.alerting?'Attention required':'Within alert thresholds';el('slo-note').className=x.alerting?'bad':'muted'}
-async function loadPnl(){const x=await json('/reports/pnl/by-instrument');el('pnl').replaceChildren();let latest=null,total=0;for(const item of x.items){if(latest===null||item.report_date_local>latest){latest=item.report_date_local;total=0}if(item.report_date_local===latest)total+=Number(item.total_pnl);const tr=document.createElement('tr');[formatDate(item.report_date_local),item.symbol].forEach(v=>cell(tr,v));cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));cell(tr,item.provisional?'Provisional':'Final',item.provisional?'bad':'');el('pnl').append(tr)}el('total-pnl').textContent=latest===null?'No snapshots':total.toFixed(2)}
+async function loadPnl(){const x=await json('/reports/pnl/by-instrument');el('pnl').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDate(item.report_date_local),item.symbol].forEach(v=>cell(tr,v));cell(tr,formatPosition(item.position_qty));cell(tr,formatCurrency(item.realized_pnl,item.currency));cell(tr,formatCurrency(item.unrealized_pnl,item.currency));cell(tr,formatCurrency(item.total_pnl,item.currency));cell(tr,item.provisional?'Provisional':'Final',item.provisional?'bad':'');el('pnl').append(tr)}}
+async function loadLatestPnl(){const result=await json('/reports/pnl/latest');el('total-pnl').textContent=latestPnlTotal(result,'total_pnl');el('pnl-state').textContent=result.provisional?'Provisional total':''}
 async function loadLabels(){const x=await json('/labels');el('labels').replaceChildren();for(const item of x.items){const p=document.createElement('p');p.className='pill';p.textContent=item.name;el('labels').append(p)}}
 function reviewState(item){return item.review_state||(item.can_correct_split?'actionable':item.requires_manual?'unsupported':'handled')}
 async function loadCases(){
@@ -255,5 +273,5 @@ el('preview-resolution').onclick=()=>requestResolution(false);el('apply-resoluti
 el('show-reviewed').onchange=()=>loadCases().catch(error=>{el('case-error').textContent=error.message});
 async function loadRuns(){const x=await json('/ingestion/runs?limit=5&sort_by=started_at_utc&sort_dir=desc');el('runs').replaceChildren();for(const item of x.items){const tr=document.createElement('tr');[formatDateTime(item.started_at_utc),item.run_type,item.status,item.duration_ms??'—',item.error_message??''].forEach(v=>cell(tr,v,item.status==='failed'?'bad':''));el('runs').append(tr)}}
 el('label-form').onsubmit=async event=>{event.preventDefault();await json('/labels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:el('label-name').value,color:el('label-color').value||null})});event.target.reset();await loadLabels()};
-async function loadAll(){for(const task of [loadSlo,loadPnl,loadLabels,loadCases,loadRuns]){try{await task()}catch(error){if(task===loadCases)el('case-error').textContent=error.message;console.error(error)}}}loadAll();
+async function loadAll(){for(const task of [loadSlo,loadLatestPnl,loadPnl,loadLabels,loadCases,loadRuns]){try{await task()}catch(error){if(task===loadCases)el('case-error').textContent=error.message;console.error(error)}}}loadAll();
 </script></body></html>"""

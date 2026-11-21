@@ -70,6 +70,11 @@ window for large tables because index creation can block writes. Revision `20260
 requires an online migration to backfill broker identity from successful artifacts and
 stops on unreadable or ambiguous account evidence.
 
+Revision `20261121_20` requires an online migration to mark old snapshots provisional
+when their linked OpenPositions summary has an inconsistent business date. It retains
+the stored amounts. Reprocess affected periods to rebuild snapshots without the
+inconsistent broker marks.
+
 Inspect the revision chain and applied state:
 
 ```bash

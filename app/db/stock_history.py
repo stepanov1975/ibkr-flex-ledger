@@ -12,8 +12,7 @@ from uuid import UUID
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.domain.fx_rates import select_conversion_rate
-from .interfaces import LedgerFxRateRecord
+from app.domain.fx_rates import ConversionRateHistory
 from .ledger_snapshot import SQLAlchemyLedgerSnapshotService
 from .open_positions import db_open_position_is_summary
 
@@ -100,7 +99,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                 "FILTER (WHERE holding AND (summary_count<>1 OR is_summary)) AS positions "
                 "FROM counted GROUP BY ingestion_run_id,raw_artifact_id,report_date_local,valuation_recorded_at_utc"
             ), valuation_params).mappings()]
-            fx_rates = SQLAlchemyLedgerSnapshotService(engine, connection=connection).db_ledger_fx_rate_list_for_account(
+            fx_rate_rows = SQLAlchemyLedgerSnapshotService(engine, connection=connection).db_ledger_fx_rate_list_for_account(
                 account_id, max(
                     [row['report_date_local'] for row in snapshots.values()]
                     + [row['report_date_local'] for row in valuations if row['report_date_local'] is not None]
@@ -144,6 +143,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
     except SQLAlchemyError as error:
         raise RuntimeError("stock history report failed") from error
 
+    fx_rates = ConversionRateHistory(fx_rate_rows)
     # Unknown legacy calculation times require a rebuild before freshness can be established.
     stale_instruments = {identifier for identifier, row in snapshots.items()
                          if row['calculated_at_utc'] is None or row['fx_dependencies'] is None}
@@ -191,8 +191,8 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
                          or valuation['recorded_at_utc'] > snapshot['calculated_at_utc'])):
                 stale_instruments.add(identifier)
         for dependency in snapshot['fx_dependencies'] or []:
-            selected_rate = select_conversion_rate(
-                dependency['currency'], dependency['functional_currency'], date.fromisoformat(dependency['date']), fx_rates,
+            selected_rate = fx_rates.select(
+                dependency['currency'], dependency['functional_currency'], date.fromisoformat(dependency['date']),
             )
             current_rate = Decimal(selected_rate.fx_rate) if selected_rate and selected_rate.fx_rate is not None else None
             previous_rate = Decimal(dependency['rate']) if dependency['rate'] is not None else None
@@ -267,7 +267,7 @@ def db_stock_history(engine: Engine, account_id: str, instrument_id: UUID) -> di
 
 def _valuation_inputs(
     payload: dict[str, Any] | None, fifo_quantity: Decimal, base_currency: str,
-    report_date: date, fx_rates: list[LedgerFxRateRecord],
+    report_date: date, fx_rates: ConversionRateHistory,
 ) -> dict[str, Any] | None:
     """Compare parsed valuation inputs, ignoring broker labels and numeric formatting."""
     if payload is None:
@@ -295,7 +295,7 @@ def _valuation_inputs(
     if result['currency'] == base_currency.strip().upper():
         result.pop('fxRateToBase')
     elif not isinstance(result['fxRateToBase'], Decimal) or result['fxRateToBase'] <= 0:
-        selected_rate = select_conversion_rate(result['currency'], base_currency, report_date, fx_rates)
+        selected_rate = fx_rates.select(result['currency'], base_currency, report_date)
         result['fxRateToBase'] = (
             Decimal(selected_rate.fx_rate) if selected_rate and selected_rate.fx_rate is not None else None
         )

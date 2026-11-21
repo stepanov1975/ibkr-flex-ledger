@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, text
 
 from app.domain.corporate_actions import domain_classify_corporate_action
+from app.domain.flex_parsing import domain_flex_normalize_optional_text, domain_flex_parse_local_date
 from sqlalchemy.exc import SQLAlchemyError
 
 from .raw_fields import db_trade_is_delivery
@@ -490,7 +491,7 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         normalized_ingestion_run_id = self._db_ledger_validate_uuid_text(ingestion_run_id, "ingestion_run_id")
 
         statement = (
-            "WITH ranked AS (SELECT i.instrument_id, rr.source_payload, "
+            "WITH ranked AS (SELECT i.instrument_id, rr.source_payload, rr.report_date_local AS statement_date, "
             f"count(*) FILTER (WHERE {db_open_position_is_summary('rr')}) "
             "OVER (PARTITION BY i.instrument_id) AS summary_count, "
             f"row_number() OVER (PARTITION BY i.instrument_id ORDER BY ({db_open_position_is_summary('rr')}) DESC, "
@@ -530,12 +531,8 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'fxRateToBase'), ',', '')::numeric END AS fx_rate_to_base, "
             "CASE WHEN BTRIM(COALESCE(rr.source_payload->>'multiplier', '')) IN ('', '-', '--', 'N/A') "
             "THEN NULL ELSE REPLACE(BTRIM(rr.source_payload->>'multiplier'), ',', '')::numeric END AS multiplier, "
-            "CASE "
-            "WHEN LENGTH(COALESCE(rr.source_payload->>'reportDate', '')) = 8 "
-            "THEN TO_DATE(rr.source_payload->>'reportDate', 'YYYYMMDD') "
-            "ELSE CAST(NULLIF(rr.source_payload->>'reportDate', '') AS date) "
-            "END AS report_date_local "
-            "FROM (SELECT instrument_id, summary_count, "
+            "CASE WHEN rr.statement_date IS NOT NULL THEN rr.source_payload->>'reportDate' END AS report_date_local "
+            "FROM (SELECT instrument_id, summary_count, statement_date, "
             "CASE WHEN summary_count=1 THEN source_payload ELSE jsonb_build_object("
             "'assetCategory', source_payload->>'assetCategory', 'currency', source_payload->>'currency') END AS source_payload "
             "FROM ranked WHERE row_rank=1) rr"
@@ -550,12 +547,16 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
         except SQLAlchemyError as error:
             raise RuntimeError("ledger OpenPositions valuation read failed") from error
 
-        return [
-            LedgerOpenPositionValuationRecord(
+        valuations: list[LedgerOpenPositionValuationRecord] = []
+        for row in rows:
+            supplied_date = domain_flex_normalize_optional_text(row["report_date_local"])
+            report_date = domain_flex_parse_local_date(supplied_date) if supplied_date is not None else None
+            quantity = row["position_qty"] if supplied_date is None or report_date is not None else None
+            valuations.append(LedgerOpenPositionValuationRecord(
                 instrument_id=row["instrument_id"],
                 asset_category=row["asset_category"],
                 currency=row["currency"],
-                position_qty=None if row["position_qty"] is None else str(row["position_qty"]),
+                position_qty=None if quantity is None else str(quantity),
                 mark_price=None if row["mark_price"] is None else str(row["mark_price"]),
                 cost_basis_money=None
                 if row["cost_basis_money"] is None
@@ -567,10 +568,9 @@ class SQLAlchemyLedgerSnapshotService(LedgerSnapshotRepositoryPort):
                 if row["fx_rate_to_base"] is None
                 else str(row["fx_rate_to_base"]),
                 multiplier=None if row["multiplier"] is None else str(row["multiplier"]),
-                report_date_local=row["report_date_local"],
-            )
-            for row in rows
-        ]
+                report_date_local=report_date,
+            ))
+        return valuations
 
     def db_ledger_fx_rate_list_for_account(
         self,

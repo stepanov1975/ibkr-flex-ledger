@@ -30,7 +30,7 @@ def db_account_insight_evidence(connection: Connection, account_id: str) -> dict
     ), params).mappings()]
     cash = [dict(row) for row in connection.execute(text(
         "SELECT e.event_cashflow_id::text AS event_id,e.instrument_id::text,e.report_date_local,"
-        "e.cash_action,e.amount,e.amount_in_base,e.currency,e.fees,e.withholding_tax,e.updated_at_utc,"
+        "e.cash_action,e.amount,e.amount_in_base,e.currency,e.functional_currency,e.fees,e.withholding_tax,e.updated_at_utc,"
         "r.source_payload AS payload,e.source_raw_record_id::text AS raw_id "
         "FROM event_cashflow e JOIN raw_record r ON r.raw_record_id=e.source_raw_record_id "
         "WHERE e.account_id=:account_id"

@@ -43,7 +43,7 @@ from app.ledger import (
 from .interfaces import JobExecutionResult, JobOrchestratorPort
 from .raw_extraction import RawPayloadExtractionResult, job_raw_extract_payload_rows
 from .canonical_pipeline import job_canonical_map_and_persist
-from .report_context import job_validate_report_context
+from .report_context import job_validate_open_position_dates, job_validate_report_context
 from .incremental_scope import job_build_incremental_snapshot_scope
 from .section_preflight import (
     MISSING_REQUIRED_SECTION_CODE,
@@ -255,6 +255,7 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                 adapter_result.payload_bytes,
                 self._raw_persistence_repository.db_raw_successful_broker_account_ids(self._config.account_id),
             )
+            job_validate_open_position_dates(extraction_result)
             timeline.append(domain_build_stage_event(
                 stage="report_context", status="completed", details={"broker_account_id": broker_account_id},
             ))
@@ -383,12 +384,17 @@ class IngestionJobOrchestrator(JobOrchestratorPort):
                         )
                     )
 
+                snapshot_run_id = semantic_run_id
                 if duplicate_skip_reason is None and self._canonical_repository is not None and self._snapshot_service is not None:
+                    if recover_artifact_rows and extraction_result.report_date_local is not None:
+                        snapshot_run_id = self._canonical_repository.db_raw_newer_open_positions_run(
+                            self._config.account_id, artifact_result.artifact.raw_artifact_id,
+                        ) or semantic_run_id
                     self._canonical_repository.db_canonical_mark_valuation_pending(
-                        account_id=self._config.account_id, ingestion_run_id=str(semantic_run_id),
+                        account_id=self._config.account_id, ingestion_run_id=str(snapshot_run_id),
                     )
                 self._job_append_snapshot_stage_timeline(
-                    run_record_id=str(semantic_run_id),
+                    run_record_id=str(snapshot_run_id),
                     report_date_local=(
                         extraction_result.report_date_local.isoformat()
                         if extraction_result.report_date_local is not None

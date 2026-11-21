@@ -133,6 +133,35 @@ def test_portfolio_report_reads_one_committed_import(database):
     assert Decimal(after.estimated_net_liquidation_value_usd) == Decimal("370")
 
 
+@pytest.mark.parametrize("duplicate_currency", ["BASE_SUMMARY", "USD"])
+def test_portfolio_cash_requires_unique_balances_per_currency(database, duplicate_currency):
+    orchestrator, adapter, *_ = _harness(database)
+    portfolio = SQLAlchemyPortfolioService(database)
+    adapter.payload_bytes = _SEEDED_PAYLOAD
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+
+    cash_rows = (
+        f'<CashReportCurrency currency=" {duplicate_currency.lower()} " endingCash="130" />'
+        '<CashReportCurrency currency="EUR" endingCash="12" />'
+    ).encode()
+    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"</CashReport>", cash_rows + b"</CashReport>")
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    summary = portfolio.db_report_portfolio_summary("INTEGRITY")
+
+    assert summary.report_date_local == DAY
+    assert {row.currency: None if row.amount is None else Decimal(row.amount) for row in summary.cash_balances} == {
+        "EUR": Decimal("12"),
+        "USD": Decimal("30") if duplicate_currency == "BASE_SUMMARY" else None,
+    }
+    if duplicate_currency == "BASE_SUMMARY":
+        assert summary.estimated_net_liquidation_value_usd is None
+        assert summary.total_profit_usd is None
+        assert summary.profit_percent is None
+    else:
+        assert Decimal(summary.estimated_net_liquidation_value_usd) == Decimal("250")
+        assert Decimal(summary.total_profit_usd) == Decimal("150")
+
+
 def test_portfolio_profit_only_uses_transfers_through_valuation_date(database):
     orchestrator, adapter, *_ = _harness(database)
     portfolio = SQLAlchemyPortfolioService(database)

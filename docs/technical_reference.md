@@ -275,6 +275,8 @@ Live reports must contain one FlexStatement for one broker account and an
 AccountInformation section with USD base currency. Include accountId in the header
 or AccountInformation. All row account IDs must agree, and subsequent imports must
 match successful broker-account history. The configured internal account label may differ.
+Dated statements also require any explicit OpenPositions row date to match the
+statement date. A position row with no date may use the statement date.
 
 Downloaded bytes are retained even when XML, required-section, or account validation
 fails. Canonical events, lots, snapshots, artifact completion and successful run status
@@ -393,9 +395,14 @@ Ingestion diagnostics timeline additions:
 Normal ingestion keeps every distinct Flex artifact and its raw rows. An exact
 duplicate artifact skips raw-row insertion, canonical mapping, and snapshot
 rebuilding only when that artifact has a successfully completed prior processing
-run. A distinct artifact canonicalizes only rows changed from its latest
-successfully processed source version. Snapshot updates for an existing report
-date remain limited to affected instruments and FX source currencies; the first
+run. For a distinct artifact, unchanged canonical rows can skip mapping when
+the last successful application contains the same source reference, Flex query,
+payload, and inherited business date. Other canonical rows are mapped again so a
+correction or a change of Flex query cannot reuse an outdated comparison.
+OpenPositions compare against the latest published whole section for the same
+statement date. A successful retry of an older artifact keeps newer published
+position evidence for that date. Snapshot updates for an existing report date
+remain limited to affected instruments and FX source currencies; the first
 snapshot for a report date automatically widens to a full rebuild and records
 `missing_report_date_baseline`. Explicit reprocess commands remain full replays.
 When an instrument already has a later published snapshot, historical imports
@@ -639,6 +646,7 @@ The reporting API exposes:
 
 - `GET /reports/pnl/by-instrument`
 - `GET /reports/pnl/by-label`
+- `GET /reports/pnl/latest`
 - `GET /reports/portfolio-summary`
 - `GET /reports/transfer-history`
 - `GET /reports/provenance`
@@ -656,6 +664,9 @@ hide an otherwise available valuation. Missing FX for a trade-price fallback is 
 in `valuation_source` as `FX_RATE_MISSING_ALL_SOURCES`.
 Instrument PnL excludes `CASH` and `FX` pseudo-instruments; currency cash balances remain
 available through the portfolio-summary report.
+The latest PnL report returns the most recent security Snapshot date, its instrument
+rows, and decimal realized, unrealized, and total PnL for each reporting currency.
+The portfolio and operations dashboards use those totals directly.
 
 Existing snapshots and FIFO lots calculated with commission rebates as expenses need
 explicit reprocessing after this accounting fix. Snapshots using trade-price fallbacks
@@ -669,12 +680,18 @@ balance per currency, all canonical deposits and withdrawals in their original c
 and net/gross transfer totals per currency. Cash and positions each come from the newest
 successful artifact containing that section, so a corrected same-day report replaces the
 older section. The portfolio summary reads all inputs in one repeatable-read transaction.
+Duplicate cash rows for a currency leave that balance unknown. Net liquidation value
+requires a unique `BASE_SUMMARY` cash row.
 Estimated net liquidation value is same-date base-currency cash plus position values
 converted to USD. It requires a unique summary row per reported security. Legacy rows
 without a detail field are eligible as summaries. Missing or ambiguous summaries make
 account valuation unavailable and the affected instrument snapshots provisional. Use
 [stored-report replay](operations.md#broker-position-repair-by-immutable-replay) to rebuild
 snapshots previously calculated from lot detail.
+An explicitly mismatched position date makes the selected legacy section unusable
+for current holdings comparisons. Migration `20261121_20` marks linked historical
+snapshots provisional and clears their valuation provenance. Replay affected report
+scopes to rebuild them from the immutable evidence.
 
 USD net transfers use the transaction's IBKR base amount or FX rate. Profit subtracts net
 transfers through the valuation date, and profit percentage divides by that same total
@@ -726,7 +743,8 @@ Explicit empty section markers supersede older sources; omitted sections do not.
 `GET /reports/reconciliation/diff` compares broker-aligned and economic values using the
 frozen tolerance matrix in [contracts](contracts.md). JSON and `format=csv` outputs include
 absolute/relative differences, tolerances, pass/fail state, provisional state, and source
-identities. Requests fail clearly when required broker reconciliation sections are absent.
+identities. The comparison and required-section checks share a repeatable-read transaction.
+Requests fail clearly when required Published Flex sections are absent for the requested range.
 
 ## Operations, alerts, and recovery (Task 12)
 

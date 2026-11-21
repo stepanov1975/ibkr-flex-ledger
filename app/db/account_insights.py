@@ -8,6 +8,7 @@ from app.analytics.account_options import account_option_activity
 from app.analytics.account_holdings import account_lending, account_settled_cash, account_concentration
 from app.analytics.account_income import account_income
 from app.analytics.account_checks import account_calculation_checks
+from app.domain.flex_parsing import domain_flex_optional_date_matches
 from .account_insight_evidence import db_account_insight_evidence
 from .published_flex_sections import (
     db_published_flex_sections_by_date,
@@ -26,7 +27,7 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
     with engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
         latest_sources = db_published_flex_sections_latest(account_id, _SECTIONS).cte("published_sections")
         rows = connection.execute(text("""
-            SELECT r.section_name AS section,r.source_payload AS payload,r.raw_record_id::text AS raw_id,
+            SELECT r.section_name AS section,r.source_payload AS payload,r.raw_record_id::text AS raw_id,r.source_row_ref,
                    a.raw_artifact_id::text AS artifact_id,a.report_date_local AS report_date
             FROM published_sections a
             JOIN raw_record r ON r.raw_artifact_id=a.raw_artifact_id AND r.section_name=a.section_name
@@ -46,7 +47,14 @@ def db_account_insights(engine: Engine, account_id: str) -> dict[str, Any]:
             ORDER BY a.report_date_local DESC,a.created_at_utc DESC,
                      a.raw_artifact_id DESC,r.raw_record_id DESC
         """).columns().add_cte(historical_sources)).mappings().all()
-        sources = [InsightRow(**dict(row)) for row in rows]
+        position_dates_match = all(
+            domain_flex_optional_date_matches(row["payload"].get("reportDate"), row["report_date"])
+            for row in rows if row["source_row_ref"].startswith("OpenPositions:OpenPosition:")
+        )
+        sources = [
+            InsightRow(row["section"], row["payload"], row["raw_id"], row["artifact_id"], row["report_date"])
+            for row in rows if position_dates_match or row["section"] != "OpenPositions"
+        ]
         historical = [InsightRow(**dict(row)) for row in history]
         report = AccountInsights(sources, [r for r in historical if r.section == "EquitySummaryInBase"]).build()
         evidence = db_account_insight_evidence(connection, account_id)

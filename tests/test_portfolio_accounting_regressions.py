@@ -19,6 +19,59 @@ from test_ingestion_integrity_regressions import _harness, database as _database
 database = _database
 
 
+def test_reconciliation_requires_published_sections(database, monkeypatch):
+    orchestrator, adapter, _, _, snapshot_service, *_ = _harness(database)
+    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"  <MTMPerformanceSummaryInBase />\n", b"").replace(
+        b"  <FIFOPerformanceSummaryInBase />\n", b"",
+    )
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+
+    def fail_snapshot(**kwargs):
+        raise RuntimeError("snapshot build failed after raw extraction")
+
+    adapter.payload_bytes = _SEEDED_PAYLOAD
+    with monkeypatch.context() as failures:
+        failures.setattr(snapshot_service, "ledger_snapshot_build_and_persist", fail_snapshot)
+        assert orchestrator.job_execute("ingestion_run").status == "failed"
+
+    app = FastAPI()
+    settings = AppSettings(_env_file=None, account_id="INTEGRITY", ibkr_flex_token="test", ibkr_flex_query_id="test")
+    app.include_router(api_create_reports_router(settings, SQLAlchemyPortfolioService(database)))
+    with TestClient(app) as client:
+        url = "/reports/reconciliation/diff?report_date_from=2026-08-21&report_date_to=2026-08-21"
+        response = client.get(url)
+        assert response.status_code == 409
+        assert response.json()["missing_sections"] == ["FIFOPerformanceSummaryInBase", "MTMPerformanceSummaryInBase"]
+
+        assert orchestrator.job_execute("ingestion_run").status == "success"
+        response = client.get(url)
+        assert response.status_code == 200
+        assert response.json()["items"]
+
+
+def test_latest_pnl_reads_one_security_snapshot_date(database):
+    from sqlalchemy import text
+
+    orchestrator, adapter, *_ = _harness(database)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    report = ET.fromstring(_SEEDED_PAYLOAD)
+    report.find(".//FlexStatement").set("reportDate", "20260822")
+    report.find(".//OpenPosition").set("reportDate", "20260822")
+    adapter.payload_bytes = ET.tostring(report)
+    assert orchestrator.job_execute("ingestion_run").status == "success"
+    portfolio = SQLAlchemyPortfolioService(database)
+
+    history = portfolio.db_report_pnl_by_instrument("INTEGRITY", None, None, None)
+    assert [row.report_date_local.isoformat() for row in history] == ["2026-08-21", "2026-08-22"]
+    assert portfolio.db_report_latest_pnl_by_instrument("INTEGRITY") == history[-1:]
+    assert portfolio.db_report_latest_pnl_by_instrument("OTHER_ACCOUNT") == []
+
+    # Currency-conversion snapshots are outside latest security P&L.
+    with database.begin() as connection:
+        connection.execute(text("UPDATE instrument SET asset_category='CASH' WHERE conid='900001'"))
+    assert portfolio.db_report_latest_pnl_by_instrument("INTEGRITY") == []
+
+
 @pytest.mark.parametrize("commission", [Decimal("-1"), Decimal("0"), Decimal("1")])
 @pytest.mark.parametrize("closed", [False, True])
 def test_signed_commissions_agree_in_fifo_costs_and_reconciliation(database, commission, closed):
@@ -195,6 +248,7 @@ def test_reconciliation_evidence_and_linked_commission_revision(database):
     assert orchestrator.job_execute("ingestion_run").status == "success"
     trade.set("fifoPnlRealized", "9.75")
     root.find(".//FlexStatement").set("reportDate", "20260822")
+    root.find(".//OpenPosition").set("reportDate", "20260822")
     ET.SubElement(root.find(".//CashTransactions"), "CashTransaction", transactionID="adjustment", tradeID="trade-1",
                   conid="900001", symbol="SEED", assetCategory="STK", type="Commission Adjustments",
                   amount="-0.25", currency="USD", reportDate="20260822", dateTime="20260822;130000")

@@ -55,9 +55,7 @@ def account_commissions(rows: list[InsightRow], trades: list[dict[str, Any]]) ->
                             trade["commission"] if trade and comparable else None, reason),
                        "regulatory": [{"field": k, "label": insight_label(k), "amount": insight_decimal(p.get(k))} for k in _REGULATORY]})
     selected = source.section("UnbundledCommissionDetails")
-    cash = [r for r in source.section("CashReport") if selected and r.artifact_id == selected[0].artifact_id]
-    period = cash[0].payload if cash else {}
-    start, end = insight_date(period.get("fromDate")), insight_date(period.get("toDate"))
+    start, end = source.cash_report_periods.get(selected[0].artifact_id, (None, None)) if selected else (None, None)
     eligible = [t for t in trades if start and end and start <= t["report_date_local"] <= end
                 and t["commission"] is not None and t["commission"] != 0]
     currencies = sorted({r["currency"] for r in result})

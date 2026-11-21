@@ -112,6 +112,7 @@ def _position_rows(
         "open_positions_present": True,
         "position_value_usd": position_value_usd,
         "missing_value_count": missing_value_count,
+        "position_report_dates": ["20260821"],
     }]
 
 
@@ -224,6 +225,7 @@ def test_portfolio_summary_treats_present_empty_positions_as_zero_value() -> Non
         "open_positions_present": True,
         "position_value_usd": Decimal("0"),
         "missing_value_count": 0,
+        "position_report_dates": [],
     }]
     connection = _ConnectionStub(_cash_rows(), empty_positions, [])
     repository = _repository(connection)

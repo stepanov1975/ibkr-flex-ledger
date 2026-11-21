@@ -99,7 +99,9 @@ def test_distribution_lot_without_trade_is_visible_in_history_and_later_sale(dat
     payload = payload.replace(b'</Trades>',
         b'<Trade transactionID="AFTER" ibExecID="AFTER" conid="900002" symbol="NEXT" assetCategory="STK" '
         b'buySell="SELL" quantity="1" tradePrice="30" currency="USD" reportDate="20260822" dateTime="20260822;130000" /></Trades>',
-    ).replace(b'reportDate="20260821" position="5"', b'reportDate="20260823" position="4"')
+    ).replace(b'reportDate="20260821" position="5"', b'reportDate="20260823" position="4"').replace(
+        b'reportDate="20260821" position="2"', b'reportDate="20260823" position="2"',
+    )
     harness[1].payload_bytes = payload
     assert harness[0].job_execute('ingestion_run').status == 'success'
     event = _resolve(database, basis)
@@ -182,6 +184,8 @@ def test_equivalent_distribution_import_preserves_fifo_when_raw_uuid_order_rever
     payload = payload.replace(b'</CorporateActions>', second_leg + b'</CorporateActions>').replace(
         b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260823">',
     ).replace(b'reportDate="20260821" position="5"', b'reportDate="20260823" position="9"').replace(
+        b'reportDate="20260821" position="2"', b'reportDate="20260823" position="2"',
+    ).replace(
         b'</Trades>', b'<Trade transactionID="SALE" ibExecID="SALE" conid="900002" symbol="NEXT" '
         b'assetCategory="STK" buySell="SELL" quantity="1" tradePrice="30" currency="USD" '
         b'reportDate="20260822" dateTime="20260822;130000" /></Trades>',

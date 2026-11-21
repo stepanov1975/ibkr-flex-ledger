@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -223,7 +224,7 @@ def _fifo_compute_instrument(
         ),
     )
 
-    open_lots = [
+    open_lots = deque(
         _OpenFifoLot(
             direction="long" if lot.remaining_quantity > 0 else "short",
             open_event_trade_fill_id=lot.open_event_trade_fill_id,
@@ -237,7 +238,7 @@ def _fifo_compute_instrument(
             transfer_event_corp_action_id=lot.transfer_event_corp_action_id,
             basis_source_raw_record_ids=lot.basis_source_raw_record_ids,
         ) for lot in (initial.open_lots if initial else ())
-    ]
+    )
     realized_pnl = initial.realized_pnl if initial else Decimal("0")
     split_index = 0
     closed_lots = list(initial.closed_lots) if initial else []
@@ -280,7 +281,7 @@ def _fifo_compute_instrument(
 
             if current_lot.remaining_quantity == Decimal("0"):
                 closed_lots.append(_fifo_lot_result(current_lot, closed_at=trade.trade_timestamp_utc))
-                open_lots.pop(0)
+                open_lots.popleft()
 
         if matched_quantity > Decimal("0"):
             fee_ratio = matched_quantity / quantity if quantity != Decimal("0") else Decimal("0")
@@ -493,7 +494,7 @@ def _fifo_apply_security_movement(
     )
 
 
-def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) -> list[FifoOpenLotResult]:
+def _fifo_split_open_lots(open_lots: deque[_OpenFifoLot], split: FifoSplitInput) -> list[FifoOpenLotResult]:
     """Allocate share rounding across surviving FIFO lots, preserving their basis."""
     if not open_lots:
         return []
@@ -526,7 +527,8 @@ def _fifo_split_open_lots(open_lots: list[_OpenFifoLot], split: FifoSplitInput) 
             execution_value = lot.unit_execution_price * lot.remaining_quantity
             recipient.open_price += execution_value / recipient.open_quantity
             recipient.unit_execution_price += execution_value / recipient.remaining_quantity
-    open_lots[:] = [lot for lot, quantity in survivors]
+    open_lots.clear()
+    open_lots.extend(lot for lot, _ in survivors)
     for lot, remaining_quantity in survivors:
         # Use the allocated quantity to retain this lot's unconsumed cost and
         # fees. Completed closes and their realized P&L are never restated.

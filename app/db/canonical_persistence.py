@@ -10,6 +10,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .session import db_connection_scope, db_transaction_scope
+from .published_flex_sections import db_published_flex_sections_by_date
 from .raw_fields import db_raw_numeric, db_trade_is_delivery
 from .trade_consistency import db_validate_trade_consistency
 
@@ -24,6 +25,17 @@ from app.db.interfaces import (
     RawArtifactReplayCandidate,
     RawRecordForCanonicalMapping,
     RawRecordReadRepositoryPort,
+)
+
+
+_SUCCESSFUL_APPLICATIONS = (
+    "CROSS JOIN LATERAL ("
+    "SELECT COALESCE(owner.ended_at_utc, owner.started_at_utc) AS applied_at_utc, "
+    "owner.ingestion_run_id AS applied_run_id WHERE owner.status='success' "
+    "UNION ALL SELECT COALESCE(completion.ended_at_utc, completion.started_at_utc), "
+    "completion.ingestion_run_id WHERE completion.status='success' "
+    "AND completion.ingestion_run_id<>owner.ingestion_run_id"
+    ") application "
 )
 
 
@@ -51,34 +63,73 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         + "ORDER BY created_at_utc ASC, raw_record_id ASC"
     )
     _RAW_RECORD_QUERY_CHANGED_BY_RUN_ID = (
+        "WITH current_artifact AS ("
+        "SELECT artifact.raw_artifact_id, artifact.account_id, artifact.period_key, artifact.report_date_local, "
+        "artifact.created_at_utc, COALESCE(run.ended_at_utc, run.started_at_utc) AS applied_at_utc "
+        "FROM raw_artifact artifact JOIN ingestion_run run USING (ingestion_run_id) "
+        "WHERE artifact.ingestion_run_id=CAST(:ingestion_run_id AS uuid)"
+        "), preceding_applications AS MATERIALIZED ("
+        "SELECT artifact.raw_artifact_id, artifact.created_at_utc, artifact.flex_query_id, "
+        "artifact.report_date_local, artifact.period_key, application.applied_at_utc, application.applied_run_id, "
+        "(completion.status='success' OR (artifact.completed_ingestion_run_id IS NULL AND owner.status='success')) "
+        "AS is_published "
+        "FROM current_artifact current JOIN raw_artifact artifact ON artifact.account_id=current.account_id "
+        "JOIN ingestion_run owner ON owner.ingestion_run_id=artifact.ingestion_run_id "
+        "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
+        + _SUCCESSFUL_APPLICATIONS
+        + "WHERE artifact.raw_artifact_id<>current.raw_artifact_id AND application.applied_at_utc<=current.applied_at_utc"
+        # Check the last account application before relying on a query-specific row reference.
+        "), latest_application AS ("
+        "SELECT flex_query_id, raw_artifact_id, applied_at_utc FROM preceding_applications "
+        "ORDER BY applied_at_utc DESC, applied_run_id DESC, created_at_utc DESC, raw_artifact_id DESC LIMIT 1"
+        "), preceding_positions AS ("
+        "SELECT previous.raw_artifact_id FROM preceding_applications previous CROSS JOIN current_artifact current "
+        "WHERE previous.is_published AND previous.report_date_local IS NOT DISTINCT FROM current.report_date_local "
+        "AND (current.report_date_local IS NOT NULL OR previous.period_key=current.period_key) "
+        "AND (previous.created_at_utc, previous.raw_artifact_id)<(current.created_at_utc, current.raw_artifact_id) "
+        "AND EXISTS (SELECT 1 FROM raw_record position_row WHERE position_row.raw_artifact_id=previous.raw_artifact_id "
+        "AND position_row.section_name='OpenPositions') "
+        "ORDER BY previous.created_at_utc DESC, previous.raw_artifact_id DESC LIMIT 1"
+        ") "
         "SELECT current.raw_record_id, current.ingestion_run_id, current.account_id, current.period_key, "
         "current.flex_query_id, current.report_date_local, current.section_name, current.source_row_ref, "
         "current.source_payload, "
-        f"(current.section_name='Trades' AND {db_trade_is_delivery('prior')}) AS was_delivery "
-        "FROM raw_record AS current "
+        f"(current.section_name='Trades' AND COALESCE({db_trade_is_delivery('latest_row')}, "
+        f"{db_trade_is_delivery('prior')})) AS was_delivery "
+        "FROM current_artifact target JOIN raw_record current USING (raw_artifact_id) "
+        "LEFT JOIN raw_record prior_position ON current.section_name='OpenPositions' "
+        "AND prior_position.raw_artifact_id=(SELECT raw_artifact_id FROM preceding_positions) "
+        "AND prior_position.section_name='OpenPositions' AND prior_position.source_row_ref=current.source_row_ref "
+        "LEFT JOIN latest_application latest ON current.section_name<>'OpenPositions' "
+        "AND latest.flex_query_id=current.flex_query_id "
+        "LEFT JOIN raw_record latest_row ON latest_row.raw_artifact_id=latest.raw_artifact_id "
+        "AND latest_row.section_name=current.section_name AND latest_row.source_row_ref=current.source_row_ref "
+        "AND (latest.applied_at_utc<target.applied_at_utc OR "
+        "(latest_row.created_at_utc, latest_row.raw_record_id)<(current.created_at_utc, current.raw_record_id)) "
         "LEFT JOIN LATERAL ("
-        "SELECT previous.raw_record_id, previous.source_payload "
-        "FROM raw_record AS previous "
-        "JOIN raw_artifact AS previous_artifact "
-        "ON previous_artifact.raw_artifact_id = previous.raw_artifact_id "
-        "JOIN ingestion_run AS completed_run "
-        "ON completed_run.ingestion_run_id = previous_artifact.completed_ingestion_run_id "
-        "AND completed_run.status = 'success' "
-        "WHERE previous.account_id = current.account_id "
+        "SELECT previous.raw_record_id, previous.report_date_local, previous.source_payload "
+        "FROM raw_record previous JOIN preceding_applications application USING (raw_artifact_id) "
+        "WHERE latest_row.raw_record_id IS NULL "
+        "AND current.section_name NOT IN ('OpenPositions','CashTransactions','ConversionRates','CorporateActions') "
+        "AND previous.account_id = current.account_id "
         "AND previous.flex_query_id = current.flex_query_id "
         "AND previous.section_name = current.section_name "
         "AND previous.source_row_ref = current.source_row_ref "
-        "AND previous.ingestion_run_id <> current.ingestion_run_id "
-        "AND (previous.created_at_utc < current.created_at_utc "
-        "OR (previous.created_at_utc = current.created_at_utc "
-        "AND previous.raw_record_id < current.raw_record_id)) "
-        "ORDER BY previous.created_at_utc DESC, previous.raw_record_id DESC "
+        "AND (application.applied_at_utc<target.applied_at_utc OR "
+        "(previous.created_at_utc, previous.raw_record_id)<(current.created_at_utc, current.raw_record_id)) "
+        "ORDER BY application.applied_at_utc DESC, application.applied_run_id DESC, application.created_at_utc DESC, "
+        "application.raw_artifact_id DESC, previous.created_at_utc DESC, previous.raw_record_id DESC "
         "LIMIT 1"
         ") AS prior ON TRUE "
         "WHERE current.ingestion_run_id = CAST(:ingestion_run_id AS uuid) "
         "AND ((current.section_name='CorporateActions' AND current.source_payload->>'type' IN ('IC','SO','SPINOFF')) "
-        "OR prior.raw_record_id IS NULL "
-        "OR current.source_payload IS DISTINCT FROM prior.source_payload) "
+        # A historical match may predate a changed reference or an application from another query.
+        "OR (current.section_name IN ('Trades','CashTransactions','ConversionRates','CorporateActions') "
+        "AND (latest_row.raw_record_id IS NULL OR (current.report_date_local IS DISTINCT FROM latest_row.report_date_local "
+        # Explicit Flex dates contain digits. Missing dates and placeholders can inherit a new statement day.
+        "AND COALESCE(current.source_payload->>'reportDate', '') !~ '[0-9]'))) "
+        "OR current.source_payload IS DISTINCT FROM "
+        "COALESCE(latest_row.source_payload, prior.source_payload, prior_position.source_payload)) "
         "ORDER BY current.created_at_utc ASC, current.raw_record_id ASC"
     )
     _RAW_ARTIFACT_REPLAY_CANDIDATE_QUERY = (
@@ -179,14 +230,8 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
                 "FROM raw_record raw JOIN raw_artifact artifact USING (raw_artifact_id) "
                 "JOIN ingestion_run owner ON owner.ingestion_run_id=raw.ingestion_run_id "
                 "LEFT JOIN ingestion_run completion ON completion.ingestion_run_id=artifact.completed_ingestion_run_id "
-                "CROSS JOIN LATERAL ("
-                "SELECT COALESCE(owner.ended_at_utc, owner.started_at_utc) AS applied_at_utc, "
-                "owner.ingestion_run_id AS applied_run_id WHERE owner.status='success' "
-                "UNION ALL SELECT COALESCE(completion.ended_at_utc, completion.started_at_utc), "
-                "completion.ingestion_run_id WHERE completion.status='success' "
-                "AND completion.ingestion_run_id<>owner.ingestion_run_id"
-                ") application "
-                "WHERE raw.account_id=:account_id "
+                + _SUCCESSFUL_APPLICATIONS
+                + "WHERE raw.account_id=:account_id "
                 "AND ((raw.section_name='Trades' AND raw.source_row_ref LIKE 'Trades:Trade:%') "
                 "OR (raw.section_name='CashTransactions' AND raw.source_row_ref LIKE 'CashTransactions:CashTransaction:%') "
                 "OR (raw.section_name='ConversionRates' AND raw.source_row_ref LIKE 'ConversionRates:ConversionRate:%') "
@@ -230,6 +275,27 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
             for row in rows
         ]
 
+    def db_raw_newer_open_positions_run(self, account_id: str, raw_artifact_id: UUID) -> UUID | None:
+        """Keep the newest dated valuation evidence when recovering an older artifact."""
+        sources = db_published_flex_sections_by_date(account_id, ("OpenPositions",)).cte("published_positions")
+        statement = text(
+            "SELECT DISTINCT position.ingestion_run_id FROM published_positions published "
+            "JOIN raw_artifact recovering ON recovering.report_date_local=published.report_date_local "
+            "JOIN raw_record position ON position.raw_artifact_id=published.raw_artifact_id "
+            "AND position.section_name=published.section_name "
+            "WHERE recovering.raw_artifact_id=:raw_artifact_id AND recovering.account_id=:account_id "
+            "AND (published.created_at_utc,published.raw_artifact_id) "
+            "> (recovering.created_at_utc,recovering.raw_artifact_id)"
+        ).columns().add_cte(sources)
+        try:
+            with db_connection_scope(self._engine) as connection:
+                rows = connection.execute(statement, {"raw_artifact_id": raw_artifact_id, "account_id": account_id}).scalars().all()
+        except SQLAlchemyError as error:
+            raise RuntimeError("newer OpenPositions source lookup failed") from error
+        if len(rows) > 1:
+            raise RuntimeError("published OpenPositions rows reference multiple ingestion runs")
+        return rows[0] if rows else None
+
     def db_raw_record_list_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
         """List raw rows for one ingestion run identity.
 
@@ -253,7 +319,11 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         )
 
     def db_raw_record_list_changed_for_run(self, ingestion_run_id: UUID) -> list[RawRecordForCanonicalMapping]:
-        """List raw rows that differ from their immediate prior ingestion version.
+        """List changed rows using applied event and same-date position evidence.
+
+        Canonical rows skip mapping only when the last successful application
+        establishes unchanged evidence in this query. Positions compare to one
+        whole published section for the date, including an explicitly empty one.
 
         Args:
             ingestion_run_id: Ingestion run identifier.
