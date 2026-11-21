@@ -54,8 +54,13 @@ def test_nav_history_uses_the_effective_equity_section_per_statement_day(databas
 
     earlier_statement = equity.split(b'<EquitySummaryByReportDateInBase reportDate="20260821"')[0]
     earlier_statement += b"</EquitySummaryInBase>"
-    adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b' reportDate="20260821">', b' reportDate="20260820">', 1)
-    adapter.payload_bytes = adapter.payload_bytes.replace(b"</FlexStatement>", earlier_statement + b"</FlexStatement>")
+    earlier_payload = _SEEDED_PAYLOAD.replace(b' reportDate="20260821">', b' reportDate="20260820">', 1)
+    for section in (b"Trades", b"OpenPositions", b"CashTransactions"):
+        start = earlier_payload.index(b"<" + section + b">")
+        closing = b"</" + section + b">"
+        end = earlier_payload.index(closing, start) + len(closing)
+        earlier_payload = earlier_payload[:start] + b"<" + section + b"/>" + earlier_payload[end:]
+    adapter.payload_bytes = earlier_payload.replace(b"</FlexStatement>", earlier_statement + b"</FlexStatement>")
     assert orchestrator.job_execute("ingestion_run").status == "success"
 
     adapter.payload_bytes = _SEEDED_PAYLOAD
@@ -70,3 +75,19 @@ def test_nav_history_uses_the_effective_equity_section_per_statement_day(databas
     assert [(point["date"], point["nav"]) for point in result["nav_history"]] == [
         (date(2026, 8, 20), Decimal("240")),
     ]
+
+
+def test_conflicting_current_equity_rows_cannot_publish_arbitrary_nav(database):  # noqa: F811
+    orchestrator, adapter, *_ = _harness(database)
+    original = b'<EquitySummaryByReportDateInBase reportDate="20260821" currency="USD" total="250"/>'
+    conflict = b'<EquitySummaryByReportDateInBase reportDate="08/21/2026" currency="USD" total="999"/>'
+    for rows in (original, original + conflict):
+        equity = b"<EquitySummaryInBase>" + rows + b"</EquitySummaryInBase>"
+        adapter.payload_bytes = _SEEDED_PAYLOAD.replace(b"</FlexStatement>", equity + b"</FlexStatement>")
+        assert orchestrator.job_execute("ingestion_run").status == "success"
+
+    report = db_account_insights(database, "INTEGRITY")
+    assert report["nav"]["total"] is None
+    assert report["nav"]["check"]["status"] == "not_comparable"
+    assert report["nav_history"] == [{"date": date(2026, 8, 21), "nav": None, "currency": None, "raw_id": None}]
+    assert len(report["sections"]["EquitySummaryInBase"]["raw_ids"]) == 2

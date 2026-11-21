@@ -1,5 +1,6 @@
 """Account insight accounting checks with synthetic broker data."""
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -36,6 +37,13 @@ def test_nav_missing_fx_or_date_does_not_match():
     rows[-1].payload.update(currency="USD")
     rows[0].payload.update(reportDate="20260917")
     assert AccountInsights(rows, []).nav()["check"]["status"] == "not_comparable"
+
+
+def test_nav_rejects_duplicate_normalized_base_cash_rows():
+    rows = sample() + [row("CashReport", currency=" base_summary ", endingCash="75")]
+    nav = AccountInsights(rows, []).nav()
+    assert nav["cash_and_positions"] is None
+    assert nav["check"]["status"] == "not_comparable"
 
 
 def test_duplicate_position_detail_does_not_double_count():
@@ -88,11 +96,35 @@ def test_review_summary_and_lot_rows_do_not_double_count():
 
 def test_review_history_normalizes_dates_and_preserves_newest_precedence():
     history = [row("EquitySummaryInBase", reportDate="09/18/2026", total="200"),
-               row("EquitySummaryInBase", reportDate="20260918", total="100"),
+               replace(row("EquitySummaryInBase", reportDate="20260918", total="100"), artifact_id="older-artifact"),
                row("EquitySummaryInBase", reportDate="20260901", total="50")]
     result = AccountInsights([], history).build()["nav_history"]
     assert [r["date"] for r in result] == [date(2026, 9, 1), date(2026, 9, 18)]
     assert result[-1]["nav"] == Decimal("200")
+
+
+def test_conflicting_same_artifact_nav_rows_leave_its_value_unknown():
+    rows = sample()
+    latest = rows[0]
+    conflict = replace(latest, raw_id="conflicting-raw", payload={**latest.payload, "reportDate": "09/18/2026", "total": "999"})
+    older = replace(latest, artifact_id="older-artifact", raw_id="older-raw")
+    report = AccountInsights([*rows, conflict], [latest, conflict, older]).build()
+
+    assert report["nav"]["date"] == date(2026, 9, 18)
+    assert report["nav"]["total"] is None
+    assert report["nav"]["cash_and_positions"] is None
+    assert report["nav"]["check"]["status"] == "not_comparable"
+    assert report["nav_history"] == [{"date": date(2026, 9, 18), "nav": None, "currency": None, "raw_id": None}]
+
+
+def test_identical_same_artifact_nav_rows_preserve_known_value():
+    rows = sample()
+    latest = rows[0]
+    duplicate = replace(latest, raw_id="duplicate-raw", payload={**latest.payload, "reportDate": "09/18/2026"})
+    report = AccountInsights([*rows, duplicate], [latest, duplicate]).build()
+    assert report["nav"]["total"] == Decimal("155")
+    assert report["nav"]["check"]["status"] == "matched"
+    assert report["nav_history"][0]["nav"] == Decimal("155")
 
 
 def test_missing_nav_component_cannot_match_even_when_remaining_values_balance():

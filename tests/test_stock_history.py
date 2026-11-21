@@ -87,6 +87,19 @@ _ROUNDING_PAYLOAD = ('''<FlexQueryResponse><FlexStatements count="1"><FlexStatem
 _NO_CASH_PAYLOAD = _PAYLOAD.replace(
     _PAYLOAD.split(b'<CashTransactions>')[1].split(b'</CashTransactions>')[0], b'',
 )
+
+
+def _with_statement_date(payload: bytes, day: str) -> bytes:
+    before, position_section = payload.split(b'<OpenPositions>', 1)
+    positions, after = position_section.split(b'</OpenPositions>', 1)
+    date_attribute = f'reportDate="{day}"'.encode()
+    return (
+        before.replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement ' + date_attribute + b'>')
+        + b'<OpenPositions>' + positions.replace(b'reportDate="20260821"', date_attribute)
+        + b'</OpenPositions>' + after
+    )
+
+
 _COMMISSION_FX_PAYLOAD = _NO_CASH_PAYLOAD.replace(b'ibCommission="-2"', b'ibCommission="-2" ibCommissionCurrency="GBP"').replace(
     b'<ConversionRates />', b'<ConversionRates><ConversionRate fromCurrency="GBP" toCurrency="USD" '
     b'reportDate="20260820" rate="1.5" /></ConversionRates>',
@@ -327,30 +340,19 @@ def test_current_stock_family_with_mixed_snapshot_dates_is_not_provisional(histo
     assert report['provisional'] is False
 
 
-def test_unused_valuation_row_date_does_not_invalidate_snapshot(history_database, monkeypatch):
+def test_wrong_valuation_row_date_preserves_the_published_snapshot(history_database):
     client, _, ids, engine = history_database
-    orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
+    orchestrator, adapter, *_ = _harness(engine, account='HISTORY')
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     adapter.payload_bytes = _PAYLOAD.replace(
         b'markPrice="130" multiplier="1" reportDate="20260821"',
         b'markPrice="130" multiplier="1" reportDate="20260820"',
     )
-    build = service.ledger_snapshot_build_and_persist
-
-    def fail_snapshot(**kwargs):
-        raise RuntimeError('failure after unused valuation row date correction')
-
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', fail_snapshot)
     assert orchestrator.job_execute('ingestion_run').status == 'failed'
-    report = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert report['totals'] == before['totals']
-    assert report['stale'] is False
-    assert report['provisional'] is False
-    monkeypatch.setattr(service, 'ledger_snapshot_build_and_persist', build)
-    assert orchestrator.job_execute('ingestion_run').status == 'success'
-    rebuilt = client.get(f"/reports/stock-history/{ids['101']}").json()
-    assert rebuilt['totals'] == before['totals']
-    assert rebuilt['provisional'] is False
+    with engine.connect() as connection:
+        failure = connection.scalar(text("SELECT error_code FROM ingestion_run WHERE status='failed'"))
+    assert failure == 'REPORT_CONTEXT_INVALID'
+    assert client.get(f"/reports/stock-history/{ids['101']}").json() == before
 
 
 def test_option_link_resolves_to_the_same_stock_family(history_database):
@@ -531,8 +533,8 @@ def test_failed_activity_import_preserves_history_until_retry(history_database, 
     orchestrator, adapter, _, _, service, _, _ = _harness(engine, account='HISTORY')
     new_cashflow = (f'<CashTransaction transactionID="21" conid="101" symbol="TEST" assetCategory="STK" '
                     f'type="Dividends" amount="7" currency="USD" reportDate="{activity_date}" />').encode()
-    adapter.payload_bytes = _PAYLOAD.replace(b'</CashTransactions>', new_cashflow+b'</CashTransactions>').replace(
-        b'<FlexStatement reportDate="20260821">', f'<FlexStatement reportDate="{activity_date}">'.encode(),
+    adapter.payload_bytes = _with_statement_date(
+        _PAYLOAD.replace(b'</CashTransactions>', new_cashflow+b'</CashTransactions>'), activity_date,
     )
 
     def fail_snapshot(**kwargs):
@@ -590,9 +592,11 @@ def test_failed_older_artifact_replay_preserves_latest_values_and_freshness(hist
     client, _, ids, engine = history_database
     harness = _harness(engine, account='HISTORY')
     orchestrator, adapter, _, _, service, _, _ = harness
-    adapter.payload_bytes = _PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"').replace(
-        b'tradePrice="100"', b'tradePrice="100" description="Latest execution description"',
-    ).replace(b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">')
+    adapter.payload_bytes = _with_statement_date(
+        _PAYLOAD.replace(b'markPrice="130"', b'markPrice="140"').replace(
+            b'tradePrice="100"', b'tradePrice="100" description="Latest execution description"',
+        ), '20260822',
+    )
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     before = client.get(f"/reports/stock-history/{ids['101']}").json()
     assert before['stale'] is False
@@ -1345,10 +1349,12 @@ def test_cashflow_only_source_is_cleared_after_instrument_correction(history_dat
     before = client.get(f"/reports/stock-history/{ids['201']}").json()
     assert Decimal(before['totals'][0]['realized_pnl']) == 5
     assert Decimal(before['positions'][0]['position_qty']) == 0
-    adapter.payload_bytes = payload.replace(
-        b'<CashTransaction transactionID="9" conid="201" symbol="FIRST"',
-        b'<CashTransaction transactionID="9" conid="202" symbol="SECOND"',
-    ).replace(b'<FlexStatement reportDate="20260821">', f'<FlexStatement reportDate="{statement_date}">'.encode())
+    adapter.payload_bytes = _with_statement_date(
+        payload.replace(
+            b'<CashTransaction transactionID="9" conid="201" symbol="FIRST"',
+            b'<CashTransaction transactionID="9" conid="202" symbol="SECOND"',
+        ), statement_date,
+    )
     assert orchestrator.job_execute('ingestion_run').status == 'success'
     for conid, expected in [('201', 0), ('202', 5)]:
         report = client.get(f'/reports/stock-history/{ids[conid]}').json()

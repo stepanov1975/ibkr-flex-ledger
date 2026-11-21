@@ -969,6 +969,9 @@ class _CanonicalRepositoryStub:
             raise RuntimeError("canonical artifact-row read failed")
         return self.artifact_rows
 
+    def db_raw_newer_open_positions_run(self, account_id: str, raw_artifact_id: UUID) -> UUID | None:
+        return None
+
     def db_raw_record_list_for_period(
         self,
         account_id: str,

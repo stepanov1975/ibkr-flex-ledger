@@ -97,6 +97,12 @@ def domain_flex_parse_local_date(value: str) -> date | None:
     return None
 
 
+def domain_flex_optional_date_matches(value: object | None, statement_date: date | None) -> bool:
+    """Accept an omitted date, otherwise compare with the declared statement day."""
+    supplied = domain_flex_normalize_optional_text(value)
+    return statement_date is None or supplied is None or domain_flex_parse_local_date(supplied) == statement_date
+
+
 def domain_flex_parse_timestamp_to_utc_iso(value: str) -> str | None:
     """Parse one Flex timestamp and normalize it to UTC ISO-8601.
 

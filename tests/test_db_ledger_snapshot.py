@@ -302,7 +302,7 @@ def test_open_position_read_includes_option_cost_fx_and_multiplier() -> None:
         "broker_unrealized_pnl": Decimal("-193"),
         "fx_rate_to_base": Decimal("1"),
         "multiplier": Decimal("100"),
-        "report_date_local": date(2026, 8, 20),
+        "report_date_local": "20260820",
     }])
     repository = _repository(connection)
 
@@ -342,7 +342,7 @@ def test_open_position_read_preserves_blank_optional_values_as_none() -> None:
         "broker_unrealized_pnl": None,
         "fx_rate_to_base": None,
         "multiplier": None,
-        "report_date_local": date(2026, 8, 20),
+        "report_date_local": None,
     }])
     repository = _repository(connection)
     row = repository.db_ledger_open_position_valuation_list_for_run(

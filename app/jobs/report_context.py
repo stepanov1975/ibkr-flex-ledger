@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Final
 
+from app.domain.flex_parsing import domain_flex_optional_date_matches
+
 from .flex_payload_validation import job_flex_parse_payload_with_statements
+from .raw_extraction import RawPayloadExtractionResult
 
 
 REPORT_CONTEXT_INVALID_CODE: Final[str] = "REPORT_CONTEXT_INVALID"
@@ -68,8 +71,24 @@ def job_validate_report_context(
     return broker_account_id
 
 
+def job_validate_open_position_dates(extraction: RawPayloadExtractionResult) -> None:
+    """Require explicit OpenPosition dates to match the statement's business date."""
+    statement_date = extraction.report_date_local
+    if statement_date is None:
+        return
+    for row in extraction.rows:
+        if not row.source_row_ref.startswith("OpenPositions:OpenPosition:"):
+            continue
+        supplied = row.source_payload.get("reportDate")
+        if not domain_flex_optional_date_matches(supplied, statement_date):
+            raise ReportContextError(
+                f"{row.source_row_ref} reportDate={supplied!r} differs from statement date {statement_date}"
+            )
+
+
 __all__ = [
     "REPORT_CONTEXT_INVALID_CODE",
     "ReportContextError",
+    "job_validate_open_position_dates",
     "job_validate_report_context",
 ]

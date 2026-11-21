@@ -1036,6 +1036,26 @@ def test_snapshot_preserves_missing_optional_broker_values() -> None:
     assert snapshot.provisional is True
 
 
+@pytest.mark.parametrize("report_date", [None, date(2026, 8, 19)])
+def test_snapshot_requires_the_report_date_of_position_evidence(report_date: date | None) -> None:
+    instrument_id = uuid4()
+    repository = _RepositoryStub(
+        trades=[_trade(instrument_id, "BUY", "2", "10")],
+        valuations=[replace(_broker_position(instrument_id, "2", mark="12"), report_date_local=report_date)],
+    )
+
+    _snapshot_service(repository).ledger_snapshot_build_and_persist(
+        "U_TEST", str(uuid4()), "2026-08-20", "USD",
+    )
+
+    snapshot, = repository.snapshot_requests.requests
+    assert snapshot.provisional is (report_date is not None)
+    assert Decimal(snapshot.unrealized_pnl) == (4 if report_date is None else 0)
+    assert snapshot.valuation_source == (
+        "openpositions_mark_price" if report_date is None else "openpositions_summary_unavailable"
+    )
+
+
 def test_snapshot_converts_broker_cost_and_unrealized_to_functional_currency() -> None:
     instrument_id = uuid4()
     repository = _RepositoryStub(
@@ -1464,7 +1484,8 @@ def test_later_distribution_fx_context_does_not_flow_through_an_earlier_transfer
     distribution = replace(transfer, event_corp_action_id=UUID(int=1), source_instrument_id=None,
                            destination_instrument_id=old, report_date_local=date(2026, 8, 21),
                            quantity="1", cost_basis="10", currency="EUR")
-    repository = _RepositoryStub(trades=[opening], valuations=[_broker_position(new, "8")])
+    position = replace(_broker_position(new, "8"), report_date_local=date(2026, 8, 21))
+    repository = _RepositoryStub(trades=[opening], valuations=[position])
     repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [distribution, transfer]
     _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", str(uuid4()), "2026-08-21", "USD")
     snapshot = next(row for row in repository.snapshot_requests.requests if row.instrument_id == str(new))
@@ -1486,8 +1507,9 @@ def test_source_trades_on_or_after_transfer_do_not_contaminate_destination_fx(tr
         destination_instrument_id=new, report_date_local=date(2026, 8, 20), quantity="8",
         cost_basis=None, currency="USD",
     )
-    repository = _RepositoryStub(trades=[opening, later],
-                                 valuations=[_broker_position(old, "1"), _broker_position(new, "8")])
+    valuations = [replace(_broker_position(instrument_id, quantity), report_date_local=date(2026, 8, 21))
+                  for instrument_id, quantity in ((old, "1"), (new, "8"))]
+    repository = _RepositoryStub(trades=[opening, later], valuations=valuations)
     repository.db_ledger_security_movement_list_for_account = lambda **kwargs: [transfer]
     _snapshot_service(repository).ledger_snapshot_build_and_persist("U_TEST", str(uuid4()), "2026-08-21", "USD")
     snapshots = {row.instrument_id: row for row in repository.snapshot_requests.requests}

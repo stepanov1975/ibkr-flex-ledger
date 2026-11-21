@@ -278,7 +278,7 @@ def test_main_page_hides_zero_positions_by_default_without_filtering_totals() ->
     assert '<input id="hide-zero-positions" type="checkbox" checked>' in response.text
     assert "const hideZero=el('hide-zero-positions').checked" in response.text
     assert "if(hideZero&&Number(item.position_qty)===0)continue" in response.text
-    assert "for(const item of latestPnlItems){realized+=Number(item.realized_pnl)" in response.text
+    assert "result.totals_by_currency.map" in response.text
     assert "el('hide-zero-positions').onchange=renderPnl" in response.text
 
 
@@ -382,6 +382,8 @@ def test_operations_page_preserves_existing_dashboard_and_links_to_portfolio() -
     assert "Corporate-action review queue" in response.text
     assert "Recent ingestion runs" in response.text
     assert 'href="/ui"' in response.text
+    assert "json('/reports/pnl/by-instrument')" in response.text
+    assert "json('/reports/pnl/latest')" in response.text
 
 
 def test_portfolio_shows_provisional_rows_and_totals() -> None:
@@ -402,13 +404,21 @@ def test_portfolio_shows_provisional_rows_and_totals() -> None:
     context.eval("""
         let row={symbol:'TEST',asset_category:'STK',position_qty:'1',currency:'USD',report_date_local:'2026-08-21',
           realized_pnl:'10',unrealized_pnl:'5',total_pnl:'15',provisional:true,unresolved_case_count:1};
-        json=async()=>({items:[row]});loadPnl();
+        let requested;
+        json=async url=>{
+          requested=url;
+          return {items:[row],report_date_local:row.report_date_local,provisional:row.provisional,totals_by_currency:[
+            {currency:'EUR',realized_pnl:'-1.005',unrealized_pnl:'0',total_pnl:'-1.005'},
+            {currency:'USD',realized_pnl:'9007199254740992.01',unrealized_pnl:'5',total_pnl:'9007199254740997.01'}]};
+        };loadPnl();
     """)
     while context.execute_pending_job():
         pass
     assert "Provisional" in context.eval("nodes.pnl.children[0].children[0].textContent")
     assert "Provisional" in context.eval("nodes['pnl-state'].textContent")
     assert context.eval("nodes['total-pnl'].className") == "metric bad"
+    assert context.eval("requested") == "/reports/pnl/latest"
+    assert context.eval("nodes['total-pnl'].textContent.replaceAll(',','')") == "-EUR 1.01 · USD 9007199254740997.01"
     context.eval("row.provisional=false;row.unresolved_case_count=0;loadPnl()")
     while context.execute_pending_job():
         pass

@@ -26,6 +26,9 @@ the check explanation. Cash and MTM checks also run when OpenPositions is absent
 The account-value comparison requires one summary row for every reported security.
 A security with only lot detail makes the calculated value unavailable and the check
 not comparable, even when other securities have summaries.
+The asset-class and quotation-currency allocations also require a unique summary
+for each security in the group. A missing or duplicate summary leaves that group's
+total unavailable and prevents a broker asset-class weight match.
 
 ## Understanding checks
 
@@ -40,12 +43,12 @@ Calculation checks show exceptions first. Enable **Show matched checks** for the
 full list. Instrument links open existing activity pages. **Report sources** shows
 selected statement dates and immutable source identities.
 
-FIFO quantities come from signed remaining lots, not broker-authoritative snapshot
-quantities. Basis and P&L checks require fresh inputs. Period gains require exact
-opening/closing snapshots with cash income removed; missing opening values are
-not zero. MTM component checks and lending identities are broker arithmetic, not
-independent ledger reconstructions. Cash checks use reported opening cash plus
-canonical transactions; unsupported FX cash legs remain not comparable.
+Signed remaining lots supply the FIFO quantities. Basis and P&L checks require
+fresh USD inputs. Period gains require one consistent statement period and exact
+opening and closing snapshots. The comparison removes cash income using the
+snapshot's conversion rules. MTM component checks and lending identities verify
+broker arithmetic. Cash checks use reported opening cash plus canonical
+transactions. Unsupported FX cash legs make the cash comparison unavailable.
 
 ## Distinctions
 
@@ -66,8 +69,11 @@ canonical transactions; unsupported FX cash legs remain not comparable.
 Each section selects a whole successful report version. A newer same-day report
 replaces that section, including an explicitly empty section. Omitted sections
 can retain older dates; incompatible dates do not produce a match. NAV history
-normalizes dates and prefers the newest successful source. Historical accruals
-support payment checks without summing repeated snapshots.
+normalizes dates and prefers the newest successful source. Conflicting NAV rows
+for a normalized date within its selected artifact leave that value unavailable.
+Historical accruals support payment checks without summing repeated snapshots.
+Commission coverage requires one consistent CashReport period in the same
+artifact as the detail rows.
 
 A commission detail with a unique trade and security identity counts toward
 coverage even if the two records name different commission currencies. The

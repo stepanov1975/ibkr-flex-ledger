@@ -562,6 +562,8 @@ def test_upgrade_reclassifies_only_incompatible_legacy_splits(database, split_ca
         assert c.scalar(text("SELECT provisional FROM pnl_snapshot_daily")) is manual
     harness[1].payload_bytes = harness[1].payload_bytes.replace(
         b'<FlexStatement reportDate="20260821">', b'<FlexStatement reportDate="20260822">',
+    ).replace(
+        b'reportDate="20260821" position="3"', b'reportDate="20260822" position="3"',
     )
     assert harness[0].job_execute("ingestion_run").status == "success"
 

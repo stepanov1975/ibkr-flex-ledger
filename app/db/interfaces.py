@@ -589,6 +589,9 @@ class RawPersistenceRepositoryPort(Protocol):
 class RawRecordReadRepositoryPort(Protocol):
     """Port definition for raw-row reads used by canonical mapping workflows."""
 
+    def db_raw_newer_open_positions_run(self, account_id: str, raw_artifact_id: UUID) -> UUID | None:
+        """Return the raw-row owner of a newer published OpenPositions section for the same date."""
+
     def db_raw_record_list_successful_events_for_account(
         self, account_id: str,
     ) -> list[RawRecordForCanonicalMapping]:

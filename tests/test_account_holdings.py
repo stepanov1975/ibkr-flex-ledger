@@ -62,3 +62,36 @@ def test_concentration_zero_nav_and_duplicate_rows_are_unknown():
     assert account_concentration([nav, position])["holdings"][0]["calculated_percent"] is None
     nav.payload["total"] = "100"
     assert all(r["value_usd"] is None for r in account_concentration([nav, position, position])["holdings"])
+
+
+def test_lot_only_holding_makes_its_allocation_groups_unknown():
+    from app.analytics.account_holdings import account_concentration
+
+    report = account_concentration([
+        row("EquitySummaryInBase", total="1000", currency="USD", reportDate="20260918"),
+        row("OpenPositions", conid="1", symbol="STOCK", assetCategory="STK", currency="USD",
+            positionValue="100", percentOfNAV="100"),
+        row("OpenPositions", conid="2", symbol="LOT_ONLY", assetCategory="STK", currency="USD",
+            positionValue="200", levelOfDetail="LOT"),
+        row("OpenPositions", conid="3", symbol="OPTION", assetCategory="OPT", currency="EUR",
+            positionValue="50", percentOfNAV="100", fxRateToBase="2"),
+    ])
+
+    holdings = {r["symbol"]: r for r in report["holdings"]}
+    assert holdings["STOCK"]["calculated_percent"] == D("10")
+    assert holdings["STOCK"]["check"]["status"] == "not_comparable"
+    assert holdings["LOT_ONLY"]["value_usd"] is None
+    assert holdings["OPTION"]["check"]["status"] == "matched"
+    assert {r["asset_category"]: r["value_usd"] for r in report["asset_allocation"]} == {
+        "OPT": D("100"), "STK": None,
+    }
+    assert {r["currency"]: r["value_usd"] for r in report["currency_allocation"]} == {
+        "EUR": D("100"), "USD": None,
+    }
+
+
+def test_lending_uses_normalized_position_summary():
+    rows = [row("NetStockPositionSummary", conid="1", sharesAtIb="100"),
+            row("OpenPositions", conid="1", position="100", levelOfDetail=" summary "),
+            row("OpenPositions", conid="1", position="50", levelOfDetail="LOT")]
+    assert account_lending(rows)["holdings"][0]["holding_check"]["status"] == "matched"

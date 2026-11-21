@@ -9,6 +9,10 @@ and profit or loss.
 A whole named section from a successfully imported Flex report. It may be
 explicitly empty, while an omitted section is absent.
 
+**Broker position summary**:
+An IBKR OpenPositions row for a security's total holding on the statement date.
+Lot detail describes individual lots and cannot stand in for the security total.
+
 **Snapshot**:
 A dated record of an instrument's holdings, cost basis, and realized and unrealized
 profit or loss, expressed in the reporting currency.

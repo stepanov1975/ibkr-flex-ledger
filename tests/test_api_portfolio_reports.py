@@ -86,6 +86,9 @@ class _Portfolio:
             provisional=False,
         )]
 
+    def db_report_latest_pnl_by_instrument(self, account_id):
+        return self.db_report_pnl_by_instrument(account_id, None, None, None)
+
     def db_report_portfolio_summary(self, account_id):
         _ = account_id
         return SimpleNamespace(
@@ -145,13 +148,9 @@ class _Portfolio:
             profit_percent="9.48905109",
         )
 
-    def db_reconciliation_missing_sections(self, account_id, date_from, date_to):
-        _ = (account_id, date_from, date_to)
-        return []
-
-    def db_reconciliation_sources(self, account_id, date_from, date_to, instrument_id):
+    def db_report_reconciliation(self, account_id, date_from, date_to, instrument_id):
         _ = (account_id, date_from, date_to, instrument_id)
-        return [ReconciliationSourceRecord(
+        return [], [ReconciliationSourceRecord(
             report_date_local=date(2026, 8, 21), instrument_id=self.instrument_id, conid="123", symbol="TEST",
             currency="USD", position_qty="2", realized_pnl="10", unrealized_pnl="5", fees="1",
             withholding_tax="0", broker_position_qty="2", broker_realized_pnl="10",
@@ -188,6 +187,27 @@ def test_report_csv_v1_column_order_is_exact() -> None:
     assert instrument.headers["x-schema-version"] == "v1"
     assert instrument.text.splitlines()[0] == "report_date_local,instrument_id,conid,symbol,currency,position_qty,cost_basis,realized_pnl,unrealized_pnl,total_pnl,provisional"
     assert label.text.splitlines()[0] == "report_date_local,label_id,label_name,instrument_count,realized_pnl,unrealized_pnl,total_pnl,fees,withholding_tax,provisional"
+
+
+def test_latest_pnl_reports_exact_totals_in_each_currency(monkeypatch) -> None:
+    repository = _Portfolio()
+    sample, *rest = repository.db_report_latest_pnl_by_instrument("U1")
+    rows = [
+        replace(sample, realized_pnl="9007199254740992.01", total_pnl="9007199254740997.01"),
+        replace(rest[0], realized_pnl="0.02", total_pnl="-4.98"),
+        replace(rest[2], currency="EUR", realized_pnl="-1.23", total_pnl="-1.23"),
+    ]
+    monkeypatch.setattr(repository, "db_report_latest_pnl_by_instrument", lambda account_id: rows)
+    response = _client(repository).get("/reports/pnl/latest")
+    assert response.status_code == 200
+    report = response.json()
+    assert report["report_date_local"] == "2026-08-21"
+    assert report["provisional"] is True
+    assert report["totals_by_currency"] == [
+        {"currency": "EUR", "realized_pnl": "-1.23", "unrealized_pnl": "0", "total_pnl": "-1.23"},
+        {"currency": "USD", "realized_pnl": "9007199254740992.03", "unrealized_pnl": "0", "total_pnl": "9007199254740992.03"},
+    ]
+    assert [item["symbol"] for item in report["items"]] == ["TEST", "SHORT", "MISSING"]
 
 
 def test_report_json_uses_boolean_status_fields() -> None:

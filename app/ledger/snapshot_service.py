@@ -8,12 +8,11 @@ from decimal import Decimal
 from enum import Enum
 from uuid import NAMESPACE_URL, uuid5
 
-from app.domain.fx_rates import select_conversion_rate
+from app.domain.fx_rates import ConversionRateHistory
 
 from app.db import (
     LedgerCashflowRecord,
     LedgerCorporateActionRecord,
-    LedgerFxRateRecord,
     LedgerOpenPositionValuationRecord,
     LedgerSnapshotRepositoryPort,
     LedgerTradeFillRecord,
@@ -260,11 +259,11 @@ class StockLedgerSnapshotService:
             required_currencies.update(row.currency for row in open_position_valuation_rows)
             fx_currencies = tuple(sorted(required_currencies))
 
-        fx_rate_rows = self._repository.db_ledger_fx_rate_list_for_account(
+        fx_rates = ConversionRateHistory(self._repository.db_ledger_fx_rate_list_for_account(
             account_id=normalized_account_id,
             through_report_date_local=normalized_report_date,
             currencies=fx_currencies,
-        )
+        ))
         corporate_action_reader = getattr(self._repository, "db_ledger_corporate_action_list_for_account", None)
         corporate_action_rows = (
             corporate_action_reader(
@@ -328,7 +327,7 @@ class StockLedgerSnapshotService:
                     currency=trade.currency,
                     functional_currency=normalized_functional_currency,
                     report_date_local=trade.report_date_local,
-                    fx_rate_rows=fx_rate_rows,
+                    fx_rates=fx_rates,
                     trade=trade,
                     fx_dependencies=input_fx_dependencies,
                 )
@@ -344,7 +343,7 @@ class StockLedgerSnapshotService:
                         currency=commission_currency,
                         functional_currency=normalized_functional_currency,
                         report_date_local=trade.report_date_local,
-                        fx_rate_rows=fx_rate_rows,
+                        fx_rates=fx_rates,
                         fx_dependencies=input_fx_dependencies,
                     )
                     input_fx_sources.add(commission_fx_source)
@@ -402,7 +401,7 @@ class StockLedgerSnapshotService:
             if movement.source_instrument_id is None and basis is not None and basis != 0:
                 movement_fx, movement_fx_source = self._resolve_fx_rate(
                     currency=movement_currencies[movement.event_corp_action_id], functional_currency=normalized_functional_currency,
-                    report_date_local=movement.report_date_local, fx_rate_rows=fx_rate_rows,
+                    report_date_local=movement.report_date_local, fx_rates=fx_rates,
                     fx_dependencies=input_fx_dependencies,
                 )
                 input_fx_sources.add(movement_fx_source)
@@ -447,7 +446,7 @@ class StockLedgerSnapshotService:
                     currency=cashflow.currency,
                     functional_currency=normalized_functional_currency,
                     report_date_local=cashflow.report_date_local,
-                    fx_rate_rows=fx_rate_rows,
+                    fx_rates=fx_rates,
                     fx_dependencies=fx_dependencies if uses_conversion else None,
                 )
                 if cashflow_fx_rate is None:
@@ -499,7 +498,7 @@ class StockLedgerSnapshotService:
                         currency=instrument_trades[-1].currency,
                         functional_currency=normalized_functional_currency,
                         report_date_local=parsed_report_date,
-                        fx_rate_rows=fx_rate_rows,
+                        fx_rates=fx_rates,
                         fx_dependencies=fx_dependencies,
                     )
                     fx_sources.add(mark_fx_source)
@@ -511,7 +510,10 @@ class StockLedgerSnapshotService:
                 unrealized_pnl = mark_price_base * fifo_result.position_quantity - sum(
                     (lot.cost_basis_remaining for lot in fifo_result.open_lots), Decimal("0"),
                 )
-            elif valuation_record is not None and valuation_record.position_qty is None:
+            elif valuation_record is not None and (
+                valuation_record.position_qty is None
+                or (valuation_record.report_date_local is not None and valuation_record.report_date_local != parsed_report_date)
+            ):
                 snapshot_cost_basis = None
                 missing_valuation = True
                 valuation_source = OPEN_POSITIONS_SUMMARY_UNAVAILABLE
@@ -563,7 +565,7 @@ class StockLedgerSnapshotService:
                                 currency=valuation_record.currency,
                                 functional_currency=normalized_functional_currency,
                                 report_date_local=parsed_report_date,
-                                fx_rate_rows=fx_rate_rows,
+                                fx_rates=fx_rates,
                                 fx_dependencies=fx_dependencies if uses_valuation_fx else None,
                             )
                     fx_sources.add(valuation_fx_source)
@@ -783,7 +785,7 @@ class StockLedgerSnapshotService:
         currency: str,
         functional_currency: str,
         report_date_local: date,
-        fx_rate_rows: list[LedgerFxRateRecord],
+        fx_rates: ConversionRateHistory,
         trade: LedgerTradeFillRecord | None = None,
         fx_dependencies: dict[tuple[str, str, date], str | None] | None = None,
     ) -> tuple[Decimal | None, str]:
@@ -805,7 +807,7 @@ class StockLedgerSnapshotService:
                 if derived_rate > Decimal("0"):
                     return derived_rate, "trade_net_cash_ratio"
 
-        selected = select_conversion_rate(normalized_currency, normalized_functional_currency, report_date_local, fx_rate_rows)
+        selected = fx_rates.select(normalized_currency, normalized_functional_currency, report_date_local)
         selected_rate = self._positive_decimal_or_none(selected.fx_rate) if selected else None
         if fx_dependencies is not None:
             fx_dependencies[normalized_currency, normalized_functional_currency, report_date_local] = (

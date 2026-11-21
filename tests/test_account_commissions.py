@@ -56,3 +56,13 @@ def test_currency_conflict_counts_present_detail_and_explains_both_currencies():
     assert report["missing_detail_executions"] == 0
     assert check["status"] == "not_comparable"
     assert "ILS" in check["reason"] and "USD" in check["reason"]
+
+
+def test_conflicting_cash_period_leaves_commission_coverage_unknown():
+    rows = [detail(), row("CashReport", currency="USD", fromDate="20260901", toDate="20260918"),
+            row("CashReport", currency="EUR", fromDate="20260902", toDate="20260918")]
+    report = account_commissions(rows, [trade()])
+    assert report["covered_executions"] is None
+    assert report["commissioned_executions"] is None
+    assert report["missing_detail_executions"] is None
+    assert report["totals"][0]["total"] == D("-3")

@@ -1,9 +1,10 @@
 """Broker holdings, securities lending and cash visibility."""
 
+from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
-from .account_insights import AccountInsights, InsightRow, insight_check, insight_decimal, insight_sum
+from .account_insights import AccountInsights, InsightRow, insight_check, insight_decimal, insight_sum, position_fx_rate
 
 
 def account_lending(rows: list[InsightRow]) -> dict[str, Any]:
@@ -18,9 +19,9 @@ def account_lending(rows: list[InsightRow]) -> dict[str, Any]:
                                       ("sharesAtIb", "sharesBorrowed", "sharesLent", "netShares")]
         magnitude = abs(lent) if lent is not None else None
         percent = magnitude / owned * 100 if magnitude is not None and owned is not None and owned > 0 else None
-        matches = [r for r in source.section("OpenPositions") if r.payload.get("conid") == p["conid"]
-                   and r.payload.get("levelOfDetail", "SUMMARY") == "SUMMARY" and r.report_date == row.report_date]
-        position = insight_decimal(matches[0].payload.get("position")) if len(matches) == 1 else None
+        evidence = source.open_positions.get(str(p["conid"]).strip())
+        summary = evidence.summary if evidence else None
+        position = insight_decimal(summary.payload.get("position")) if summary and summary.report_date == row.report_date else None
         holdings.append({"symbol": p.get("symbol"), "conid": p["conid"], "date": row.report_date,
                          "owned": owned, "borrowed": borrowed, "lent": magnitude, "lent_signed": lent,
                          "net": net, "lent_percent": percent, "raw_id": row.raw_id,
@@ -60,31 +61,33 @@ def account_concentration(rows: list[InsightRow]) -> dict[str, Any]:
     source = AccountInsights(rows, [])
     nav = source.nav()
     total = nav["total"] if nav else None
-    holdings = []
-    positions = source.section("OpenPositions")
-    summaries = [r for r in positions if r.payload.get("conid")
-                 and r.payload.get("levelOfDetail", "SUMMARY") == "SUMMARY"
-                 and r.payload.get("assetCategory") not in ("CASH", "FX")]
-    for row in summaries:
-        p = row.payload
-        value, rate = insight_decimal(p.get("positionValue")), insight_decimal(p.get("fxRateToBase"))
-        currency = str(p.get("currency") or "").strip().upper()
-        if currency == "USD":
-            rate = Decimal("1")
-        unique = sum(r.payload["conid"] == p["conid"] for r in summaries) == 1
-        base = value * rate if unique and value is not None and rate is not None and rate > 0 else None
-        aligned = nav and nav["currency"] == "USD" and nav["date"] == row.report_date
-        percent = base / total * 100 if aligned and base is not None and total is not None and total > 0 else None
-        broker_percent = insight_decimal(p.get("percentOfNAV"))
-        holdings.append({"symbol": p.get("symbol"), "conid": p["conid"], "asset_category": p.get("assetCategory"),
-                         "currency": currency, "date": row.report_date, "value_usd": base, "class_percent": None,
-                         "broker_percent": broker_percent, "calculated_percent": percent, "raw_id": row.raw_id,
-                         "check": insight_check("Broker asset-class weight (%)", broker_percent, None,
-                                                "Asset-class identity is required for the broker percentage check.")})
+    holdings: list[dict[str, Any]] = []
+    assets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_currency: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for conid, evidence in source.open_positions.items():
+        summary = evidence.summary
+        for row in evidence.summaries or evidence.rows[:1]:
+            p = row.payload
+            value, rate = insight_decimal(p.get("positionValue")), position_fx_rate(p)
+            category = str(p.get("assetCategory") or "").strip().upper()
+            currency = str(p.get("currency") or "").strip().upper()
+            base = value * rate if summary and value is not None and rate is not None else None
+            aligned = nav and nav["currency"] == "USD" and nav["date"] == row.report_date
+            percent = base / total * 100 if aligned and base is not None and total is not None and total > 0 else None
+            broker_percent = insight_decimal(p.get("percentOfNAV")) if evidence.summaries else None
+            holding = {"symbol": p.get("symbol"), "conid": conid, "asset_category": category or None,
+                       "currency": currency, "date": row.report_date, "value_usd": base, "class_percent": None,
+                       "broker_percent": broker_percent, "calculated_percent": percent, "raw_id": row.raw_id,
+                       "check": insight_check("Broker asset-class weight (%)", broker_percent, None,
+                                              "Asset-class identity is required for the broker percentage check.")}
+            holdings.append(holding)
+            if category:
+                assets[category].append(holding)
+            if currency:
+                by_currency[currency].append(holding)
     holdings.sort(key=lambda r: (r["value_usd"] is None, -abs(r["value_usd"] or Decimal("0")), str(r["symbol"])))
     allocations = []
-    for category in sorted({r["asset_category"] for r in holdings if r["asset_category"]}):
-        selected = [r for r in holdings if r["asset_category"] == category]
+    for category, selected in sorted(assets.items()):
         class_total = insight_sum([r["value_usd"] for r in selected])
         for holding in selected:
             class_percent = (holding["value_usd"] / class_total * 100
@@ -95,8 +98,7 @@ def account_concentration(rows: list[InsightRow]) -> dict[str, Any]:
         allocations.append({"asset_category": category, "value_usd": class_total,
                             "percent": insight_sum([r["calculated_percent"] for r in selected])})
     currencies = []
-    for currency in sorted({r["currency"] for r in holdings if r["currency"]}):
-        selected = [r for r in holdings if r["currency"] == currency]
+    for currency, selected in sorted(by_currency.items()):
         currencies.append({"currency": currency, "value_usd": insight_sum([r["value_usd"] for r in selected]),
                            "percent": insight_sum([r["calculated_percent"] for r in selected])})
     return {"holdings": holdings, "asset_allocation": allocations, "currency_allocation": currencies,

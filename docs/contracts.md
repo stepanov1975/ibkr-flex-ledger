@@ -87,6 +87,12 @@ For an exact FIFO/broker quantity match, broker mark, positive multiplier, and F
 to compute economic unrealized P&L; priorities 2 and 3 apply only outside completed broker
 position authority.
 
+When a statement declares a business date, explicit OpenPositions row dates must match
+it. A missing optional row date inherits the statement date. Ingestion retains and rejects
+reports with contradictory row dates. Historical rebuilds flag affected snapshots provisional
+and leave their broker valuation unavailable. Portfolio, account insights, and reconciliation
+withhold affected broker position comparisons from inconsistent published sections.
+
 ### 2.2 Execution FX Fallback
 
 If currency equals functional currency after trimming and uppercasing, return `1.0`
