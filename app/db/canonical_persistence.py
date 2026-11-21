@@ -125,8 +125,9 @@ class SQLAlchemyCanonicalPersistenceService(CanonicalPersistenceRepositoryPort, 
         "AND ((current.section_name='CorporateActions' AND current.source_payload->>'type' IN ('IC','SO','SPINOFF')) "
         # A historical match may predate a changed reference or an application from another query.
         "OR (current.section_name IN ('Trades','CashTransactions','ConversionRates','CorporateActions') "
-        "AND (latest_row.raw_record_id IS NULL OR (COALESCE(BTRIM(current.source_payload->>'reportDate'), '')='' "
-        "AND current.report_date_local IS DISTINCT FROM latest_row.report_date_local))) "
+        "AND (latest_row.raw_record_id IS NULL OR (current.report_date_local IS DISTINCT FROM latest_row.report_date_local "
+        # Explicit Flex dates contain digits. Missing dates and placeholders can inherit a new statement day.
+        "AND COALESCE(current.source_payload->>'reportDate', '') !~ '[0-9]'))) "
         "OR current.source_payload IS DISTINCT FROM "
         "COALESCE(latest_row.source_payload, prior.source_payload, prior_position.source_payload)) "
         "ORDER BY current.created_at_utc ASC, current.raw_record_id ASC"

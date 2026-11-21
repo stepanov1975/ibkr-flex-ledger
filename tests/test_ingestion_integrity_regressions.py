@@ -289,11 +289,16 @@ def test_recovery_and_replay_use_newest_dated_position_section(database, monkeyp
         assert connection.execute(valuation_query).one() == (expected, True)
 
 
-def test_equal_conversion_rates_with_inherited_dates_remain_separate_events(database):
+@pytest.mark.parametrize(
+    'date_attribute', [b'', b' reportDate="-"', b' reportDate="--"', b' reportDate="N/A"', b' reportDate="&#9;N/A&#160;"'],
+    ids=['omitted', 'dash', 'double-dash', 'n-a', 'padded-n-a'],
+)
+def test_equal_conversion_rates_with_inherited_dates_remain_separate_events(database, date_attribute):
     orchestrator, adapter, *_ = _harness(database)
     initial = _SEEDED_PAYLOAD.replace(b'reportDate="20260821" position="2"', b'position="2"').replace(
         b'<ConversionRates />',
-        b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" rate="1.1" /></ConversionRates>',
+        b'<ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" rate="1.1"'
+        + date_attribute + b' /></ConversionRates>',
     )
     for report_date in (b'20260821', b'20260822'):
         adapter.payload_bytes = initial.replace(
